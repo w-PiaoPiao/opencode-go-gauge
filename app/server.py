@@ -65,7 +65,7 @@ def _fetch_usd_cny() -> float:
         import urllib.request
         req = urllib.request.Request(
             "https://open.er-api.com/v6/latest/USD",
-            headers={"User-Agent": "GoUsage/1.0", "Accept": "application/json"},
+            headers={"User-Agent": "GoGauge/1.0", "Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -439,6 +439,33 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         )
         return
 
+    if route == "/api/usage/sessions" and method == "GET":
+        try:
+            page = max(1, int(query.get("page", ["1"])[0]))
+        except ValueError:
+            page = 1
+        try:
+            page_size = max(1, min(int(query.get("page_size", ["10"])[0]), 50))
+        except ValueError:
+            page_size = 10
+        days_raw = query.get("days", [""])[0]
+        try:
+            days = max(1, min(int(days_raw), 365)) if days_raw else None
+        except ValueError:
+            days = None
+        records, total = db.session_stats_page(page, page_size, days)
+        _json_response(
+            handler,
+            {
+                "records": records,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "filter": {"days": days},
+            },
+        )
+        return
+
     if route == "/api/settings" and method == "GET":
         _json_response(handler, db.get_settings())
         return
@@ -457,7 +484,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server_version = "GoUsage/1.0"
+    server_version = "GoGauge/1.0"
 
     def log_message(self, fmt: str, *args: Any) -> None:  # 静默日志
         pass

@@ -4,7 +4,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================
-echo  GoUsage 打包脚本 (PyInstaller 单文件 exe)
+echo  GoGauge 打包脚本 (PyInstaller 单文件 exe)
 echo ============================================
 echo.
 
@@ -12,10 +12,10 @@ echo [1/3] 安装依赖...
 pip install -q pywebview pyinstaller || goto :err
 
 echo [2/3] 打包单文件 exe (无控制台窗口, logo 图标)...
-pyinstaller --noconfirm --clean --onefile --noconsole --name GoUsage ^
+pyinstaller --noconfirm --clean --onefile --noconsole --name GoGauge ^
   --add-data "app\web;app\web" ^
   --add-data "assets;assets" ^
-  --icon assets\GoUsage.ico ^
+  --icon assets\GoGauge.ico ^
   --collect-submodules webview ^
   --hidden-import clr ^
   --hidden-import pythonnet ^
@@ -24,7 +24,7 @@ pyinstaller --noconfirm --clean --onefile --noconsole --name GoUsage ^
 
 echo [3/3] 完成!
 echo.
-echo 输出: dist\GoUsage.exe
+echo 输出: dist\GoGauge.exe
 echo 数据目录: 首次运行会在 exe 同目录创建 data\ 文件夹
 echo.
 pause

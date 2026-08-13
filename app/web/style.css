@@ -1,4 +1,4 @@
-/* GoUsage 正式版 - 晨雾紫 + Data-Dense Dashboard */
+/* GoGauge 正式版 - 晨雾紫 + Data-Dense Dashboard */
 :root {
   --bg: #f7f6f4;
   --card: #ffffff;
@@ -98,6 +98,24 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .page { height: 100%; overflow: hidden; animation: fade .18s ease; }
 /* overlay 滚动条: 悬浮不占布局宽度, 保证左右空白对称 */
 #page-stats, #page-settings { overflow-y: auto; overflow-y: overlay; }
+
+/* 记录页: 两卡片等高 flex 布局, 底部剩余空间一致; 极小窗口兜底滚动 */
+#page-records { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; overflow-y: overlay; }
+#page-records .card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#page-records .tbl { flex: 1; height: 100%; }
+#page-records .tbl tbody tr { height: calc((100% - 28px) / 7); }
+#page-records .pager { flex-shrink: 0; }
+
+/* 两表统一列宽模板: 上下表头垂直对齐, 形成连贯网格 */
+#page-records .tbl { table-layout: fixed; }
+#page-records .tbl th, #page-records .tbl td { overflow: hidden; text-overflow: ellipsis; }
+#page-records .tbl th:nth-child(1), #page-records .tbl td:nth-child(1) { width: 23%; }
+#page-records .tbl th:nth-child(2), #page-records .tbl td:nth-child(2) { width: 15%; }
+#page-records .tbl th:nth-child(3), #page-records .tbl td:nth-child(3) { width: 12%; }
+#page-records .tbl th:nth-child(4), #page-records .tbl td:nth-child(4) { width: 10%; }
+#page-records .tbl th:nth-child(5), #page-records .tbl td:nth-child(5) { width: 10%; }
+#page-records .tbl th:nth-child(6), #page-records .tbl td:nth-child(6) { width: 12%; }
+#page-records .tbl th:nth-child(7), #page-records .tbl td:nth-child(7) { width: 18%; }
 
 /* 滚动条美化 (细 + 圆角 + 主题色) */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -200,6 +218,17 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 
 /* ---------- 统计页 ---------- */
 .two-col { display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.bottom-col { grid-template-columns: 1fr 1fr; align-items: stretch; }
+.sessions { padding-bottom: 4px; margin-bottom: 12px; }
+#page-records .sessions, #page-records .records { margin-bottom: 0; }
+.sessions .pager, .records .pager { padding: 8px 0 6px; }
+.sessions .card-h, .records .card-h { min-height: 40px; }
+/* 统计页: 底部两卡片弹性拉伸填满剩余空间, 消除底部空白 */
+#page-stats { display: flex; flex-direction: column; }
+#page-stats .two-col { margin-bottom: 0; flex: 1; min-height: 0; align-items: stretch; grid-template-columns: 1fr 1.6fr; }
+#page-stats .model-rank, #page-stats .usage-trend { display: flex; flex-direction: column; min-height: 0; }
+#page-stats .mr-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#page-stats .chart-box { flex: 1; min-height: 180px; }
 .model-rank { padding-bottom: 10px; }
 .seg { display: inline-flex; gap: 3px; background: var(--muted); padding: 3px; border-radius: 8px; }
 .seg button { border: none; background: transparent; padding: 4px 11px; border-radius: 6px; font-size: 12px; color: var(--text2); cursor: pointer; font-family: var(--font-sans); }
@@ -215,12 +244,12 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .mr-sub { color: var(--text3); font-size: 11px; font-variant-numeric: tabular-nums; }
 .mr-cost { color: var(--text2); font-variant-numeric: tabular-nums; }
 .usage-trend { padding-bottom: 10px; }
-.records { margin-bottom: 10px; padding-bottom: 8px; }
+.records { margin-bottom: 0; padding-bottom: 4px; }
 
 /* ---------- 表格 ---------- */
-.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
-.tbl th { text-align: left; padding: 7px 14px; color: var(--text3); font-size: 11.5px; font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.tbl td { padding: 7px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 4px; }
+.tbl th { text-align: left; padding: 5px 14px; color: var(--text3); font-size: 11.5px; font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl td { padding: 5px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .tbl tbody tr:hover { background: var(--muted); }
 .tbl td.num, .tbl th.num { text-align: right; }
 .model-cell { display: flex; align-items: center; gap: 7px; font-weight: 500; }

@@ -36,7 +36,7 @@ def _default_data_dir() -> str:
         except OSError:
             pass
         local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(local, "GoUsage", "data")
+        return os.path.join(local, "GoGauge", "data")
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
 
@@ -394,6 +394,55 @@ def list_models() -> list[str]:
         "SELECT DISTINCT model FROM usage_records ORDER BY model"
     ).fetchall()
     return [r["model"] for r in rows]
+
+
+def session_stats_page(
+    page: int = 1,
+    page_size: int = 10,
+    days: Optional[int] = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """按会话聚合用量 (session_id 非空), 按成本降序, 返回 (records, total)."""
+    page = max(1, page)
+    page_size = max(1, min(page_size, 50))
+    where: list[str] = ["session_id IS NOT NULL AND session_id != ''"]
+    params: list[Any] = []
+    if days:
+        where.append("datetime(created_at) >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where_sql = "WHERE " + " AND ".join(where)
+    conn = get_db()
+    total = int(
+        conn.execute(f"SELECT COUNT(DISTINCT session_id) AS c FROM usage_records {where_sql}", params).fetchone()["c"]
+    )
+    rows = conn.execute(
+        f"""SELECT session_id,
+               COUNT(*) AS request_count,
+               SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
+               SUM(input_tokens) AS uncached_input_tokens,
+               SUM(output_tokens) AS total_output_tokens,
+               SUM(reasoning_tokens) AS total_reasoning_tokens,
+               SUM(cost_usd) AS total_cost_usd,
+               MAX(created_at) AS last_at
+        FROM usage_records {where_sql}
+        GROUP BY session_id
+        ORDER BY last_at DESC
+        LIMIT ? OFFSET ?""",
+        params + [page_size, (page - 1) * page_size],
+    ).fetchall()
+    records = [
+        {
+            "session_id": r["session_id"],
+            "request_count": int(r["request_count"]),
+            "total_input_tokens": int(r["total_input_tokens"] or 0),
+            "uncached_input_tokens": int(r["uncached_input_tokens"] or 0),
+            "total_output_tokens": int(r["total_output_tokens"] or 0),
+            "total_reasoning_tokens": int(r["total_reasoning_tokens"] or 0),
+            "total_cost_usd": round(float(r["total_cost_usd"] or 0), 6),
+            "last_at": r["last_at"],
+        }
+        for r in rows
+    ]
+    return records, total
 
 
 def get_settings() -> dict[str, Any]:

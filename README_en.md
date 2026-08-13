@@ -1,7 +1,7 @@
 # GoGauge — OpenCode Go Usage Dashboard
 
 <p align="center">
-  <img src="assets/GoUsage.ico" width="64" alt="GoGauge">
+  <img src="assets/GoGauge.ico" width="64" alt="GoGauge">
 </p>
 
 <p align="center">
@@ -36,7 +36,8 @@
 - **Usage overview**: cache hit rate / hit amount / total tokens (incl. cache hits) / requests / cost / sessions
 - **Today's trend**: 24-hour input / output bar chart
 - **Usage stats**: token breakdown (input / output / reasoning / cache read / cache write / sessions), model usage donut + ranking, cost / requests / total tokens triple-line trend
-- **Usage records**: 10 per page with model filtering
+- **Session history**: per-session aggregation of requests / input / output / reasoning / total tokens / cost, paginated
+- **Usage records**: request-level detail with pagination and model filtering
 - **Built-in WebView login**: independent login window opens the official auth page, auto-fills cookie & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)

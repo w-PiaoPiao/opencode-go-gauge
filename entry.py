@@ -1,4 +1,4 @@
-"""GoUsage 打包入口."""
+"""GoGauge 打包入口."""
 import atexit
 
 from app.main import main, shutdown

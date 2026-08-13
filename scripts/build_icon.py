@@ -1,14 +1,14 @@
-"""生成 GoUsage 应用图标 (logo-final.svg 结构, 多尺寸 ICO).
+"""生成 GoGauge 应用图标 (logo-final.svg 结构, 多尺寸 ICO).
 
 外弧蓝 #1890FF r16 75% + 内弧青 #06B6D4 r9 70% + 中心 H (粗体).
-运行: python scripts/build_icon.py -> 输出 assets/GoUsage.ico
+运行: python scripts/build_icon.py -> 输出 assets/GoGauge.ico
 """
 import os
 
 from PIL import Image, ImageDraw, ImageFont
 
 VIEW = 48
-OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "GoUsage.ico")
+OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "GoGauge.ico")
 
 
 def draw_logo(size: int) -> Image.Image:

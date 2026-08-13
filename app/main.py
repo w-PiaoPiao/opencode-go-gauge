@@ -1,4 +1,4 @@
-"""GoUsage - OpenCode Go 用量统计面板 (Python 单文件 exe + WebView).
+"""GoGauge - OpenCode Go 用量统计面板 (Python 单文件 exe + WebView).
 
 入口: 启动本地 HTTP 服务 → 创建 WebView 窗口 → 未登录时加载授权页登录,
 登录成功后自动进入面板 (首次自动全量同步, 之后读本地数据库).
@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 import tempfile
@@ -22,6 +23,25 @@ WINDOW_MIN_SIZE = (1000, 680)
 
 _quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
 _tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
+
+
+def _enable_taskbar_minimize(win) -> None:
+    """无边框窗口修复: 补上 WS_MINIMIZEBOX 样式, 让任务栏点击可最小化/恢复.
+
+    pywebview frameless -> WinForms FormBorderStyle.None, 该样式不包含
+    WS_MINIMIZEBOX (初始样式仅含 WS_MAXIMIZEBOX), 系统会忽略任务栏按钮的
+    最小化请求 (点击无反应). 给窗口句柄补上该样式, 恢复标准任务栏行为.
+    """
+    try:
+        # pythonnet IntPtr 需先 ToInt32() 再转 int (直接 int() 会抛 TypeError)
+        hwnd = int(win.native.Handle.ToInt32())
+        GWL_STYLE = -16
+        WS_MINIMIZEBOX = 0x00020000
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+        if style and not (style & WS_MINIMIZEBOX):
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_MINIMIZEBOX)
+    except Exception:  # noqa: BLE001
+        pass
 
 _MAIN_LOG = os.path.join(tempfile.gettempdir(), "gousage_main.log")
 
@@ -68,7 +88,7 @@ class TrayIcon:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("退出", self._quit),
             )
-            self._icon = pystray.Icon("GoUsage", img, "GoUsage - OpenCode Go 用量面板", menu)
+            self._icon = pystray.Icon("GoGauge", img, "GoGauge - OpenCode Go 用量面板", menu)
             threading.Thread(target=self._icon.run, daemon=True).start()
             _tray_ready = True
             return True
@@ -99,10 +119,7 @@ class TrayIcon:
                 icon.stop()
             except Exception:  # noqa: BLE001
                 pass
-        if self._win_getter:
-            win = self._win_getter()
-            if win:
-                win.destroy()
+        _destroy_all_windows()
 
 
 class WindowApi:
@@ -148,9 +165,17 @@ class WindowApi:
         """退出应用 (欢迎页/设置页按钮): 真正退出, 不驻留托盘."""
         global _quitting
         _quitting = True
-        if self._win:
-            self._win.destroy()
+        _destroy_all_windows()
         return True
+
+
+def _destroy_all_windows() -> None:
+    """销毁所有窗口 (含隐藏登录窗), 让 pywebview 事件循环退出, 进程真正结束."""
+    for w in list(webview.windows):
+        try:
+            w.destroy()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main() -> None:
@@ -279,15 +304,25 @@ def main() -> None:
         if isinstance(w, LoginWatcher):
             w.stop()
 
+    def on_shown() -> None:
+        # 窗口显示后 native 句柄才可用: 补 WS_MINIMIZEBOX, 修复任务栏点击不最小化
+        _enable_taskbar_minimize(main_win)
+
+    def on_restored() -> None:
+        # 窗口最小化->恢复过程中 WinForms 可能重建句柄导致样式丢失, 恢复后重新补上
+        _enable_taskbar_minimize(main_win)
+
     main_win.events.closed += on_window_closed
+    main_win.events.shown += on_shown
+    main_win.events.restored += on_restored
 
     # 系统托盘 (logo 图标)
-    tray = TrayIcon(_asset_path("GoUsage.ico"))
+    tray = TrayIcon(_asset_path("GoGauge.ico"))
     tray.bind_window(lambda: main_win if main_win in webview.windows else None)
     tray.start()
 
     # 任务栏/窗口图标: 使用 logo (winforms 后端从 start(icon=...) 设置窗口 Icon)
-    webview.start(icon=_asset_path("GoUsage.ico") if os.path.isfile(_asset_path("GoUsage.ico")) else None)
+    webview.start(icon=_asset_path("GoGauge.ico") if os.path.isfile(_asset_path("GoGauge.ico")) else None)
 
     if not _quitting:
         tray.stop()

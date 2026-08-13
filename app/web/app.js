@@ -13,6 +13,8 @@ const I18N = {
     statsTitle: "用量统计", tokenBreakdown: "Token 构成",
     modelUsage: "模型用量", input: "输入", output: "输出", cost: "成本",
     usageTrend: "用量趋势", usageRecords: "使用记录", allModels: "全部模型",
+    recordsPage: "使用记录",
+    sessionUsage: "会话用量", colSession: "会话", colLastUsed: "最后使用", colRequests: "请求/Token",
     colTime: "时间", colModel: "模型", colInput: "输入", colOutput: "输出",
     colReasoning: "推理", colCacheRead: "缓存读", colCost: "费用", colPlan: "PLAN",
     prev: "上一页", next: "下一页",
@@ -74,6 +76,8 @@ const I18N = {
     statsTitle: "Usage Stats", tokenBreakdown: "Token Breakdown",
     modelUsage: "Model Usage", input: "Input", output: "Output", cost: "Cost",
     usageTrend: "Usage Trend", usageRecords: "Usage Records", allModels: "All Models",
+    recordsPage: "Records",
+    sessionUsage: "Session Usage", colSession: "Session", colLastUsed: "Last Used", colRequests: "Requests/Token",
     colTime: "Time", colModel: "Model", colInput: "Input", colOutput: "Output",
     colReasoning: "Reasoning", colCacheRead: "Cache Read", colCost: "Cost", colPlan: "PLAN",
     prev: "Prev", next: "Next",
@@ -142,7 +146,8 @@ let state = {
   darkMode: false,
   syncTimer: null,
   quotaRetryTimer: null,
-  records: { page: 1, pageSize: 10, total: 0, model: "" },
+  records: { page: 1, pageSize: 7, total: 0, model: "" },
+  sessions: { page: 1, pageSize: 7, total: 0 },
   settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true },
 };
 
@@ -292,6 +297,7 @@ function switchPage(page) {
   $("page-" + page).hidden = false;
   document.querySelectorAll(".side-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (page === "home" || page === "stats") loadDashboard();
+  if (page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
   if (page === "settings") renderSettings();
 }
 
@@ -508,6 +514,56 @@ function chartTrend(trend) {
   cTrend.resize();
 }
 
+/* ---------------- 会话用量 ---------------- */
+let sesLoading = false;
+async function loadSessions() {
+  if (sesLoading) return;
+  sesLoading = true;
+  const body = $("sessions-body");
+  try {
+    const q = new URLSearchParams({ page: state.sessions.page, page_size: 7 });
+    const data = await api(`/api/usage/sessions?${q}`);
+    state.sessions.total = data.total;
+    $("ses-count").textContent = `${t("totalN")} ${fmtInt(data.total)} ${t("sessions")}`;
+    if (!data.records.length) {
+      body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">${t("noData")}</td></tr>`;
+    } else {
+      let html = data.records.map((s) => `
+        <tr><td title="${escapeHtml(s.session_id)}">${escapeHtml(s.session_id)}</td>
+        <td>${fmtDateTime(s.last_at)}</td>
+        <td class="num">${fmtTokens(s.total_input_tokens)}</td>
+        <td class="num">${fmtTokens(s.total_output_tokens)}</td>
+        <td class="num">${fmtTokens(s.total_reasoning_tokens)}</td>
+        <td class="num">${fmtInt(s.request_count)} / ${fmtTokens(s.total_input_tokens + s.total_output_tokens + s.total_reasoning_tokens)}</td>
+        <td class="num">${fmtMoney(s.total_cost_usd)}</td></tr>`).join("");
+      // 固定 7 行, 不足补空行
+      if (data.records.length < 7) {
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(7) + '</tr>').repeat(7 - data.records.length);
+      }
+      body.innerHTML = html;
+    }
+    const totalPages = Math.max(1, Math.ceil(data.total / 7));
+    $("ses-pager").textContent = `${t("pageOf")} ${state.sessions.page} ${t("ofPages")} ${totalPages}`;
+    $("ses-prev").disabled = state.sessions.page <= 1;
+    $("ses-next").disabled = state.sessions.page >= totalPages;
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--red);padding:20px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
+  } finally {
+    sesLoading = false;
+  }
+}
+function shortId(id) {
+  const s = String(id || "");
+  return s.length > 14 ? s.slice(0, 12) + "…" : s;
+}
+function fmtDateTimeShort(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return "—";
+  const pad = (x) => String(x).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /* ---------------- 使用记录 ---------------- */
 let recLoading = false;
 async function loadRecords() {
@@ -515,7 +571,7 @@ async function loadRecords() {
   recLoading = true;
   const body = $("records-body");
   try {
-    const q = new URLSearchParams({ page: state.records.page, page_size: state.records.pageSize });
+    const q = new URLSearchParams({ page: state.records.page, page_size: 7 });
     if (state.records.model) q.set("model", state.records.model);
     const data = await api(`/api/usage/records?${q}`);
     state.records.total = data.total;
@@ -527,17 +583,21 @@ async function loadRecords() {
     if (!data.records.length) {
       body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:24px">${t("noData")}</td></tr>`;
     } else {
-      body.innerHTML = data.records.map((r) => `
+      let html = data.records.map((r) => `
         <tr><td>${fmtDateTime(r.created_at)}</td>
         <td><span class="model-cell">${modelIcon(r.model)}${escapeHtml(r.model)}</span></td>
-        <td class="num">${fmtInt(r.input_tokens)}</td>
-        <td class="num">${fmtInt(r.output_tokens)}</td>
-        <td class="num">${fmtInt(r.reasoning_tokens)}</td>
-        <td class="num">${fmtInt(r.cache_read_tokens)}</td>
-        <td class="num">${fmtMoney(r.cost_usd)}</td>
-        <td><span class="plan-badge">${PLAN_BADGE[(r.plan || "").toLowerCase()] || (r.plan || "").toUpperCase() || "—"}</span></td></tr>`).join("");
+        <td class="num">${fmtTokens(r.input_tokens)}</td>
+        <td class="num">${fmtTokens(r.output_tokens)}</td>
+        <td class="num">${fmtTokens(r.reasoning_tokens)}</td>
+        <td class="num">${fmtTokens(r.cache_read_tokens)}</td>
+        <td class="num">${fmtMoney(r.cost_usd)}</td></tr>`).join("");
+      // 固定 7 行, 不足补空行
+      if (data.records.length < 7) {
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(7) + '</tr>').repeat(7 - data.records.length);
+      }
+      body.innerHTML = html;
     }
-    const totalPages = Math.max(1, Math.ceil(data.total / state.records.pageSize));
+    const totalPages = Math.max(1, Math.ceil(data.total / 7));
     $("rec-pager").textContent = `${t("pageOf")} ${state.records.page} ${t("ofPages")} ${totalPages}`;
     $("pg-prev").disabled = state.records.page <= 1;
     $("pg-next").disabled = state.records.page >= totalPages;
@@ -577,7 +637,6 @@ function renderAll(data) {
     chartModel(data.models);
     chartTrend(data.trend);
     $("trend-hint").textContent = t("trendHint");
-    loadRecords().catch(() => {});
   }
   $("tb-sync").textContent = data.logged_in ? `${t("lastSync")} ${fmtRelative(data.sync?.last_sync_at)} · ${fmtInt(data.sync?.total_records || 0)} ${t("records")}` : t("notLoggedIn");
   $("tb-login").innerHTML = data.logged_in ? `<b>${t("loggedIn")}</b> ${maskWs(data)}` : t("notLoggedIn");
@@ -717,6 +776,8 @@ function bindEvents() {
   });
   $("pg-prev").addEventListener("click", () => { if (state.records.page > 1) { state.records.page--; loadRecords(); } });
   $("pg-next").addEventListener("click", () => { state.records.page++; loadRecords(); });
+  $("ses-prev").addEventListener("click", () => { if (state.sessions.page > 1) { state.sessions.page--; loadSessions(); } });
+  $("ses-next").addEventListener("click", () => { state.sessions.page++; loadSessions(); });
   $("rec-model-filter").addEventListener("change", (e) => { state.records.model = e.target.value; state.records.page = 1; loadRecords(); });
 
   document.querySelectorAll("#set-interval-pills .pill").forEach((b) => b.addEventListener("click", async () => {
