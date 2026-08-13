@@ -12,6 +12,7 @@ echo [1/3] 安装依赖...
 pip install -q pywebview pyinstaller || goto :err
 
 echo [2/3] 打包单文件 exe (无控制台窗口, logo 图标)...
+echo       裁剪误收集依赖 (numpy/cryptography/PIL._avif), 体积约减半
 pyinstaller --noconfirm --clean --onefile --noconsole --name GoGauge ^
   --add-data "app\web;app\web" ^
   --add-data "assets;assets" ^
@@ -20,6 +21,9 @@ pyinstaller --noconfirm --clean --onefile --noconsole --name GoGauge ^
   --hidden-import clr ^
   --hidden-import pythonnet ^
   --hidden-import pystray ^
+  --exclude-module numpy ^
+  --exclude-module cryptography ^
+  --exclude-module PIL._avif ^
   entry.py || goto :err
 
 echo [3/3] 完成!
