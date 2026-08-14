@@ -5,6 +5,7 @@ build/
 *.spec
 __pycache__/
 *.pyc
+.pyicache/
 
 # 开发/测试
 tests/evidence/

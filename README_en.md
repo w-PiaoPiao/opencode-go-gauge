@@ -65,11 +65,23 @@ python entry.py
 
 ### Build
 
+**Windows**
+
 ```bash
 build.bat
 ```
 
 Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon and tray support included).
+
+**macOS**
+
+```bash
+./build_macos.sh
+```
+
+Output: `dist/GoGauge.app` (no console window; `.icns` icon and menu-bar tray support included).
+
+> Requires macOS 11+ (built-in WebKit; pywebview uses WKWebView). Closing the window minimizes to the menu bar.
 
 ## 📊 Data Notes
 

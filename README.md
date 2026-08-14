@@ -65,11 +65,23 @@ python entry.py
 
 ### 打包
 
+**Windows**
+
 ```bash
 build.bat
 ```
 
 输出 `dist\GoGauge.exe`（约 38 MB，--noconsole 无黑窗，含 logo 图标与托盘支持）。
+
+**macOS**
+
+```bash
+./build_macos.sh
+```
+
+输出 `dist/GoGauge.app`（无终端窗口，含 `.icns` 图标与菜单栏托盘支持）。
+
+> 需要 macOS 11+（内置 WebKit，pywebview 使用 WKWebView）。关闭窗口会最小化到菜单栏。
 
 ## 📊 数据说明
 
@@ -85,7 +97,7 @@ build.bat
 
 ## 🛠 技术栈
 
-Python · pywebview (WebView2) · SQLite · Chart.js · pystray
+Python · pywebview (WebView2 / WKWebView) · SQLite · Chart.js · pystray
 
 ## 📬 联系
 

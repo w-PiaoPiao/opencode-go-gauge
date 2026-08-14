@@ -1,12 +1,12 @@
-"""GoGauge - OpenCode Go 用量统计面板 (Python 单文件 exe + WebView).
+"""GoGauge - OpenCode Go 用量统计面板 (Python + WebView, 跨平台 Windows/macOS).
 
 入口: 启动本地 HTTP 服务 → 创建 WebView 窗口 → 未登录时加载授权页登录,
 登录成功后自动进入面板 (首次自动全量同步, 之后读本地数据库).
-系统托盘: 关闭窗口最小化到托盘, 托盘菜单可显示窗口/退出.
+系统托盘 (Windows) / 菜单栏图标 (macOS): 关闭窗口最小化到托盘/菜单栏,
+菜单可显示窗口/退出. 双平台行为一致, 功能完全相同.
 """
 from __future__ import annotations
 
-import ctypes
 import os
 import sys
 import tempfile
@@ -21,17 +21,26 @@ APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
 WINDOW_SIZE = (1280, 840)
 WINDOW_MIN_SIZE = (1000, 680)
 
+_IS_MAC = sys.platform == "darwin"
+_IS_WIN = sys.platform == "win32"
+
+if _IS_WIN:
+    import ctypes  # noqa: E402  仅 Windows 需要 Win32 API
+
 _quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
 _tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
 
 
 def _enable_taskbar_minimize(win) -> None:
-    """无边框窗口修复: 补上 WS_MINIMIZEBOX 样式, 让任务栏点击可最小化/恢复.
+    """无边框窗口修复 (仅 Windows): 补上 WS_MINIMIZEBOX 样式.
 
-    pywebview frameless -> WinForms FormBorderStyle.None, 该样式不包含
+    pywebview frameless @ Windows -> WinForms FormBorderStyle.None, 该样式不包含
     WS_MINIMIZEBOX (初始样式仅含 WS_MAXIMIZEBOX), 系统会忽略任务栏按钮的
-    最小化请求 (点击无反应). 给窗口句柄补上该样式, 恢复标准任务栏行为.
+    最小化请求. 给窗口句柄补上该样式, 恢复标准任务栏行为.
+    macOS 无此 API, 跳过 (Cocoa 窗口本身支持最小化).
     """
+    if not _IS_WIN:
+        return
     try:
         # pythonnet IntPtr 需先 ToInt32() 再转 int (直接 int() 会抛 TypeError)
         hwnd = int(win.native.Handle.ToInt32())
@@ -63,8 +72,33 @@ def _asset_path(rel: str) -> str:
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", rel)
 
 
+def _app_icon_path() -> str:
+    """按平台选择应用/托盘图标.
+
+    Windows 使用 .ico; macOS 使用 .png (Dock 与菜单栏图标通用, WKWebView
+    无 .ico 支持, pystray 走菜单栏也只需 PNG). 优先返回实际存在的文件.
+    """
+    candidates = ["GoGauge.png"] if _IS_MAC else ["GoGauge.ico"]
+    for name in candidates:
+        p = _asset_path(name)
+        if os.path.isfile(p):
+            return p
+    # 兜底: 任一可用图标
+    for name in ("GoGauge.png", "GoGauge.ico"):
+        p = _asset_path(name)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+
 class TrayIcon:
-    """系统托盘 (pystray): logo 图标 + 显示窗口/退出 菜单."""
+    """系统托盘/菜单栏图标 (pystray): logo + 显示窗口/退出 菜单.
+
+    Windows: 在后台线程运行 pystray 自己的事件循环.
+    macOS: AppKit 必须在主线程, 且需与 pywebview 共享同一个 NSApplication 事件循环,
+    因此在主线程构造图标后调用 run_detached() 注册, 由 webview.start() 驱动菜单栏.
+    """
 
     def __init__(self, icon_path: str) -> None:
         self._icon_path = icon_path
@@ -89,7 +123,13 @@ class TrayIcon:
                 pystray.MenuItem("退出", self._quit),
             )
             self._icon = pystray.Icon("GoGauge", img, "GoGauge - OpenCode Go 用量面板", menu)
-            threading.Thread(target=self._icon.run, daemon=True).start()
+            if _IS_MAC:
+                # macOS: 主线程构造(Icon 里创建 NSStatusItem/NSWindow 需在主线程),
+                # run_detached 仅注册, 不启动独立 run loop, 由 pywebview 驱动.
+                self._icon.run_detached(setup=lambda i: setattr(i, "visible", True))
+            else:
+                # Windows / 其它: pystray 自带事件循环, 放入后台线程.
+                threading.Thread(target=self._icon.run, daemon=True).start()
             _tray_ready = True
             return True
         except Exception as exc:  # noqa: BLE001
@@ -316,13 +356,14 @@ def main() -> None:
     main_win.events.shown += on_shown
     main_win.events.restored += on_restored
 
-    # 系统托盘 (logo 图标)
-    tray = TrayIcon(_asset_path("GoGauge.ico"))
+    # 系统托盘 (Windows) / 菜单栏图标 (macOS)
+    tray = TrayIcon(_app_icon_path())
     tray.bind_window(lambda: main_win if main_win in webview.windows else None)
     tray.start()
 
-    # 任务栏/窗口图标: 使用 logo (winforms 后端从 start(icon=...) 设置窗口 Icon)
-    webview.start(icon=_asset_path("GoGauge.ico") if os.path.isfile(_asset_path("GoGauge.ico")) else None)
+    # 窗口/Dock 图标: 按平台选择 (Win=ico, macOS 用 png 生成 dock icon 由 .app 提供)
+    icon_path = _app_icon_path()
+    webview.start(icon=icon_path if icon_path else None)
 
     if not _quitting:
         tray.stop()

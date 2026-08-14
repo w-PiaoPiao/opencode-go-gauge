@@ -22,7 +22,14 @@ def _default_data_dir() -> str:
         return os.path.abspath(_data_dir_override)
     if os.environ.get("GOUSAGE_DATA"):
         return os.path.abspath(os.environ["GOUSAGE_DATA"])
-    # 单文件 exe: 优先 exe 同目录 data/, 不可写则回退到 LOCALAPPDATA
+    # macOS: 优先用户 Application Support (打包 .app 后 exe 位于 .app 内部, 不可写,
+    # 也符合平台规范). 源码运行同样使用该目录, 保证行为一致.
+    if sys.platform == "darwin":
+        home = os.path.expanduser("~")
+        base = os.path.join(home, "Library", "Application Support", "GoGauge")
+        os.makedirs(base, exist_ok=True)
+        return os.path.join(base, "data")
+    # 单文件 exe (Windows): 优先 exe 同目录 data/, 不可写则回退到 LOCALAPPDATA
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         candidate = os.path.join(exe_dir, "data")
