@@ -29,6 +29,43 @@ if _IS_WIN:
 
 _quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
 _tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
+_main_win_ref: dict[str, object] = {"win": None}  # 主窗口引用 (macOS delegate 恢复用)
+
+
+def _install_macos_app_delegate() -> None:
+    """替换 pywebview 的 macOS AppDelegate, 补齐两个原生行为:
+
+    1. applicationShouldTerminate_: pywebview 原实现退出时会遍历窗口触发 closing
+       事件, 而本应用的 on_closing 在托盘可用时返回 False 取消关闭, 导致
+       Cmd+Q / Dock 右键 Quit / 菜单 Quit 全部被静默取消. 此处先置 _quitting
+       标志, 再调用原逻辑, 使关闭处理放行, 应用正常退出.
+    2. applicationShouldHandleReopen:hasVisibleWindows_: pywebview 未实现该方法,
+       窗口被 orderOut 隐藏后点击 Dock 图标无法重新显示. 此处补上恢复主窗口.
+
+    必须在 webview.start() 之前调用: pywebview 在创建窗口时才执行
+    BrowserView.AppDelegate.alloc().init() (cocoa.py), 替换类属性即可生效.
+    """
+    if not _IS_MAC:
+        return
+    from webview.platforms.cocoa import BrowserView  # noqa: E402  仅 macOS 存在
+
+    class _GoGaugeAppDelegate(BrowserView.AppDelegate):  # type: ignore[misc, valid-type]
+        def applicationShouldTerminate_(self, app) -> bool:  # noqa: N802
+            global _quitting
+            _quitting = True
+            return super().applicationShouldTerminate_(app)
+
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag) -> bool:  # noqa: N802
+            win = _main_win_ref.get("win")
+            if win is not None:
+                try:
+                    win.show()
+                    win.restore()
+                except Exception:  # noqa: BLE001
+                    pass
+            return True
+
+    BrowserView.AppDelegate = _GoGaugeAppDelegate
 
 
 def _enable_taskbar_minimize(win) -> None:
@@ -256,6 +293,7 @@ def main() -> None:
         js_api=api,
     )
     api.bind(main_win)
+    _main_win_ref["win"] = main_win
 
     # 预创建独立登录子窗口 (hidden, 系统边框含关闭按钮; 点击"立即登录"时弹出)
     # 用可变引用: 窗口被手动关闭后可重建, 回调始终指向当前登录窗
@@ -393,6 +431,10 @@ def main() -> None:
     tray = TrayIcon(_app_icon_path())
     tray.bind_window(lambda: main_win if main_win in webview.windows else None)
     tray.start()
+
+    # macOS: 在 pywebview 创建窗口/设置 delegate 前替换 AppDelegate,
+    # 补齐 Dock 点击恢复窗口 与 退出放行 (必须在 webview.start() 之前).
+    _install_macos_app_delegate()
 
     # 窗口/Dock 图标: 按平台选择 (Win=ico, macOS 用 png 生成 dock icon 由 .app 提供)
     icon_path = _app_icon_path()
