@@ -92,6 +92,16 @@ def _app_icon_path() -> str:
 
 
 
+def _arm_quit_fallback(timeout: float = 3.0) -> None:
+    """退出兜底: 若 destroy 全部窗口后事件循环未在限时内退出, 强制结束进程.
+
+    pywebview cocoa 在最后一个窗口关闭时会 stop 事件循环, 正常路径无需兜底;
+    但若 WebView 进程异常 (崩溃/挂起) 导致循环不退出, 兜底保证应用不会变成
+    "隐形进程" 只能强杀.
+    """
+    threading.Timer(timeout, lambda: os._exit(0), name="gousage-quit-fallback").start()
+
+
 class TrayIcon:
     """系统托盘/菜单栏图标 (pystray): logo + 显示窗口/退出 菜单.
 
@@ -154,6 +164,7 @@ class TrayIcon:
     def _quit(self, icon=None, item=None) -> None:
         global _quitting
         _quitting = True
+        _arm_quit_fallback()
         if icon:
             try:
                 icon.stop()
@@ -196,6 +207,7 @@ class WindowApi:
         if not self._win:
             return True
         if _quitting or not _tray_ready:
+            _arm_quit_fallback()
             self._win.destroy()
         else:
             self._win.hide()  # 最小化到托盘
@@ -205,6 +217,7 @@ class WindowApi:
         """退出应用 (欢迎页/设置页按钮): 真正退出, 不驻留托盘."""
         global _quitting
         _quitting = True
+        _arm_quit_fallback()
         _destroy_all_windows()
         return True
 

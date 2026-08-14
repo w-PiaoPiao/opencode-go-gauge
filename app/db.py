@@ -5,10 +5,15 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-_DB: Optional[sqlite3.Connection] = None
+# 每线程独立连接 (thread-local), 避免多线程共享同一 sqlite3.Connection:
+# Python sqlite3 连接内部有语句缓存, 多线程并发执行相同 SQL 会复用同一
+# sqlite3_stmt 交替 reset/step, 导致原生内存损坏 (SIGSEGV) 或挂起.
+_db_local = threading.local()
+_schema_lock = threading.Lock()
 _data_dir_override: Optional[str] = None
 
 
@@ -60,105 +65,113 @@ def _now_iso() -> str:
 
 
 def get_db() -> sqlite3.Connection:
-    global _DB
-    if _DB is not None:
-        return _DB
+    """返回当前线程的 SQLite 连接 (首次调用时创建)."""
+    conn = getattr(_db_local, "conn", None)
+    if conn is not None:
+        return conn
     path = db_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    # check_same_thread=True (默认): 单连接只允许本线程使用, 防止跨线程共享损坏
+    conn = sqlite3.connect(path, timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
-    _DB = conn
     _init_schema(conn)
+    _db_local.conn = conn
     return conn
 
 
 def close_db() -> None:
-    global _DB
-    if _DB is not None:
-        _DB.close()
-        _DB = None
+    """关闭当前线程的连接 (进程退出时主线程调用)."""
+    conn = getattr(_db_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        finally:
+            _db_local.conn = None
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS account (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          name TEXT NOT NULL DEFAULT 'Default',
-          workspace_id TEXT NOT NULL DEFAULT 'Default',
-          resolved_workspace_id TEXT,
-          token TEXT NOT NULL DEFAULT '',
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
+    # 多线程首次并发建表/种子行时串行化 (DDL 与单例行插入不能竞争)
+    with _schema_lock:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS account (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              name TEXT NOT NULL DEFAULT 'Default',
+              workspace_id TEXT NOT NULL DEFAULT 'Default',
+              resolved_workspace_id TEXT,
+              token TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS usage_records (
-          usg_id TEXT PRIMARY KEY,
-          created_at TEXT NOT NULL,
-          model TEXT NOT NULL,
-          provider TEXT,
-          input_tokens INTEGER NOT NULL,
-          output_tokens INTEGER NOT NULL,
-          reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-          cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0,
-          cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
-          cost_raw INTEGER NOT NULL,
-          cost_usd REAL NOT NULL,
-          key_id TEXT,
-          session_id TEXT,
-          plan TEXT,
-          synced_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS usage_records (
+              usg_id TEXT PRIMARY KEY,
+              created_at TEXT NOT NULL,
+              model TEXT NOT NULL,
+              provider TEXT,
+              input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+              cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+              cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0,
+              cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+              cost_raw INTEGER NOT NULL,
+              cost_usd REAL NOT NULL,
+              key_id TEXT,
+              session_id TEXT,
+              plan TEXT,
+              synced_at TEXT NOT NULL
+            );
 
-        CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id);
 
-        CREATE TABLE IF NOT EXISTS usage_sync_state (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          last_sync_at TEXT,
-          last_sync_status TEXT,
-          last_sync_error TEXT,
-          last_inserted_count INTEGER NOT NULL DEFAULT 0,
-          deepest_page_fetched INTEGER NOT NULL DEFAULT -1,
-          total_records INTEGER NOT NULL DEFAULT 0,
-          oldest_record_at TEXT,
-          newest_record_at TEXT
-        );
+            CREATE TABLE IF NOT EXISTS usage_sync_state (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              last_sync_at TEXT,
+              last_sync_status TEXT,
+              last_sync_error TEXT,
+              last_inserted_count INTEGER NOT NULL DEFAULT 0,
+              deepest_page_fetched INTEGER NOT NULL DEFAULT -1,
+              total_records INTEGER NOT NULL DEFAULT 0,
+              oldest_record_at TEXT,
+              newest_record_at TEXT
+            );
 
-        CREATE TABLE IF NOT EXISTS settings (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          payload TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        """
-    )
-    # 确保 settings 行存在
-    if conn.execute("SELECT id FROM settings WHERE id = 1").fetchone() is None:
-        conn.execute("INSERT INTO settings (id, payload, updated_at) VALUES (1, '{}', ?)", (_now_iso(),))
-        conn.commit()
-    # 迁移: 旧库补充新列
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_records)").fetchall()}
-    for col in ("reasoning_tokens", "session_id"):
-        if col not in cols:
-            if col == "reasoning_tokens":
-                conn.execute(f"ALTER TABLE usage_records ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
-            else:
-                conn.execute(f"ALTER TABLE usage_records ADD COLUMN {col} TEXT")
-    # 确保账户行存在
-    row = conn.execute("SELECT id FROM account WHERE id = 1").fetchone()
-    if row is None:
-        now = _now_iso()
-        conn.execute(
-            "INSERT INTO account (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at)"
-            " VALUES (1, 'Default', 'Default', NULL, '', ?, ?)",
-            (now, now),
+            CREATE TABLE IF NOT EXISTS settings (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              payload TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
         )
-    sync = conn.execute("SELECT id FROM usage_sync_state WHERE id = 1").fetchone()
-    if sync is None:
-        conn.execute("INSERT INTO usage_sync_state (id) VALUES (1)")
-    conn.commit()
+        # 确保 settings 行存在
+        if conn.execute("SELECT id FROM settings WHERE id = 1").fetchone() is None:
+            conn.execute("INSERT INTO settings (id, payload, updated_at) VALUES (1, '{}', ?)", (_now_iso(),))
+            conn.commit()
+        # 迁移: 旧库补充新列
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_records)").fetchall()}
+        for col in ("reasoning_tokens", "session_id"):
+            if col not in cols:
+                if col == "reasoning_tokens":
+                    conn.execute(f"ALTER TABLE usage_records ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+                else:
+                    conn.execute(f"ALTER TABLE usage_records ADD COLUMN {col} TEXT")
+        # 确保账户行存在
+        row = conn.execute("SELECT id FROM account WHERE id = 1").fetchone()
+        if row is None:
+            now = _now_iso()
+            conn.execute(
+                "INSERT INTO account (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at)"
+                " VALUES (1, 'Default', 'Default', NULL, '', ?, ?)",
+                (now, now),
+            )
+        sync = conn.execute("SELECT id FROM usage_sync_state WHERE id = 1").fetchone()
+        if sync is None:
+            conn.execute("INSERT INTO usage_sync_state (id) VALUES (1)")
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------

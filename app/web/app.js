@@ -208,10 +208,20 @@ function escapeHtml(s) {
 }
 
 /* ---------------- API ---------------- */
+const API_TIMEOUT_MS = 15000;  // 本地服务异常时避免永久"加载中"
 async function api(path, opts = {}) {
-  const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!resp.ok) throw new Error("HTTP " + resp.status);
-  return resp.json();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  try {
+    const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, signal: ctrl.signal, ...opts });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return await resp.json();
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("请求超时");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /* ---------------- 语言切换 ---------------- */
