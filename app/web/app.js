@@ -265,11 +265,22 @@ function toast(msg, type = "ok") {
 }
 
 /* ---------------- 标题栏 ---------------- */
+// macOS 使用原生标题栏 + 左上角红黄绿交通灯; 隐藏自定义窗口控制按钮.
+function isMac() {
+  return /Mac|iPhone|iPod|iPad/i.test((navigator.platform || "") + (navigator.userAgent || ""));
+}
 async function pywebviewApi() {
   try { if (window.pywebview && window.pywebview.api) return window.pywebview.api; } catch (e) { /* ignore */ }
   return null;
 }
+function adaptTitlebar() {
+  // macOS: 原生标题栏提供 关闭/最小化/缩放, 移除页内自定义窗口按钮.
+  const mac = isMac();
+  ["tb-min", "tb-close", "tb-sep"].forEach((id) => { const el = $(id); if (el) el.hidden = mac; });
+  document.documentElement.classList.toggle("os-mac", mac);
+}
 function bindTitlebar() {
+  adaptTitlebar();
   $("tb-min").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.minimize(); });
   $("tb-close").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.close(); });
   $("tb-theme").addEventListener("click", () => applyDarkMode(document.documentElement.dataset.theme !== "dark"));

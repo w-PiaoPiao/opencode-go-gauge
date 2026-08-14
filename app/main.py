@@ -228,14 +228,18 @@ def main() -> None:
     api = WindowApi()
 
     # 启动窗口: 始终加载本地页面; 未登录时前端显示欢迎页引导登录
+    # 平台窗口风格:
+    # - macOS: 使用原生标题栏 (frameless=False), 左上角红黄绿交通灯提供原生
+    #   关闭/最小化/缩放(最大化). 原生标题栏本身可拖动, 无需 easy_drag.
+    # - Windows: 无边框 + 自定义标题栏 (后端/前端窗口按钮), easy_drag 拖动.
     main_win = webview.create_window(
         APP_TITLE,
         dashboard_url,
         width=WINDOW_SIZE[0],
         height=WINDOW_SIZE[1],
         min_size=WINDOW_MIN_SIZE,
-        frameless=True,  # 自定义标题栏
-        easy_drag=True,
+        frameless=(not _IS_MAC),
+        easy_drag=_IS_WIN,
         js_api=api,
     )
     api.bind(main_win)
@@ -355,6 +359,22 @@ def main() -> None:
     main_win.events.closed += on_window_closed
     main_win.events.shown += on_shown
     main_win.events.restored += on_restored
+
+    if _IS_MAC:
+        def on_closing() -> bool:
+            # macOS 原生红点关闭按钮: 托盘/菜单栏可用时 -> 只隐藏窗口(驻留菜单栏);
+            # 真正退出(托盘退出或欢迎页"退出应用")时 -> 返回 True 允许关闭.
+            global _quitting, _tray_ready
+            if _quitting or not _tray_ready:
+                return True  # 允许真正关闭
+            try:
+                main_win.hide()  # 驻留菜单栏
+            except Exception:  # noqa: BLE001
+                return True
+            return False  # 取消本次关闭
+
+        # 返回 False 即取消原生关闭 (pywebview closing 事件语义)
+        main_win.events.closing += on_closing
 
     # 系统托盘 (Windows) / 菜单栏图标 (macOS)
     tray = TrayIcon(_app_icon_path())
