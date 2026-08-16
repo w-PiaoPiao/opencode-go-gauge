@@ -2,6 +2,7 @@ package io.github.yphyphyph.gogauge.ui.home
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,11 +15,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -31,6 +35,7 @@ import io.github.yphyphyph.gogauge.data.model.Totals
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.components.Accent
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
+import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.components.KpiCard
@@ -39,7 +44,8 @@ import io.github.yphyphyph.gogauge.ui.components.QuotaCard
 import io.github.yphyphyph.gogauge.ui.components.TodayBarChart
 import io.github.yphyphyph.gogauge.util.Fmt
 
-/** Home page: quota windows + overview KPIs + today's 24h trend. */
+/** Home page: quota windows + overview KPIs + today's 24h trend. Pull-to-refresh at top. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(vm: MainViewModel = viewModel()) {
     val s = vm.s
@@ -47,6 +53,15 @@ fun HomeScreen(vm: MainViewModel = viewModel()) {
         if (vm.dashboard == null) vm.loadDashboard(range = vm.homeRange)
     }
 
+    val ptrState = rememberPullToRefreshState()
+    Box(Modifier.fillMaxSize()) {
+    PullToRefreshBox(
+        isRefreshing = vm.isSyncing(),
+        onRefresh = { vm.refreshNow() },
+        state = ptrState,
+        modifier = Modifier.fillMaxSize(),
+        indicator = {},
+    ) {
     Column(
         Modifier
             .fillMaxSize()
@@ -118,6 +133,13 @@ fun HomeScreen(vm: MainViewModel = viewModel()) {
             }
         }
         Spacer(Modifier.height(8.dp))
+    }
+    }
+    GgPullIndicator(
+        state = ptrState,
+        isRefreshing = vm.isSyncing(),
+        modifier = Modifier.align(Alignment.TopCenter),
+    )
     }
 }
 

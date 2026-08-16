@@ -3,6 +3,7 @@ package io.github.yphyphyph.gogauge.ui.stats
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,8 +17,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -30,6 +34,7 @@ import io.github.yphyphyph.gogauge.data.model.Totals
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.components.Accent
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
+import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.components.KpiCard
@@ -40,6 +45,7 @@ import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import io.github.yphyphyph.gogauge.util.Fmt
 
 /** Stats page: 4 KPI + token breakdown + model doughnut/ranking + usage trend. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StatsScreen(vm: MainViewModel = viewModel()) {
     val s = vm.s
@@ -47,6 +53,15 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
         if (vm.dashboard == null) vm.loadDashboard(range = vm.statsRange)
     }
 
+    val ptrState = rememberPullToRefreshState()
+    Box(Modifier.fillMaxSize()) {
+    PullToRefreshBox(
+        isRefreshing = vm.isSyncing(),
+        onRefresh = { vm.refreshNow() },
+        state = ptrState,
+        modifier = Modifier.fillMaxSize(),
+        indicator = {},
+    ) {
     Column(
         Modifier
             .fillMaxSize()
@@ -162,8 +177,14 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
         }
         Spacer(Modifier.height(8.dp))
     }
+    }
+    GgPullIndicator(
+        state = ptrState,
+        isRefreshing = vm.isSyncing(),
+        modifier = Modifier.align(Alignment.TopCenter),
+    )
+    }
 }
-
 @Composable
 private fun StatsTotalGrid(totals: Totals, vm: MainViewModel) {
     val s = vm.s

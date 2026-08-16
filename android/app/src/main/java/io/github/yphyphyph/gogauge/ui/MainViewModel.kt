@@ -189,6 +189,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Manual refresh: incremental sync + force quota refresh (desktop top-bar refresh parity). */
     fun refreshNow() {
+        android.util.Log.i("GoGauge", "refreshNow called")
         if (repo.progress.value.running) {
             loadDashboard()
             return

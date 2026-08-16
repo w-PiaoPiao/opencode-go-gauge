@@ -2,6 +2,7 @@ package io.github.yphyphyph.gogauge.ui.settings
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,8 +14,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,11 +37,13 @@ import io.github.yphyphyph.gogauge.data.model.AppSettings
 import io.github.yphyphyph.gogauge.BuildConfig
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
+import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.PillRow
 import io.github.yphyphyph.gogauge.util.Fmt
 
 /** Settings page: account / auto-sync / appearance / data / update / about. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(vm: MainViewModel = viewModel()) {
     val s = vm.s
@@ -45,6 +51,15 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
 
     var confirmDialog by remember { mutableStateOf<ConfirmAction?>(null) }
 
+    val ptrState = rememberPullToRefreshState()
+    Box(Modifier.fillMaxSize()) {
+    PullToRefreshBox(
+        isRefreshing = vm.isSyncing(),
+        onRefresh = { vm.refreshNow() },
+        state = ptrState,
+        modifier = Modifier.fillMaxSize(),
+        indicator = {},
+    ) {
     Column(
         Modifier
             .fillMaxSize()
@@ -235,6 +250,13 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
             )
         }
         Spacer(Modifier.height(8.dp))
+    }
+    }
+    GgPullIndicator(
+        state = ptrState,
+        isRefreshing = vm.isSyncing(),
+        modifier = Modifier.align(Alignment.TopCenter),
+    )
     }
 
     confirmDialog?.let { action ->

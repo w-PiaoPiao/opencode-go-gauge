@@ -1,6 +1,8 @@
 package io.github.yphyphyph.gogauge.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
@@ -18,9 +20,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.pulltorefresh.PullToRefreshState
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -244,3 +252,51 @@ object Accent {
 /** Dark-aware accent helper */
 @Composable
 fun isDark(): Boolean = MaterialTheme.colorScheme.background == GgDark.Bg
+
+/* ================= 下拉刷新指示器 ================= */
+/*
+ * Custom pull-to-refresh indicator.
+ *
+ * material3 1.3.2's built-in PullToRefreshDefaults.Indicator does not render on this
+ * Compose 1.8.2 stack (verified: the indicator slot works, the default component draws
+ * nothing). This is a drop-in Material-style replacement:
+ * - while pulling: a progress arc whose sweep follows the pull distance
+ * - while refreshing: an indeterminate spinner
+ * - the whole circle rides down with the finger (distanceFraction)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun GgPullIndicator(
+    state: PullToRefreshState,
+    isRefreshing: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val color = MaterialTheme.colorScheme.primary
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    val density = LocalDensity.current
+    val offsetPx = with(density) { (state.distanceFraction * 96).dp.roundToPx() }
+    Box(
+        modifier
+            .offset { IntOffset(0, offsetPx) }
+            .size(44.dp)
+            .shadow(3.dp, CircleShape)
+            .background(MaterialTheme.colorScheme.surface, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isRefreshing) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(28.dp),
+                color = color,
+                strokeWidth = 3.dp,
+            )
+        } else {
+            CircularProgressIndicator(
+                progress = { state.distanceFraction.coerceIn(0f, 1f) },
+                modifier = Modifier.size(28.dp),
+                color = color,
+                strokeWidth = 3.dp,
+                trackColor = trackColor,
+            )
+        }
+    }
+}

@@ -2,6 +2,7 @@ package io.github.yphyphyph.gogauge.ui.records
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,8 +17,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -37,12 +41,14 @@ import io.github.yphyphyph.gogauge.data.model.SessionStat
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
+import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import io.github.yphyphyph.gogauge.util.Fmt
 
 /** Records page: session usage + usage records as readable card lists. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecordsScreen(vm: MainViewModel = viewModel()) {
     val s = vm.s
@@ -51,6 +57,15 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
         vm.loadRecords()
     }
 
+    val ptrState = rememberPullToRefreshState()
+    Box(Modifier.fillMaxSize()) {
+    PullToRefreshBox(
+        isRefreshing = vm.isSyncing(),
+        onRefresh = { vm.refreshNow() },
+        state = ptrState,
+        modifier = Modifier.fillMaxSize(),
+        indicator = {},
+    ) {
     Column(
         Modifier
             .fillMaxSize()
@@ -119,8 +134,14 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
         }
         Spacer(Modifier.height(8.dp))
     }
+    }
+    GgPullIndicator(
+        state = ptrState,
+        isRefreshing = vm.isSyncing(),
+        modifier = Modifier.align(Alignment.TopCenter),
+    )
+    }
 }
-
 @Composable
 private fun SessionRow(st: SessionStat, vm: MainViewModel) {
     val s = vm.s
