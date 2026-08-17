@@ -89,6 +89,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var autoSyncJob: Job? = null
     private var quotaRefreshJob: Job? = null
+    private var runningAutoSyncKey: String? = null
 
     init {
         scope.launch {
@@ -118,12 +119,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (acc.hasToken) {
                 showLogin = false
                 loadDashboard()
-                // first run with empty db → auto full sync (desktop parity)
-                if (repo.progress.value.phase == "idle" && repo.progress.value.running.not()) {
-                    val sync = repo.account()
-                    @Suppress("UNUSED_VARIABLE")
-                    val dbEmpty = dashboard?.sync?.totalRecords == null
-                    if (dbEmpty) fullSync()
+                // first run with empty db → auto full sync (desktop parity);
+                // read the persisted sync state from the DB, not the still-async dashboard
+                val syncState = repo.syncState()
+                if (syncState.lastSyncAt == null && syncState.totalRecords == 0) {
+                    fullSync()
                 }
             } else {
                 showLogin = true
@@ -177,12 +177,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startSync(mode: String) {
         scope.launch {
-            repo.syncAllAsync(scope, mode)
-            // poll until idle (desktop pollUntilIdle parity)
-            while (repo.progress.value.running) {
-                delay(2500)
-                loadDashboard()
-            }
+            // Await the sync to completion (syncUsage resets running=false in its finally
+            // block), then reload the dashboard once — avoids the old polling race that
+            // reloaded stale data before the sync actually started.
+            repo.ensureQuota()
+            repo.syncUsage(mode)
             loadDashboard()
         }
     }
@@ -213,7 +212,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val page = repo.recordsPage(recordsPage, 10, recordsFilter, null)
                 records = page
-                models = repo.listModels()
+                // Model list is only needed for the filter dropdown; cache it after first load.
+                if (models.isEmpty()) models = repo.listModels()
             } catch (e: OpenCodeApiException) {
                 // ignore
             }
@@ -266,12 +266,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun changeHomeRange(r: String) {
         homeRange = r
-        loadDashboard()
+        loadDashboard(r)
     }
 
     fun changeStatsRange(r: String) {
         statsRange = r
-        loadDashboard()
+        loadDashboard(r)
     }
 
     fun changeModelDim(d: String) {
@@ -348,7 +348,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------
 
     fun restartAutoSync() {
+        val key = if (settings.autoSync) "on:${settings.syncIntervalSec}" else "off"
+        if (autoSyncJob?.isActive == true && runningAutoSyncKey == key) return
         autoSyncJob?.cancel()
+        runningAutoSyncKey = key
         if (!settings.autoSync) return
         val sec = (settings.syncIntervalSec.coerceAtLeast(30)) * 1000L
         autoSyncJob = scope.launch {

@@ -5,6 +5,7 @@ import io.github.yphyphyph.gogauge.data.model.PageResult
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
 import io.github.yphyphyph.gogauge.data.model.SessionStat
 import io.github.yphyphyph.gogauge.data.model.SyncProgress
+import io.github.yphyphyph.gogauge.data.model.SyncState
 import io.github.yphyphyph.gogauge.data.model.UsageRecord
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
 import io.github.yphyphyph.gogauge.data.remote.AuthException
@@ -150,21 +151,32 @@ class DashboardRepository(
         val quota = if (token.isNotEmpty()) _quota.value else null
         val now = java.time.LocalDateTime.now()
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-        return DashboardData(
-            loggedIn = token.isNotEmpty(),
-            quota = quota,
-            totals = usageDao.totals(range),
-            today = usageDao.totals("today"),
-            daily = usageDao.dailyStats(7),
-            trend = usageDao.dailyStats(30),
-            todayTrend = usageDao.todayTrend(),
-            models = usageDao.modelStats(range),
-            sync = syncDao.getSyncState(),
-            progress = _progress.value,
-            range = range,
-            usdCny = usdCny(),
-            serverTime = now,
-        )
+        // Run the independent DB/exchange queries concurrently to cut first-paint latency.
+        return coroutineScope {
+            val totalsDeferred = async { usageDao.totals(range) }
+            val todayDeferred = async { usageDao.totals("today") }
+            val dailyDeferred = async { usageDao.dailyStats(7) }
+            val trendDeferred = async { usageDao.dailyStats(30) }
+            val todayTrendDeferred = async { usageDao.todayTrend() }
+            val modelsDeferred = async { usageDao.modelStats(range) }
+            val syncDeferred = async { syncDao.getSyncState() }
+            val usdCnyDeferred = async { usdCny() }
+            DashboardData(
+                loggedIn = token.isNotEmpty(),
+                quota = quota,
+                totals = totalsDeferred.await(),
+                today = todayDeferred.await(),
+                daily = dailyDeferred.await(),
+                trend = trendDeferred.await(),
+                todayTrend = todayTrendDeferred.await(),
+                models = modelsDeferred.await(),
+                sync = syncDeferred.await(),
+                progress = _progress.value,
+                range = range,
+                usdCny = usdCnyDeferred.await(),
+                serverTime = now,
+            )
+        }
     }
 
     // ------------------------------------------------------------------
@@ -332,6 +344,9 @@ class DashboardRepository(
     }
 
     suspend fun listModels(): List<String> = usageDao.listModels()
+
+    /** Persisted sync progress/state (desktop get_sync_state parity). */
+    suspend fun syncState(): SyncState = syncDao.getSyncState()
 
     suspend fun settings(): AppSettings = db.settingsDao().getSettings()
 

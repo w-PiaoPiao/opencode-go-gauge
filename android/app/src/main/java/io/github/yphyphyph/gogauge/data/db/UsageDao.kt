@@ -174,9 +174,9 @@ abstract class UsageDao {
             val r = byHour[h]
             HourStat(
                 hour = "%02d:00".format(h),
-                input = r?.input ?: 0,
-                output = r?.output ?: 0,
-                reasoning = r?.reasoning ?: 0,
+                input = r?.input ?: 0L,
+                output = r?.output ?: 0L,
+                reasoning = r?.reasoning ?: 0L,
             )
         }
     }
@@ -319,11 +319,11 @@ abstract class UsageDao {
                 createdAt = r.createdAt,
                 model = r.model,
                 provider = r.provider,
-                inputTokens = r.inputTokens,
-                outputTokens = r.outputTokens,
-                reasoningTokens = r.reasoningTokens,
-                cacheReadTokens = r.cacheReadTokens,
-                cacheWriteTokens = (r.cacheWrite5mTokens ?: 0) + (r.cacheWrite1hTokens ?: 0),
+                inputTokens = r.inputTokens.toLong(),
+                outputTokens = r.outputTokens.toLong(),
+                reasoningTokens = r.reasoningTokens.toLong(),
+                cacheReadTokens = r.cacheReadTokens.toLong(),
+                cacheWriteTokens = (r.cacheWrite5mTokens ?: 0).toLong() + (r.cacheWrite1hTokens ?: 0).toLong(),
                 costUsd = r.costUsd,
                 sessionId = r.sessionId,
                 plan = r.plan,
@@ -351,49 +351,49 @@ abstract class UsageDao {
     data class TotalsRow(
         @androidx.room.ColumnInfo(name = "request_count") val requestCount: Int,
         @androidx.room.ColumnInfo(name = "session_count") val sessionCount: Int,
-        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Int,
-        @androidx.room.ColumnInfo(name = "cache_hit_tokens") val cacheHitTokens: Int,
-        @androidx.room.ColumnInfo(name = "cache_write_tokens") val cacheWriteTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Int,
+        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Long,
+        @androidx.room.ColumnInfo(name = "cache_hit_tokens") val cacheHitTokens: Long,
+        @androidx.room.ColumnInfo(name = "cache_write_tokens") val cacheWriteTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Long,
         @androidx.room.ColumnInfo(name = "total_cost_usd") val totalCostUsd: Double,
     )
 
     data class DailyStatRow(
         val date: String,
-        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Int,
-        @androidx.room.ColumnInfo(name = "cache_hit_tokens") val cacheHitTokens: Int,
-        @androidx.room.ColumnInfo(name = "cache_write_tokens") val cacheWriteTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Int,
+        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Long,
+        @androidx.room.ColumnInfo(name = "cache_hit_tokens") val cacheHitTokens: Long,
+        @androidx.room.ColumnInfo(name = "cache_write_tokens") val cacheWriteTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Long,
         @androidx.room.ColumnInfo(name = "total_cost_usd") val totalCostUsd: Double,
         @androidx.room.ColumnInfo(name = "request_count") val requestCount: Int,
     )
 
-    data class HourTrendRow(val hour: Int, val input: Int, val output: Int, val reasoning: Int)
+    data class HourTrendRow(val hour: Int, val input: Long, val output: Long, val reasoning: Long)
 
     data class ModelStatRow(
         val model: String,
         @androidx.room.ColumnInfo(name = "request_count") val requestCount: Int,
         @androidx.room.ColumnInfo(name = "session_count") val sessionCount: Int,
-        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Int,
-        @androidx.room.ColumnInfo(name = "cache_hit_tokens") val cacheHitTokens: Int,
-        @androidx.room.ColumnInfo(name = "cache_write_tokens") val cacheWriteTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Int,
+        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Long,
+        @androidx.room.ColumnInfo(name = "cache_hit_tokens") val cacheHitTokens: Long,
+        @androidx.room.ColumnInfo(name = "cache_write_tokens") val cacheWriteTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Long,
         @androidx.room.ColumnInfo(name = "total_cost_usd") val totalCostUsd: Double,
     )
 
     data class SessionRow(
         @androidx.room.ColumnInfo(name = "session_id") val sessionId: String,
         @androidx.room.ColumnInfo(name = "request_count") val requestCount: Int,
-        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Int,
-        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Int,
+        @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Long,
+        @androidx.room.ColumnInfo(name = "total_reasoning_tokens") val totalReasoningTokens: Long,
         @androidx.room.ColumnInfo(name = "total_cost_usd") val totalCostUsd: Double,
         @androidx.room.ColumnInfo(name = "last_at") val lastAt: String,
     )

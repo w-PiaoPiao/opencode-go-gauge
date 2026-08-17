@@ -275,28 +275,32 @@ fun GgPullIndicator(
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
     val density = LocalDensity.current
     val offsetPx = with(density) { (state.distanceFraction * 96).dp.roundToPx() }
-    Box(
-        modifier
-            .offset { IntOffset(0, offsetPx) }
-            .size(44.dp)
-            .shadow(3.dp, CircleShape)
-            .background(MaterialTheme.colorScheme.surface, CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (isRefreshing) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(28.dp),
-                color = color,
-                strokeWidth = 3.dp,
-            )
-        } else {
-            CircularProgressIndicator(
-                progress = { state.distanceFraction.coerceIn(0f, 1f) },
-                modifier = Modifier.size(28.dp),
-                color = color,
-                strokeWidth = 3.dp,
-                trackColor = trackColor,
-            )
+    // Only render while pulling or refreshing — otherwise the circle sits on top of the
+    // page content permanently (distanceFraction == 0 when idle).
+    if (isRefreshing || state.distanceFraction > 0f) {
+        Box(
+            modifier
+                .offset { IntOffset(0, offsetPx) }
+                .size(44.dp)
+                .shadow(3.dp, CircleShape)
+                .background(MaterialTheme.colorScheme.surface, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isRefreshing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(28.dp),
+                    color = color,
+                    strokeWidth = 3.dp,
+                )
+            } else {
+                CircularProgressIndicator(
+                    progress = { state.distanceFraction.coerceIn(0f, 1f) },
+                    modifier = Modifier.size(28.dp),
+                    color = color,
+                    strokeWidth = 3.dp,
+                    trackColor = trackColor,
+                )
+            }
         }
     }
 }

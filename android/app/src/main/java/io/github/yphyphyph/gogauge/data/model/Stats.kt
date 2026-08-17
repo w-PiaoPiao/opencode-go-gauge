@@ -4,28 +4,28 @@ package io.github.yphyphyph.gogauge.data.model
 data class Totals(
     val requestCount: Int = 0,
     val sessionCount: Int = 0,
-    val totalInputTokens: Int = 0,     // input + cache read + cache write
-    val uncachedInputTokens: Int = 0,
-    val totalReasoningTokens: Int = 0,
-    val cacheHitTokens: Int = 0,
-    val cacheWriteTokens: Int = 0,
-    val totalOutputTokens: Int = 0,
+    val totalInputTokens: Long = 0L,     // input + cache read + cache write
+    val uncachedInputTokens: Long = 0L,
+    val totalReasoningTokens: Long = 0L,
+    val cacheHitTokens: Long = 0L,
+    val cacheWriteTokens: Long = 0L,
+    val totalOutputTokens: Long = 0L,
     val totalCostUsd: Double = 0.0,
-    val hitRate: Double = 0.0,         // percent
+    val hitRate: Double = 0.0,           // percent
 ) {
     val totalTokens: Long
-        get() = totalInputTokens.toLong() + totalOutputTokens + totalReasoningTokens
+        get() = totalInputTokens + totalOutputTokens + totalReasoningTokens
 }
 
 /** One day aggregate — mirrors db.daily_stats output (desktop). */
 data class DailyStat(
     val date: String,
-    val totalInputTokens: Int,
-    val uncachedInputTokens: Int,
-    val totalReasoningTokens: Int,
-    val cacheHitTokens: Int,
-    val cacheWriteTokens: Int,
-    val totalOutputTokens: Int,
+    val totalInputTokens: Long,
+    val uncachedInputTokens: Long,
+    val totalReasoningTokens: Long,
+    val cacheHitTokens: Long,
+    val cacheWriteTokens: Long,
+    val totalOutputTokens: Long,
     val totalCostUsd: Double,
     val requestCount: Int,
     val hitRate: Double,
@@ -34,9 +34,9 @@ data class DailyStat(
 /** One hour of today — mirrors db.today_trend output (desktop). */
 data class HourStat(
     val hour: String,
-    val input: Int,
-    val output: Int,
-    val reasoning: Int,
+    val input: Long,
+    val output: Long,
+    val reasoning: Long,
 )
 
 /** Per-model aggregate — mirrors db.model_stats output (desktop). */
@@ -44,12 +44,12 @@ data class ModelStat(
     val model: String,
     val requestCount: Int,
     val sessionCount: Int,
-    val totalInputTokens: Int,
-    val uncachedInputTokens: Int,
-    val totalReasoningTokens: Int,
-    val cacheHitTokens: Int,
-    val cacheWriteTokens: Int,
-    val totalOutputTokens: Int,
+    val totalInputTokens: Long,
+    val uncachedInputTokens: Long,
+    val totalReasoningTokens: Long,
+    val cacheHitTokens: Long,
+    val cacheWriteTokens: Long,
+    val totalOutputTokens: Long,
     val totalCostUsd: Double,
     val hitRate: Double,
 )

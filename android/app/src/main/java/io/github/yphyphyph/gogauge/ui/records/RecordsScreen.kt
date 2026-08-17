@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,8 +12,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -66,30 +67,32 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
         modifier = Modifier.fillMaxSize(),
         indicator = {},
     ) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+    val sessions = vm.sessions
+    val records = vm.records
+    // LazyColumn so long lists of sessions/records are composed & recycled lazily
+    // instead of building every row eagerly inside a verticalScroll column.
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(s.recordsPage, style = MaterialTheme.typography.titleLarge)
+        item { Text(s.recordsPage, style = MaterialTheme.typography.titleLarge) }
 
         // ---- sessions ----
-        GgCard {
-            CardHeader(
-                s.sessionUsage,
-                trailing = { Hint(vm.sessions?.let { "${s.totalN} ${Fmt.int(it.total)} ${s.sessions}" } ?: "") },
-            )
-            val sessions = vm.sessions
-            if (sessions == null || sessions.records.isEmpty()) {
-                Text(
-                    s.noData,
-                    modifier = Modifier.padding(16.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        item {
+            GgCard {
+                CardHeader(
+                    s.sessionUsage,
+                    trailing = { Hint(sessions?.let { "${s.totalN} ${Fmt.int(it.total)} ${s.sessions}" } ?: "") },
                 )
-            } else {
-                sessions.records.forEach { SessionRow(it, vm) }
+                if (sessions == null || sessions.records.isEmpty()) {
+                    NoDataLine(s.noData)
+                }
+            }
+        }
+        if (sessions != null && sessions.records.isNotEmpty()) {
+            items(sessions.records) { SessionRow(it, vm) }
+            item {
                 Pager(
                     page = vm.sessionsPage,
                     total = sessions.total,
@@ -102,26 +105,26 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
         }
 
         // ---- usage records ----
-        GgCard {
-            CardHeader(
-                s.usageRecords,
-                trailing = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ModelFilter(vm)
-                        Spacer(Modifier.width(8.dp))
-                        Hint(vm.records?.let { "${s.totalN} ${Fmt.int(it.total)} ${s.items}" } ?: "")
-                    }
-                },
-            )
-            val records = vm.records
-            if (records == null || records.records.isEmpty()) {
-                Text(
-                    s.noData,
-                    modifier = Modifier.padding(16.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        item {
+            GgCard {
+                CardHeader(
+                    s.usageRecords,
+                    trailing = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ModelFilter(vm)
+                            Spacer(Modifier.width(8.dp))
+                            Hint(records?.let { "${s.totalN} ${Fmt.int(it.total)} ${s.items}" } ?: "")
+                        }
+                    },
                 )
-            } else {
-                records.records.forEach { RecordRow(it, vm) }
+                if (records == null || records.records.isEmpty()) {
+                    NoDataLine(s.noData)
+                }
+            }
+        }
+        if (records != null && records.records.isNotEmpty()) {
+            items(records.records) { RecordRow(it, vm) }
+            item {
                 Pager(
                     page = vm.recordsPage,
                     total = records.total,
@@ -132,7 +135,7 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
                 )
             }
         }
-        Spacer(Modifier.height(8.dp))
+        item { Spacer(Modifier.height(8.dp)) }
     }
     }
     GgPullIndicator(
@@ -141,6 +144,15 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
         modifier = Modifier.align(Alignment.TopCenter),
     )
     }
+}
+
+@Composable
+private fun NoDataLine(text: String) {
+    Text(
+        text,
+        modifier = Modifier.padding(16.dp),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 @Composable
 private fun SessionRow(st: SessionStat, vm: MainViewModel) {

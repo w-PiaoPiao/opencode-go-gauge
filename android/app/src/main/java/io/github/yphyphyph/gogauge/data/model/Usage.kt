@@ -26,11 +26,11 @@ data class UsageRecordRow(
     val createdAt: String,
     val model: String,
     val provider: String?,
-    val inputTokens: Int,
-    val outputTokens: Int,
-    val reasoningTokens: Int,
-    val cacheReadTokens: Int,
-    val cacheWriteTokens: Int,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val reasoningTokens: Long,
+    val cacheReadTokens: Long,
+    val cacheWriteTokens: Long,
     val costUsd: Double,
     val sessionId: String?,
     val plan: String?,
@@ -40,10 +40,10 @@ data class UsageRecordRow(
 data class SessionStat(
     val sessionId: String,
     val requestCount: Int,
-    val totalInputTokens: Int,       // incl. cache read + write
-    val uncachedInputTokens: Int,
-    val totalOutputTokens: Int,
-    val totalReasoningTokens: Int,
+    val totalInputTokens: Long,      // incl. cache read + write
+    val uncachedInputTokens: Long,
+    val totalOutputTokens: Long,
+    val totalReasoningTokens: Long,
     val totalCostUsd: Double,
     val lastAt: String,
 )

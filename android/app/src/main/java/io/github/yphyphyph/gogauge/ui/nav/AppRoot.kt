@@ -7,6 +7,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -32,6 +33,12 @@ import io.github.yphyphyph.gogauge.ui.theme.GoGaugeTheme
 fun AppRoot() {
     val vm: MainViewModel = viewModel()
     var loginOpen by remember { mutableStateOf(false) }
+
+    // Once login succeeds the VM flips showLogin=false; close the login overlay so
+    // the app automatically transitions into the main shell.
+    LaunchedEffect(vm.showLogin) {
+        if (!vm.showLogin) loginOpen = false
+    }
 
     GoGaugeTheme(darkTheme = vm.darkMode) {
         when {

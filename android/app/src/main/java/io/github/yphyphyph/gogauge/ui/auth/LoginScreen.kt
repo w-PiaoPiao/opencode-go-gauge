@@ -151,6 +151,14 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                         loadUrl(Login.buildLoginUrl())
                     }.also { wvRef.value = it }
                 },
+                // Tear the WebView down when this composable leaves composition so we
+                // don't leak a WebView on every visit to the login page.
+                onRelease = { wv ->
+                    wv.stopLoading()
+                    wv.loadUrl("about:blank")
+                    wv.destroy()
+                    if (wvRef.value === wv) wvRef.value = null
+                },
             )
             // Loading feedback during page hops (auth page → GitHub → back)
             if (loading) {
