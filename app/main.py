@@ -7,10 +7,13 @@
 """
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes
 import os
 import sys
 import tempfile
 import threading
+import time
 
 import webview
 
@@ -137,6 +140,180 @@ def _arm_quit_fallback(timeout: float = 3.0) -> None:
     "隐形进程" 只能强杀.
     """
     threading.Timer(timeout, lambda: os._exit(0), name="gousage-quit-fallback").start()
+# ── 单实例检测常量 (Win32) ──
+_LOCK_FILE_NAME = "GoGauge.lock"
+_MUTEX_NAME = "GoGauge_SingleInstance_Mutex"
+_ERROR_ALREADY_EXISTS = 183  # GetLastError: 命名对象已存在
+_ACTIVATE_RETRY_INTERVAL = 0.5  # 激活旧实例窗口的重试间隔(秒)
+_ACTIVATE_RETRY_TIMES = 30  # 重试次数 (共约15秒, 覆盖旧实例 onefile 解压+启动耗时)
+_SW_SHOW = 5
+_SW_RESTORE = 9
+_MB_ICONINFORMATION = 0x40
+_VK_MENU = 0x12  # ALT 虚拟键码
+_KEYEVENTF_KEYUP = 0x0002
+
+_mutex_handle = None  # 首实例持有的互斥体句柄 (全局引用防回收, 进程退出由内核自动释放)
+
+
+def _is_process_running(pid: int) -> bool:
+    """检查指定 PID 的进程是否存活.
+
+    Args:
+        pid: 目标进程ID
+    Returns:
+        True=进程存活 False=已退出
+    """
+    # 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION, 权限要求最低
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    return False
+
+
+def _get_process_image_name(pid: int) -> str:
+    """获取进程可执行文件完整路径, 用于确认锁文件 PID 是否仍属于 GoGauge.
+
+    Args:
+        pid: 目标进程ID
+    Returns:
+        可执行文件路径; 权限不足/进程不存在返回空串
+    """
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(1024)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _is_gogauge_process(pid: int) -> bool:
+    """确认指定 PID 的进程确为本程序 (打包 GoGauge.exe, 开发 python.exe).
+
+    进程崩溃后锁文件残留, 其 PID 可能被系统其他进程复用. 仅凭"进程存活"会误判为
+    旧实例仍在运行, 进而拦截新实例导致无法启动. 必须同时校验进程可执行文件名.
+    """
+    name = os.path.basename(_get_process_image_name(pid)).lower()
+    if getattr(sys, "frozen", False):
+        return "gogauge" in name
+    return name.startswith("python")
+
+
+def _activate_existing_instance(old_pid: int) -> bool:
+    """激活已运行实例的主窗口.
+
+    窗口可能被隐藏到托盘 (IsWindowVisible=False), 不能按可见性过滤,
+    改为枚举窗口, 按标题优先匹配主窗口 (页面 title 恒为 GoGauge).
+
+    Args:
+        old_pid: 已运行实例的进程ID; 0 表示不限定进程, 按标题全局匹配 (锁文件失效时兜底)
+    Returns:
+        True=找到并激活窗口 False=未找到任何窗口
+    """
+    user32 = ctypes.windll.user32
+    candidates: list[tuple[int, str]] = []  # (窗口句柄, 窗口标题)
+
+    # 回调签名必须用 HWND/LPARAM (64位系统下指针宽度), 用 c_int 会截断且吞异常
+    @ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _on_window(hwnd, _lparam):
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if old_pid == 0 or pid.value == old_pid:
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buf, 256)
+            if buf.value:  # 过滤 WinForms 无标题的消息窗口
+                candidates.append((hwnd, buf.value))
+        return True
+
+    user32.EnumWindows(_on_window, 0)
+    # 优先主窗口: 标题含 GoGauge 且非登录窗; 找不到再退回任一候选
+    hwnd = next((h for h, t in candidates if "GoGauge" in t and "Login" not in t), 0)
+    if not hwnd:
+        hwnd = next((h for h, t in candidates if "GoGauge" in t), 0)
+    if not hwnd:
+        return False
+    # 隐藏窗口用 SW_SHOW 唤起, 最小化窗口用 SW_RESTORE 还原
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, _SW_RESTORE)
+    else:
+        user32.ShowWindow(hwnd, _SW_SHOW)
+    # 后台进程直接 SetForegroundWindow 会被系统前台锁拒绝, 先模拟一次 ALT 击键绕过
+    user32.keybd_event(_VK_MENU, 0, 0, 0)
+    user32.keybd_event(_VK_MENU, 0, _KEYEVENTF_KEYUP, 0)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def _read_valid_lock_pid() -> int:
+    """读取锁文件中的首实例 PID 并校验有效性.
+
+    Returns:
+        有效的 GoGauge 进程ID; 锁文件不存在/损坏/PID 已失效时返回 0
+    """
+    try:
+        lock_path = os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME)
+        if os.path.isfile(lock_path):
+            with open(lock_path, "r") as fh:
+                pid = int(fh.read().strip())
+            if _is_process_running(pid) and _is_gogauge_process(pid):
+                return pid
+    except (ValueError, OSError):
+        pass
+    return 0
+
+
+def _activate_with_retry() -> bool:
+    """带重试激活旧实例窗口.
+
+    第二实例与首实例几乎同时启动时 (快速连击双击), 首实例可能仍在 onefile
+    解压/初始化, 窗口尚未创建. 此时需轮询等待其窗口就绪后再激活,
+    否则会误弹提示框并残留为第二个可见窗口.
+
+    Returns:
+        True=成功激活旧实例窗口 False=超时仍未找到窗口
+    """
+    for _ in range(_ACTIVATE_RETRY_TIMES):
+        if _activate_existing_instance(_read_valid_lock_pid()):
+            return True
+        time.sleep(_ACTIVATE_RETRY_INTERVAL)
+    return False
+
+
+def _ensure_single_instance() -> None:
+    """单实例守卫: 命名互斥体原子判定, 已有实例时激活其窗口并结束当前进程.
+
+    主判定用内核命名互斥体 (CreateMutexW): 创建是否冲突由内核原子保证,
+    无锁文件方案的竞态窗口 (双击过快/系统卡顿时两个实例互相看不到对方),
+    进程崩溃时内核自动回收互斥体, 无残留无 PID 复用问题.
+    锁文件降级为辅助: 记录首实例 PID 供激活窗口定位; 失效时按标题全局枚举兜底.
+    """
+    global _mutex_handle
+    # use_last_error=True: ctypes 每次调用后私有捕获错误码, 避免被 Python 中间系统调用污染
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+    if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
+        # 互斥体已存在 = 旧实例一定在运行, 激活其窗口后退出
+        if handle:
+            kernel32.CloseHandle(handle)
+        if not _activate_with_retry():
+            # 超时仍定位不到窗口 (极端情况): 提示从托盘操作
+            ctypes.windll.user32.MessageBoxW(
+                0, "GoGauge 已在运行, 请从系统托盘打开窗口。", "GoGauge", _MB_ICONINFORMATION
+            )
+        sys.exit(0)
+    # 首实例: 持有互斥体 (全局引用防回收, 进程退出由内核自动释放)
+    _mutex_handle = handle
+    # 锁文件记录当前 PID, 供后续实例激活窗口定位
+    try:
+        with open(os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME), "w") as fh:
+            fh.write(str(os.getpid()))
+    except OSError:
+        _mlog("[single-instance] 写锁文件失败")
 
 
 class TrayIcon:
@@ -270,6 +447,10 @@ def _destroy_all_windows() -> None:
 
 def main() -> None:
     global _quitting
+
+    # 单实例守卫: 已有实例在运行时激活其窗口, 当前进程直接退出
+    _ensure_single_instance()
+
     db.get_db()  # 初始化数据库
 
     host, port = server.start_server()
