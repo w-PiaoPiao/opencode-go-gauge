@@ -567,14 +567,14 @@ function chartTrend(trend) {
 }
 
 /* ---------------- 会话用量 ---------------- */
-let sesLoading = false;
+let sesSeq = 0;
 async function loadSessions() {
-  if (sesLoading) return;
-  sesLoading = true;
+  const seq = ++sesSeq;
   const body = $("sessions-body");
   try {
     const q = new URLSearchParams({ page: state.sessions.page, page_size: 7 });
     const data = await api(`/api/usage/sessions?${q}`);
+    if (seq !== sesSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
     state.sessions.total = data.total;
     $("ses-count").textContent = `${t("totalN")} ${fmtInt(data.total)} ${t("sessions")}`;
     if (!data.records.length) {
@@ -601,9 +601,7 @@ async function loadSessions() {
     $("ses-prev").disabled = state.sessions.page <= 1;
     $("ses-next").disabled = state.sessions.page >= totalPages;
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--red);padding:20px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
-  } finally {
-    sesLoading = false;
+    if (seq === sesSeq) body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--red);padding:20px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 function shortId(id) {
@@ -619,15 +617,15 @@ function fmtDateTimeShort(iso) {
 }
 
 /* ---------------- 使用记录 ---------------- */
-let recLoading = false;
+let recSeq = 0;
 async function loadRecords() {
-  if (recLoading) return;
-  recLoading = true;
+  const seq = ++recSeq;
   const body = $("records-body");
   try {
     const q = new URLSearchParams({ page: state.records.page, page_size: 7 });
     if (state.records.model) q.set("model", state.records.model);
     const data = await api(`/api/usage/records?${q}`);
+    if (seq !== recSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
     state.records.total = data.total;
     const sel = $("rec-model-filter");
     const cur = sel.value;
@@ -656,9 +654,7 @@ async function loadRecords() {
     $("pg-prev").disabled = state.records.page <= 1;
     $("pg-next").disabled = state.records.page >= totalPages;
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
-  } finally {
-    recLoading = false;
+    if (seq === recSeq) body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
