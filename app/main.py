@@ -23,8 +23,27 @@ APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
 WINDOW_SIZE = (1280, 840)
 WINDOW_MIN_SIZE = (1000, 680)
 
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def _screen_workarea_logical() -> tuple[int, int]:
+    """主屏工作区尺寸(逻辑像素): 窗口初始尺寸不超工作区, 避免矮屏上底部被裁."""
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem() or 96
+        scale = dpi / 96.0
+        rect = _RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return int(rect.right / scale), int(rect.bottom / scale)
+    except Exception:  # noqa: BLE001
+        pass
+    return WINDOW_SIZE
+
 _quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
 _tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
+_move_lock = threading.Lock()  # 拖动 move_by 串行化: 防 js_api 并发读-写丢增量
 
 
 def _enable_taskbar_minimize(win) -> None:
@@ -328,6 +347,33 @@ class WindowApi:
             self._win.minimize()
         return True
 
+    def move_by(self, dx: float, dy: float) -> bool:
+        """标题栏拖动(增量): dx/dy 为屏幕物理像素增量, 直接换算窗口位置.
+
+        自实现拖动替代 pywebview easy_drag: easy_drag 的 JS 用 clientX 记录起点、
+        screenX 计算增量 (两坐标系在 DPI 缩放下不同源), 后端 move() 又把参数
+        乘一次 DPI 缩放, 高 DPI 屏幕上拖动会漂移抽动. 这里 JS 端 screenX 增量
+        已是物理像素, GetWindowRect/SetWindowPos 同为物理坐标, 全程 1:1 跟随.
+
+        加锁: js_api 高频触发时多个调用可能并发进入, 并发读-写会让多个线程
+        读到同一旧位置、各自 SetWindowPos, 增量被覆盖丢失 (实测 50 次调用
+        只移动了 34 段). 锁保证 GetWindowRect→SetWindowPos 原子, 每次移动
+        都基于最新位置.
+        """
+        try:
+            native = self._win.native
+            hwnd = int(native.Handle.ToInt32())
+            with _move_lock:
+                rect = _RECT()
+                ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, None, rect.left + int(dx), rect.top + int(dy),
+                    0, 0, 0x0001 | 0x0004,  # SWP_NOSIZE | SWP_NOZORDER
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     def close(self) -> bool:
         """关闭按钮: 托盘可用时最小化到托盘, 否则真正关闭."""
         global _quitting, _tray_ready
@@ -370,14 +416,22 @@ def main() -> None:
     api = WindowApi()
 
     # 启动窗口: 始终加载本地页面; 未登录时前端显示欢迎页引导登录
+    # 初始尺寸不超过屏幕工作区 (矮屏/高分屏下避免底部被裁); frameless 拖动由
+    # 前端自实现 (js_api.move_by), 不再使用 pywebview easy_drag (DPI 缩放下抽动)
+    wa_w, wa_h = _screen_workarea_logical()
+    win_w = min(WINDOW_SIZE[0], wa_w - 60)
+    win_h = min(WINDOW_SIZE[1], wa_h - 60)
     main_win = webview.create_window(
         APP_TITLE,
         dashboard_url,
-        width=WINDOW_SIZE[0],
-        height=WINDOW_SIZE[1],
+        width=win_w,
+        height=win_h,
         min_size=WINDOW_MIN_SIZE,
         frameless=True,  # 自定义标题栏
-        easy_drag=True,
+        # 显式关闭 easy_drag: 其默认值为 True, 不传会保持开启;
+        # easy_drag 的 JS 用 clientX 记起点/screenX 算增量 + 后端再乘 DPI 缩放,
+        # 高 DPI 屏幕拖动漂移抽动. 窗口拖动由前端自实现 (js_api.move_by).
+        easy_drag=False,
         js_api=api,
     )
     api.bind(main_win)

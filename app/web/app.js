@@ -273,6 +273,48 @@ function bindTitlebar() {
   $("tb-min").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.minimize(); });
   $("tb-close").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.close(); });
   $("tb-theme").addEventListener("click", () => applyDarkMode(document.documentElement.dataset.theme !== "dark"));
+
+  /* 标题栏拖动 (自实现, 替代 pywebview easy_drag):
+     easy_drag 的 JS 用 clientX 记起点、screenX 算增量 (DPI 缩放下两坐标系
+     不同源), 后端 move() 再乘一次缩放, 高 DPI 屏幕拖动会漂移抽动.
+     这里用相邻两次 mousemove 的屏幕增量 (screenX/screenY 物理像素) 交给
+     后端 move_by, 后端以同坐标系 SetWindowPos 增量移动, 1:1 跟随.
+     关键点:
+     1) 增量取相邻事件差值, 不能取按下点差值 — 否则每次都按总位移叠加到
+        窗口当前位置, 连续触发会累积放大, 拖远一点就飞出屏幕;
+     2) mousemove 频率远高于 js_api 往返速度, 逐事件调用会丢消息/乱序,
+        先把增量累积到 pending, 用 requestAnimationFrame 合并成一次
+        move_by 再发, 保证每次移动都精确送达. */
+  let drag = null;
+  let pending = { x: 0, y: 0 };
+  let rafId = null;
+  function flushDrag() {
+    rafId = null;
+    if (pending.x === 0 && pending.y === 0) return;
+    const dx = pending.x, dy = pending.y;
+    pending = { x: 0, y: 0 };
+    pywebviewApi().then((a) => { if (a && a.move_by) a.move_by(dx, dy); });
+  }
+  document.querySelector(".tb").addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest("button, a")) return;  // 标题栏控件不触发拖动
+    drag = { lx: e.screenX, ly: e.screenY };
+    pending = { x: 0, y: 0 };
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    pending.x += e.screenX - drag.lx;
+    pending.y += e.screenY - drag.ly;
+    drag.lx = e.screenX;
+    drag.ly = e.screenY;
+    if (!rafId) rafId = requestAnimationFrame(flushDrag);
+  });
+  window.addEventListener("mouseup", () => {
+    drag = null;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    flushDrag();  // 释放残留增量, 避免窗口停在半路
+  });
 }
 
 /* ---------------- 主题 / 货币 ---------------- */
