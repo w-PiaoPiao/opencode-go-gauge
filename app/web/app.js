@@ -210,7 +210,11 @@ function escapeHtml(s) {
 /* ---------------- API ---------------- */
 async function api(path, opts = {}) {
   const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  if (!resp.ok) {
+    let msg = "HTTP " + resp.status;
+    try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch (e) { /* 无 body 或非 JSON 时保持默认 */ }
+    throw new Error(msg);
+  }
   return resp.json();
 }
 
@@ -661,7 +665,7 @@ async function loadRecords() {
 /* ---------------- 模型图标 ---------------- */
 function modelIcon(m) {
   const base = String(m || "").toLowerCase().split("-")[0];
-  const map = { deepseek: "deepseek", glm: "glm", gpt: "gpt", grok: "grok", kimi: "kimi", mimo: "mimo", minimax: "minimax", qwen: "qwen", hy: "hy" };
+  const map = { deepseek: "deepseek", glm: "glm", gpt: "gpt", grok: "grok", kimi: "kimi", meta: "meta", mimo: "mimo", minimax: "minimax", muse: "meta", qwen: "qwen", hy: "hy" };
   const name = map[base] || "deepseek";
   const dark = document.documentElement.dataset.theme === "dark";
   const themed = dark && ["gpt", "grok", "mimo"].includes(name) ? `${name}-color` : name;
