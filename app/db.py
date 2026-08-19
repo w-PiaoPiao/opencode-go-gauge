@@ -383,6 +383,7 @@ def usage_records_page(
             "cache_write_tokens": (r["cache_write_5m_tokens"] or 0) + (r["cache_write_1h_tokens"] or 0),
             "cost_usd": r["cost_usd"],
             "session_id": r["session_id"],
+            "key_id": r["key_id"],
             "plan": r["plan"],
         }
         records.append(rec)
@@ -403,8 +404,10 @@ def session_stats_page(
 ) -> tuple[list[dict[str, Any]], int]:
     """按会话聚合用量, 按成本降序, 返回 (records, total).
 
-    空 session_id (其他 agent 工具调用, 无会话归属) 聚合为一行
-    session_id="" 的"未归属"记录, 保证会话用量与明细/统计合计一致.
+    无 session_id 的记录 (其他 agent 工具 / 直接调 key 等) 不再合并成一行,
+    改为按 key_id 拆分, 前端以 "未归属 · key尾号" 展示, 来源一目了然.
+    仍有 key_id 也为空的记录兜底聚合为 session_id="" 的"未归属"行,
+    保证会话用量与明细/统计合计一致.
     """
     page = max(1, page)
     page_size = max(1, min(page_size, 50))
@@ -414,7 +417,10 @@ def session_stats_page(
         where.append("datetime(created_at) >= datetime('now', ?)")
         params.append(f"-{days} days")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-    session_key = "CASE WHEN session_id IS NULL OR session_id = '' THEN '' ELSE session_id END"
+    session_key = (
+        "CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id "
+        "WHEN key_id IS NOT NULL AND key_id != '' THEN key_id ELSE '' END"
+    )
     conn = get_db()
     total = int(
         conn.execute(
@@ -423,6 +429,7 @@ def session_stats_page(
     )
     rows = conn.execute(
         f"""SELECT {session_key} AS session_id,
+               MAX(key_id) AS key_id,
                COUNT(*) AS request_count,
                SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
                SUM(input_tokens) AS uncached_input_tokens,
@@ -439,6 +446,7 @@ def session_stats_page(
     records = [
         {
             "session_id": r["session_id"],
+            "key_id": r["key_id"],
             "request_count": int(r["request_count"]),
             "total_input_tokens": int(r["total_input_tokens"] or 0),
             "uncached_input_tokens": int(r["uncached_input_tokens"] or 0),
@@ -465,6 +473,37 @@ def get_settings() -> dict[str, Any]:
     merged = dict(_DEFAULT_SETTINGS)
     merged.update({k: v for k, v in data.items() if k in _DEFAULT_SETTINGS})
     return merged
+
+
+def get_key_names() -> dict[str, str]:
+    """读取缓存的 key_id -> 显示名称 映射 (来自 opencode keys 页面)."""
+    row = get_db().execute("SELECT payload FROM settings WHERE id = 1").fetchone()
+    if not row:
+        return {}
+    try:
+        data = json.loads(row["payload"])
+        names = data.get("key_names") or {}
+        return names if isinstance(names, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def save_key_names(names: dict[str, str]) -> None:
+    """持久化 key_id -> 显示名称 映射到 settings."""
+    row = get_db().execute("SELECT payload FROM settings WHERE id = 1").fetchone()
+    try:
+        data = json.loads(row["payload"]) if row else {}
+        if not isinstance(data, dict):
+            data = {}
+    except (TypeError, ValueError):
+        data = {}
+    data["key_names"] = {k: v for k, v in names.items() if k and v}
+    conn = get_db()
+    conn.execute(
+        "UPDATE settings SET payload = ?, updated_at = ? WHERE id = 1",
+        (json.dumps(data, ensure_ascii=False), _now_iso()),
+    )
+    conn.commit()
 
 
 def save_settings(payload: dict[str, Any]) -> dict[str, Any]:

@@ -14,7 +14,7 @@ const I18N = {
     modelUsage: "模型用量", input: "输入", output: "输出", cost: "成本",
     usageTrend: "用量趋势", usageRecords: "使用记录", allModels: "全部模型",
     recordsPage: "使用记录",
-    sessionUsage: "会话用量", colSession: "会话", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
+    sessionUsage: "会话用量", colSession: "会话", colKey: "Key 名称", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
     setUpdate: "软件更新", currentVersion: "当前版本", checkUpdate: "检查更新", checkUpdateDesc: "检查 GitHub 上是否有新版本", checkUpdateBtn: "检查更新",
     checkingUpdate: "检查中…", updateFound: "发现新版本", updateNone: "已是最新版本", updateFailed: "检查更新失败", goDownload: "前往下载",
     colTime: "时间", colModel: "模型", colInput: "输入", colOutput: "输出",
@@ -79,7 +79,7 @@ const I18N = {
     modelUsage: "Model Usage", input: "Input", output: "Output", cost: "Cost",
     usageTrend: "Usage Trend", usageRecords: "Usage Records", allModels: "All Models",
     recordsPage: "Records",
-    sessionUsage: "Session Usage", colSession: "Session", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
+    sessionUsage: "Session Usage", colSession: "Session", colKey: "Key Name", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
     setUpdate: "Software Update", currentVersion: "Current Version", checkUpdate: "Check Updates", checkUpdateDesc: "Check GitHub for new versions", checkUpdateBtn: "Check Updates",
     checkingUpdate: "Checking…", updateFound: "New Version Available", updateNone: "You're up to date", updateFailed: "Check failed", goDownload: "Go to Download",
     colTime: "Time", colModel: "Model", colInput: "Input", colOutput: "Output",
@@ -582,11 +582,12 @@ async function loadSessions() {
     state.sessions.total = data.total;
     $("ses-count").textContent = `${t("totalN")} ${fmtInt(data.total)} ${t("sessions")}`;
     if (!data.records.length) {
-      body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">${t("noData")}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">${t("noData")}</td></tr>`;
     } else {
       let html = data.records.map((s) => `
-        <tr>${s.session_id
-          ? `<td title="${escapeHtml(s.session_id)}">${escapeHtml(s.session_id)}</td>`
+        <tr><td class="key-name">${escapeHtml(s.key_name || "—")}</td>
+        ${s.session_id
+          ? `<td title="${escapeHtml(s.session_id)}">${escapeHtml(shortId(s.session_id))}</td>`
           : `<td class="unassigned">${t("unassigned")}</td>`}
         <td>${fmtDateTime(s.last_at)}</td>
         <td class="num">${fmtTokens(s.total_input_tokens)}</td>
@@ -596,7 +597,7 @@ async function loadSessions() {
         <td class="num">${fmtMoney(s.total_cost_usd)}</td></tr>`).join("");
       // 固定 7 行, 不足补空行
       if (data.records.length < 7) {
-        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(7) + '</tr>').repeat(7 - data.records.length);
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(8) + '</tr>').repeat(7 - data.records.length);
       }
       body.innerHTML = html;
     }
@@ -605,12 +606,16 @@ async function loadSessions() {
     $("ses-prev").disabled = state.sessions.page <= 1;
     $("ses-next").disabled = state.sessions.page >= totalPages;
   } catch (e) {
-    if (seq === sesSeq) body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--red);padding:20px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
+    if (seq === sesSeq) body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:20px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 function shortId(id) {
   const s = String(id || "");
-  return s.length > 14 ? s.slice(0, 12) + "…" : s;
+  // 会话 ID 较长时省略中间, 保留头尾便于区分
+  if (s.length <= 24) return s;
+  const head = s.slice(0, 10);
+  const tail = s.slice(-6);
+  return `${head}…${tail}`;
 }
 function fmtDateTimeShort(iso) {
   if (!iso) return "—";
@@ -640,7 +645,8 @@ async function loadRecords() {
       body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:24px">${t("noData")}</td></tr>`;
     } else {
       let html = data.records.map((r) => `
-        <tr><td>${fmtDateTime(r.created_at)}</td>
+        <tr><td class="key-name">${escapeHtml(r.key_name || "—")}</td>
+        <td>${fmtDateTime(r.created_at)}</td>
         <td><span class="model-cell">${modelIcon(r.model)}${escapeHtml(r.model)}</span></td>
         <td class="num">${fmtTokens(r.input_tokens)}</td>
         <td class="num">${fmtTokens(r.output_tokens)}</td>
@@ -649,7 +655,7 @@ async function loadRecords() {
         <td class="num">${fmtMoney(r.cost_usd)}</td></tr>`).join("");
       // 固定 7 行, 不足补空行
       if (data.records.length < 7) {
-        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(7) + '</tr>').repeat(7 - data.records.length);
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(8) + '</tr>').repeat(7 - data.records.length);
       }
       body.innerHTML = html;
     }
