@@ -15,8 +15,8 @@ android {
         applicationId = "io.github.yphyphyph.gogauge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "1.0.2"
     }
 
     // Debug keystore lives in the workspace (~/.android not writable in this env)
