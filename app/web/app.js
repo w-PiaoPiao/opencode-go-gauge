@@ -14,7 +14,7 @@ const I18N = {
     modelUsage: "模型用量", input: "输入", output: "输出", cost: "成本",
     usageTrend: "用量趋势", usageRecords: "使用记录", allModels: "全部模型",
     recordsPage: "使用记录",
-    sessionUsage: "会话用量", colSession: "会话", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
+    sessionUsage: "会话用量", colSession: "会话", colKey: "Key 名称", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
     setUpdate: "软件更新", currentVersion: "当前版本", checkUpdate: "检查更新", checkUpdateDesc: "检查 GitHub 上是否有新版本", checkUpdateBtn: "检查更新",
     checkingUpdate: "检查中…", updateFound: "发现新版本", updateNone: "已是最新版本", updateFailed: "检查更新失败", goDownload: "前往下载",
     colTime: "时间", colModel: "模型", colInput: "输入", colOutput: "输出",
@@ -79,7 +79,7 @@ const I18N = {
     modelUsage: "Model Usage", input: "Input", output: "Output", cost: "Cost",
     usageTrend: "Usage Trend", usageRecords: "Usage Records", allModels: "All Models",
     recordsPage: "Records",
-    sessionUsage: "Session Usage", colSession: "Session", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
+    sessionUsage: "Session Usage", colSession: "Session", colKey: "Key Name", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
     setUpdate: "Software Update", currentVersion: "Current Version", checkUpdate: "Check Updates", checkUpdateDesc: "Check GitHub for new versions", checkUpdateBtn: "Check Updates",
     checkingUpdate: "Checking…", updateFound: "New Version Available", updateNone: "You're up to date", updateFailed: "Check failed", goDownload: "Go to Download",
     colTime: "Time", colModel: "Model", colInput: "Input", colOutput: "Output",
@@ -210,7 +210,11 @@ function escapeHtml(s) {
 /* ---------------- API ---------------- */
 async function api(path, opts = {}) {
   const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  if (!resp.ok) {
+    let msg = "HTTP " + resp.status;
+    try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch (e) { /* 无 body 或非 JSON 时保持默认 */ }
+    throw new Error(msg);
+  }
   return resp.json();
 }
 
@@ -273,6 +277,48 @@ function bindTitlebar() {
   $("tb-min").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.minimize(); });
   $("tb-close").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.close(); });
   $("tb-theme").addEventListener("click", () => applyDarkMode(document.documentElement.dataset.theme !== "dark"));
+
+  /* 标题栏拖动 (自实现, 替代 pywebview easy_drag):
+     easy_drag 的 JS 用 clientX 记起点、screenX 算增量 (DPI 缩放下两坐标系
+     不同源), 后端 move() 再乘一次缩放, 高 DPI 屏幕拖动会漂移抽动.
+     这里用相邻两次 mousemove 的屏幕增量 (screenX/screenY 物理像素) 交给
+     后端 move_by, 后端以同坐标系 SetWindowPos 增量移动, 1:1 跟随.
+     关键点:
+     1) 增量取相邻事件差值, 不能取按下点差值 — 否则每次都按总位移叠加到
+        窗口当前位置, 连续触发会累积放大, 拖远一点就飞出屏幕;
+     2) mousemove 频率远高于 js_api 往返速度, 逐事件调用会丢消息/乱序,
+        先把增量累积到 pending, 用 requestAnimationFrame 合并成一次
+        move_by 再发, 保证每次移动都精确送达. */
+  let drag = null;
+  let pending = { x: 0, y: 0 };
+  let rafId = null;
+  function flushDrag() {
+    rafId = null;
+    if (pending.x === 0 && pending.y === 0) return;
+    const dx = pending.x, dy = pending.y;
+    pending = { x: 0, y: 0 };
+    pywebviewApi().then((a) => { if (a && a.move_by) a.move_by(dx, dy); });
+  }
+  document.querySelector(".tb").addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest("button, a")) return;  // 标题栏控件不触发拖动
+    drag = { lx: e.screenX, ly: e.screenY };
+    pending = { x: 0, y: 0 };
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    pending.x += e.screenX - drag.lx;
+    pending.y += e.screenY - drag.ly;
+    drag.lx = e.screenX;
+    drag.ly = e.screenY;
+    if (!rafId) rafId = requestAnimationFrame(flushDrag);
+  });
+  window.addEventListener("mouseup", () => {
+    drag = null;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    flushDrag();  // 释放残留增量, 避免窗口停在半路
+  });
 }
 
 /* ---------------- 主题 / 货币 ---------------- */
@@ -525,22 +571,23 @@ function chartTrend(trend) {
 }
 
 /* ---------------- 会话用量 ---------------- */
-let sesLoading = false;
+let sesSeq = 0;
 async function loadSessions() {
-  if (sesLoading) return;
-  sesLoading = true;
+  const seq = ++sesSeq;
   const body = $("sessions-body");
   try {
     const q = new URLSearchParams({ page: state.sessions.page, page_size: 7 });
     const data = await api(`/api/usage/sessions?${q}`);
+    if (seq !== sesSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
     state.sessions.total = data.total;
     $("ses-count").textContent = `${t("totalN")} ${fmtInt(data.total)} ${t("sessions")}`;
     if (!data.records.length) {
-      body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">${t("noData")}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">${t("noData")}</td></tr>`;
     } else {
       let html = data.records.map((s) => `
-        <tr>${s.session_id
-          ? `<td title="${escapeHtml(s.session_id)}">${escapeHtml(s.session_id)}</td>`
+        <tr><td class="key-name">${escapeHtml(s.key_name || "—")}</td>
+        ${s.session_id
+          ? `<td title="${escapeHtml(s.session_id)}">${escapeHtml(shortId(s.session_id))}</td>`
           : `<td class="unassigned">${t("unassigned")}</td>`}
         <td>${fmtDateTime(s.last_at)}</td>
         <td class="num">${fmtTokens(s.total_input_tokens)}</td>
@@ -550,7 +597,7 @@ async function loadSessions() {
         <td class="num">${fmtMoney(s.total_cost_usd)}</td></tr>`).join("");
       // 固定 7 行, 不足补空行
       if (data.records.length < 7) {
-        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(7) + '</tr>').repeat(7 - data.records.length);
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(8) + '</tr>').repeat(7 - data.records.length);
       }
       body.innerHTML = html;
     }
@@ -559,14 +606,16 @@ async function loadSessions() {
     $("ses-prev").disabled = state.sessions.page <= 1;
     $("ses-next").disabled = state.sessions.page >= totalPages;
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--red);padding:20px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
-  } finally {
-    sesLoading = false;
+    if (seq === sesSeq) body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:20px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 function shortId(id) {
   const s = String(id || "");
-  return s.length > 14 ? s.slice(0, 12) + "…" : s;
+  // 会话 ID 较长时省略中间, 保留头尾便于区分
+  if (s.length <= 24) return s;
+  const head = s.slice(0, 10);
+  const tail = s.slice(-6);
+  return `${head}…${tail}`;
 }
 function fmtDateTimeShort(iso) {
   if (!iso) return "—";
@@ -577,15 +626,15 @@ function fmtDateTimeShort(iso) {
 }
 
 /* ---------------- 使用记录 ---------------- */
-let recLoading = false;
+let recSeq = 0;
 async function loadRecords() {
-  if (recLoading) return;
-  recLoading = true;
+  const seq = ++recSeq;
   const body = $("records-body");
   try {
     const q = new URLSearchParams({ page: state.records.page, page_size: 7 });
     if (state.records.model) q.set("model", state.records.model);
     const data = await api(`/api/usage/records?${q}`);
+    if (seq !== recSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
     state.records.total = data.total;
     const sel = $("rec-model-filter");
     const cur = sel.value;
@@ -596,7 +645,8 @@ async function loadRecords() {
       body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:24px">${t("noData")}</td></tr>`;
     } else {
       let html = data.records.map((r) => `
-        <tr><td>${fmtDateTime(r.created_at)}</td>
+        <tr><td class="key-name">${escapeHtml(r.key_name || "—")}</td>
+        <td>${fmtDateTime(r.created_at)}</td>
         <td><span class="model-cell">${modelIcon(r.model)}${escapeHtml(r.model)}</span></td>
         <td class="num">${fmtTokens(r.input_tokens)}</td>
         <td class="num">${fmtTokens(r.output_tokens)}</td>
@@ -605,7 +655,7 @@ async function loadRecords() {
         <td class="num">${fmtMoney(r.cost_usd)}</td></tr>`).join("");
       // 固定 7 行, 不足补空行
       if (data.records.length < 7) {
-        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(7) + '</tr>').repeat(7 - data.records.length);
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(8) + '</tr>').repeat(7 - data.records.length);
       }
       body.innerHTML = html;
     }
@@ -614,16 +664,14 @@ async function loadRecords() {
     $("pg-prev").disabled = state.records.page <= 1;
     $("pg-next").disabled = state.records.page >= totalPages;
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
-  } finally {
-    recLoading = false;
+    if (seq === recSeq) body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
 /* ---------------- 模型图标 ---------------- */
 function modelIcon(m) {
   const base = String(m || "").toLowerCase().split("-")[0];
-  const map = { deepseek: "deepseek", glm: "glm", gpt: "gpt", grok: "grok", kimi: "kimi", mimo: "mimo", minimax: "minimax", qwen: "qwen", hy: "hy" };
+  const map = { deepseek: "deepseek", glm: "glm", gpt: "gpt", grok: "grok", kimi: "kimi", meta: "meta", mimo: "mimo", minimax: "minimax", muse: "meta", qwen: "qwen", hy: "hy" };
   const name = map[base] || "deepseek";
   const dark = document.documentElement.dataset.theme === "dark";
   const themed = dark && ["gpt", "grok", "mimo"].includes(name) ? `${name}-color` : name;

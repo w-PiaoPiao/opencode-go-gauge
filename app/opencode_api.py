@@ -498,3 +498,45 @@ def fetch_usage_page(
     server_id = usage_server_id or DEFAULT_USAGE_SERVER_ID
     text = _server_call(server_id, args, f"/workspace/{workspace_id}/usage", token)
     return parse_usage_response(text)
+
+
+_KEY_ENTRY_RE = re.compile(r'\{id:"(key_[A-Za-z0-9]+)",name:"([^"]*)"')
+
+
+def fetch_key_names(token: str, workspace_id: str) -> dict[str, str]:
+    """拉取工作区下所有 API key 的名称映射 (key_id -> 名称).
+
+    keys 页面内嵌的响应数据形如 {id:"key_xxx",name:"gongsi",key:"sk-...",...},
+    正则提取 id 与 name 即可获得 key 的显示名称 (如 "gongsi"/"deepseek gongsi").
+
+    Args:
+        token: 认证 cookie / token
+        workspace_id: 工作区 ID (wrk_xxx)
+
+    Returns:
+        key_id -> 名称 的映射; 页面拉取或解析失败时返回空 dict (不影响主流程)
+
+    Raises:
+        AuthError: 认证失败 (由 _fetch 抛出)
+    """
+    cookie = build_cookie_header(token)
+    if not cookie:
+        raise OpenCodeAPIError("token 为空")
+    url = f"https://opencode.ai/workspace/{workspace_id}/keys"
+    headers = {
+        "Cookie": cookie,
+        "User-Agent": USER_AGENT,
+        "Origin": "https://opencode.ai",
+        "Referer": f"https://opencode.ai/workspace/{workspace_id}/keys",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        html = _fetch(url, headers, timeout=15.0, retries=2)
+    except OpenCodeAPIError:
+        return {}
+    names: dict[str, str] = {}
+    for m in _KEY_ENTRY_RE.finditer(html):
+        key_id, name = m.group(1), m.group(2).strip()
+        if key_id and name:
+            names.setdefault(key_id, name)
+    return names

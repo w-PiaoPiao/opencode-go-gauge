@@ -17,6 +17,7 @@ from .updater import RELEASE_PAGE_URL, check_update
 from .opencode_api import (
     AuthError,
     OpenCodeAPIError,
+    fetch_key_names,
     fetch_quota,
     fetch_usage_page,
     resolve_workspace_id,
@@ -252,6 +253,12 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
         if window_days is not None:
             db.prune_old_records(window_days)
 
+        # 顺带刷新 key 显示名称缓存 (供会话/记录页展示 key 名称, 失败不影响同步结果)
+        try:
+            db.save_key_names(fetch_key_names(token, workspace_id))
+        except Exception:  # noqa: BLE001
+            pass
+
         if failed_pages:
             msg = f"完成, 但 {failed_pages} 页拉取失败 (数据不完整, 可再次全量同步补全)"
             db.update_sync_state("partial", msg, total_inserted)
@@ -443,6 +450,9 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         except ValueError:
             days = None
         records, total = db.usage_records_page(page, page_size, model, days)
+        key_names = db.get_key_names()
+        for rec in records:
+            rec["key_name"] = key_names.get(rec.get("key_id") or "", "")
         _json_response(
             handler,
             {
@@ -471,6 +481,12 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         except ValueError:
             days = None
         records, total = db.session_stats_page(page, page_size, days)
+        key_names = db.get_key_names()
+        for rec in records:
+            rec["key_name"] = key_names.get(rec.get("key_id") or "", "")
+            # 无 session 的行分组键为 key_id, 前端据此显示"未归属"
+            if rec["session_id"] and rec["session_id"].startswith("key_"):
+                rec["session_id"] = ""
         _json_response(
             handler,
             {
