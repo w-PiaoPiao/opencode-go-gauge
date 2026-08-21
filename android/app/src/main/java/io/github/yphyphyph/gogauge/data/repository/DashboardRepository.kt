@@ -279,6 +279,15 @@ class DashboardRepository(
                 usageDao.pruneOldRecords("-${windowDays} days")
             }
 
+            // 顺带刷新 key 显示名称缓存 (供会话/记录页展示 key 名称, 失败不影响同步结果
+            // — desktop server.py sync_usage parity)
+            try {
+                val names = api.fetchKeyNames(token, workspaceId)
+                if (names.isNotEmpty()) db.settingsDao().saveKeyNames(names)
+            } catch (e: Exception) {
+                android.util.Log.w("GoGauge", "fetchKeyNames failed", e)
+            }
+
             if (failedPages > 0) {
                 val msg = "完成, 但 $failedPages 页拉取失败 (数据不完整, 可再次全量同步补全)"
                 syncDao.updateSyncStateAndTotals("partial", msg, totalInserted)
@@ -335,12 +344,30 @@ class DashboardRepository(
 
     suspend fun recordsPage(page: Int, pageSize: Int, model: String?, days: Int?): PageResult<UsageRecordRow> {
         val (records, total) = usageDao.usageRecordsPage(page, pageSize, model, days)
-        return PageResult(records, total)
+        // 注入缓存的 key 显示名称 (desktop server.py /api/usage/records parity)
+        val names = db.settingsDao().getKeyNames()
+        val enriched = if (names.isEmpty()) records
+        else records.map { r ->
+            val n = r.keyId?.let(names::get)
+            if (n != null) r.copy(keyName = n) else r
+        }
+        return PageResult(enriched, total)
     }
 
     suspend fun sessionsPage(page: Int, pageSize: Int, days: Int?): PageResult<SessionStat> {
         val (records, total) = usageDao.sessionStatsPage(page, pageSize, days)
-        return PageResult(records, total)
+        // 注入 key 名称 + 无 session 的拆分行按 key 分组, 前端据此显示"未归属"
+        // (desktop server.py /api/usage/sessions parity)
+        val names = db.settingsDao().getKeyNames()
+        val enriched = records.map { st ->
+            val keyGroup = !st.keyId.isNullOrEmpty() && st.sessionId.startsWith("key_")
+            val n = st.keyId?.let(names::get)
+            st.copy(
+                sessionId = if (keyGroup) "" else st.sessionId,
+                keyName = n?.takeIf { it.isNotEmpty() },
+            )
+        }
+        return PageResult(enriched, total)
     }
 
     suspend fun listModels(): List<String> = usageDao.listModels()

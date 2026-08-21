@@ -34,6 +34,8 @@ data class UsageRecordRow(
     val costUsd: Double,
     val sessionId: String?,
     val plan: String?,
+    val keyId: String? = null,
+    val keyName: String? = null,
 )
 
 /** One aggregated session — mirrors db.session_stats_page output (desktop). */
@@ -46,6 +48,8 @@ data class SessionStat(
     val totalReasoningTokens: Long,
     val totalCostUsd: Double,
     val lastAt: String,
+    val keyId: String? = null,
+    val keyName: String? = null,
 )
 
 /** Paginated result with total count. */

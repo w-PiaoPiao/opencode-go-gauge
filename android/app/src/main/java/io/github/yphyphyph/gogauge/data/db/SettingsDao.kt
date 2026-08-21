@@ -4,6 +4,9 @@ import androidx.room.Dao
 import androidx.room.Query
 import io.github.yphyphyph.gogauge.data.model.AppSettings
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -46,14 +49,45 @@ abstract class SettingsDao {
             windowDays = patch.windowDays?.coerceIn(1, 3650),
             autoSync = patch.autoSync,
         )
-        val payload = buildString {
-            append("{\"sync_interval_sec\":").append(merged.syncIntervalSec)
-            append(",\"window_days\":").append(merged.windowDays ?: "null")
-            append(",\"auto_sync\":").append(merged.autoSync)
-            append("}")
-        }
+        // 保存时合并保留已有的 key_names — desktop db.save_settings 同 payload 行
+        // 覆盖写, 若不保留, 设置修改会清掉 key 名称缓存 (desktop parity).
+        val keyNames = getKeyNames()
+        val payload = buildJsonObject {
+            put("sync_interval_sec", JsonPrimitive(merged.syncIntervalSec))
+            put("window_days", merged.windowDays?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("auto_sync", JsonPrimitive(merged.autoSync))
+            put("key_names", buildJsonObject { for ((k, v) in keyNames) put(k, JsonPrimitive(v)) })
+        }.toString()
         savePayload(payload, java.time.Instant.now().toString())
         return merged
+    }
+
+    /** 读取缓存的 key_id -> 显示名称 映射 (desktop db.get_key_names parity). */
+    suspend fun getKeyNames(): Map<String, String> {
+        val raw = payload() ?: return emptyMap()
+        return try {
+            val obj = json.parseToJsonElement(raw).jsonObject
+            val names = obj["key_names"]?.jsonObject ?: return emptyMap()
+            names.mapValues { it.value.jsonPrimitive.content }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    /** 持久化 key_id -> 显示名称 映射到 settings payload (desktop db.save_key_names parity). */
+    suspend fun saveKeyNames(names: Map<String, String>) {
+        val filtered = names.filter { it.key.isNotEmpty() && it.value.isNotEmpty() }
+        val raw = payload() ?: "{}"
+        val base = try {
+            json.parseToJsonElement(raw).jsonObject
+        } catch (e: Exception) {
+            buildJsonObject {}
+        }
+        val merged = buildJsonObject {
+            for ((k, v) in base) put(k, v)
+            put("key_names", buildJsonObject { for ((k, v) in filtered) put(k, JsonPrimitive(v)) })
+        }
+        savePayload(merged.toString(), java.time.Instant.now().toString())
     }
 
     private fun kotlinx.serialization.json.JsonElement.contentOrNull(): String? {
