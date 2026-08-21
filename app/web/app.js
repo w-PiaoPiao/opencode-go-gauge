@@ -670,9 +670,12 @@ async function loadRecords() {
 
 /* ---------------- 模型图标 ---------------- */
 function modelIcon(m) {
-  const base = String(m || "").toLowerCase().split("-")[0];
+  const s = String(m || "").toLowerCase();
+  const base = s.split("-")[0];
   const map = { deepseek: "deepseek", glm: "glm", gpt: "gpt", grok: "grok", kimi: "kimi", meta: "meta", mimo: "mimo", minimax: "minimax", muse: "meta", qwen: "qwen", hy: "hy" };
-  const name = map[base] || "deepseek";
+  // hy2/hy3 等混元系列模型统一使用 hy 图标 (首段非精确 hy 时按前缀匹配)
+  let name = map[base];
+  if (!name) name = base.startsWith("hy") ? "hy" : "deepseek";
   const dark = document.documentElement.dataset.theme === "dark";
   const themed = dark && ["gpt", "grok", "mimo"].includes(name) ? `${name}-color` : name;
   return `<img src="icons/${themed}.svg" alt="${escapeHtml(m)}" title="${escapeHtml(m)}" style="width:16px;height:16px">`;
