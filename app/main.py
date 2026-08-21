@@ -7,10 +7,14 @@
 """
 from __future__ import annotations
 
+import ctypes  # noqa: F401  跨平台均有, Win32 窗口/互斥体逻辑用到
+import ctypes.wintypes  # noqa: F401  Win32 单实例/窗口枚举用 (macOS 可安全 import)
+
 import os
 import sys
 import tempfile
 import threading
+import time
 
 import webview
 
@@ -24,12 +28,31 @@ WINDOW_MIN_SIZE = (1000, 680)
 _IS_MAC = sys.platform == "darwin"
 _IS_WIN = sys.platform == "win32"
 
-if _IS_WIN:
-    import ctypes  # noqa: E402  仅 Windows 需要 Win32 API
-
 _quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
 _tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
 _main_win_ref: dict[str, object] = {"win": None}  # 主窗口引用 (macOS delegate 恢复用)
+
+
+# ── Win32 窗口辅助 (仅 Windows 运行时使用; ctypes 为跨平台标准库) ──
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def _screen_workarea_logical() -> tuple[int, int]:
+    """主屏工作区尺寸(逻辑像素): 窗口初始尺寸不超工作区, 避免矮屏上底部被裁."""
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem() or 96
+        scale = dpi / 96.0
+        rect = _RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return int(rect.right / scale), int(rect.bottom / scale)
+    except Exception:  # noqa: BLE001
+        pass
+    return WINDOW_SIZE
+
+
+_move_lock = threading.Lock()  # 拖动 move_by 串行化: 防 js_api 并发读-写丢增量
 
 
 def _install_macos_app_delegate() -> None:
@@ -139,6 +162,182 @@ def _arm_quit_fallback(timeout: float = 3.0) -> None:
     threading.Timer(timeout, lambda: os._exit(0), name="gousage-quit-fallback").start()
 
 
+# ── 单实例检测 (仅 Windows: Win32 命名互斥体; macOS 不走此路径) ──
+_LOCK_FILE_NAME = "GoGauge.lock"
+_MUTEX_NAME = "GoGauge_SingleInstance_Mutex"
+_ERROR_ALREADY_EXISTS = 183  # GetLastError: 命名对象已存在
+_ACTIVATE_RETRY_INTERVAL = 0.5  # 激活旧实例窗口的重试间隔(秒)
+_ACTIVATE_RETRY_TIMES = 30  # 重试次数 (共约15秒, 覆盖旧实例 onefile 解压+启动耗时)
+_SW_SHOW = 5
+_SW_RESTORE = 9
+_MB_ICONINFORMATION = 0x40
+_VK_MENU = 0x12  # ALT 虚拟键码
+_KEYEVENTF_KEYUP = 0x0002
+
+_mutex_handle = None  # 首实例持有的互斥体句柄 (全局引用防回收, 进程退出由内核自动释放)
+
+
+def _is_process_running(pid: int) -> bool:
+    """检查指定 PID 的进程是否存活.
+
+    Args:
+        pid: 目标进程ID
+    Returns:
+        True=进程存活 False=已退出
+    """
+    # 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION, 权限要求最低
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    return False
+
+
+def _get_process_image_name(pid: int) -> str:
+    """获取进程可执行文件完整路径, 用于确认锁文件 PID 是否仍属于 GoGauge.
+
+    Args:
+        pid: 目标进程ID
+    Returns:
+        可执行文件路径; 权限不足/进程不存在返回空串
+    """
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(1024)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _is_gogauge_process(pid: int) -> bool:
+    """确认指定 PID 的进程确为本程序 (打包 GoGauge.exe, 开发 python.exe).
+
+    进程崩溃后锁文件残留, 其 PID 可能被系统其他进程复用. 仅凭"进程存活"会误判为
+    旧实例仍在运行, 进而拦截新实例导致无法启动. 必须同时校验进程可执行文件名.
+    """
+    name = os.path.basename(_get_process_image_name(pid)).lower()
+    if getattr(sys, "frozen", False):
+        return "gogauge" in name
+    return name.startswith("python")
+
+
+def _activate_existing_instance(old_pid: int) -> bool:
+    """激活已运行实例的主窗口.
+
+    窗口可能被隐藏到托盘 (IsWindowVisible=False), 不能按可见性过滤,
+    改为枚举窗口, 按标题优先匹配主窗口 (页面 title 恒为 GoGauge).
+
+    Args:
+        old_pid: 已运行实例的进程ID; 0 表示不限定进程, 按标题全局匹配 (锁文件失效时兜底)
+    Returns:
+        True=找到并激活窗口 False=未找到任何窗口
+    """
+    user32 = ctypes.windll.user32
+    candidates: list[tuple[int, str]] = []  # (窗口句柄, 窗口标题)
+
+    # 回调签名必须用 HWND/LPARAM (64位系统下指针宽度), 用 c_int 会截断且吞异常
+    @ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _on_window(hwnd, _lparam):
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if old_pid == 0 or pid.value == old_pid:
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buf, 256)
+            if buf.value:  # 过滤 WinForms 无标题的消息窗口
+                candidates.append((hwnd, buf.value))
+        return True
+
+    user32.EnumWindows(_on_window, 0)
+    # 优先主窗口: 标题含 GoGauge 且非登录窗; 找不到再退回任一候选
+    hwnd = next((h for h, t in candidates if "GoGauge" in t and "Login" not in t), 0)
+    if not hwnd:
+        hwnd = next((h for h, t in candidates if "GoGauge" in t), 0)
+    if not hwnd:
+        return False
+    # 隐藏窗口用 SW_SHOW 唤起, 最小化窗口用 SW_RESTORE 还原
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, _SW_RESTORE)
+    else:
+        user32.ShowWindow(hwnd, _SW_SHOW)
+    # 后台进程直接 SetForegroundWindow 会被系统前台锁拒绝, 先模拟一次 ALT 击键绕过
+    user32.keybd_event(_VK_MENU, 0, 0, 0)
+    user32.keybd_event(_VK_MENU, 0, _KEYEVENTF_KEYUP, 0)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def _read_valid_lock_pid() -> int:
+    """读取锁文件中的首实例 PID 并校验有效性.
+
+    Returns:
+        有效的 GoGauge 进程ID; 锁文件不存在/损坏/PID 已失效时返回 0
+    """
+    try:
+        lock_path = os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME)
+        if os.path.isfile(lock_path):
+            with open(lock_path, "r") as fh:
+                pid = int(fh.read().strip())
+            if _is_process_running(pid) and _is_gogauge_process(pid):
+                return pid
+    except (ValueError, OSError):
+        pass
+    return 0
+
+
+def _activate_with_retry() -> bool:
+    """带重试激活旧实例窗口.
+
+    第二实例与首实例几乎同时启动时 (快速连击双击), 首实例可能仍在 onefile
+    解压/初始化, 窗口尚未创建. 此时需轮询等待其窗口就绪后再激活,
+    否则会误弹提示框并残留为第二个可见窗口.
+
+    Returns:
+        True=成功激活旧实例窗口 False=超时仍未找到窗口
+    """
+    for _ in range(_ACTIVATE_RETRY_TIMES):
+        if _activate_existing_instance(_read_valid_lock_pid()):
+            return True
+        time.sleep(_ACTIVATE_RETRY_INTERVAL)
+    return False
+
+
+def _ensure_single_instance() -> None:
+    """单实例守卫: 命名互斥体原子判定, 已有实例时激活其窗口并结束当前进程.
+
+    主判定用内核命名互斥体 (CreateMutexW): 创建是否冲突由内核原子保证,
+    无锁文件方案的竞态窗口 (双击过快/系统卡顿时两个实例互相看不到对方),
+    进程崩溃时内核自动回收互斥体, 无残留无 PID 复用问题.
+    锁文件降级为辅助: 记录首实例 PID 供激活窗口定位; 失效时按标题全局枚举兜底.
+    """
+    global _mutex_handle
+    # use_last_error=True: ctypes 每次调用后私有捕获错误码, 避免被 Python 中间系统调用污染
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+    if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
+        # 互斥体已存在 = 旧实例一定在运行, 激活其窗口后退出
+        if handle:
+            kernel32.CloseHandle(handle)
+        if not _activate_with_retry():
+            # 超时仍定位不到窗口 (极端情况): 提示从托盘操作
+            ctypes.windll.user32.MessageBoxW(
+                0, "GoGauge 已在运行, 请从系统托盘打开窗口。", "GoGauge", _MB_ICONINFORMATION
+            )
+        sys.exit(0)
+    # 首实例: 持有互斥体 (全局引用防回收, 进程退出由内核自动释放)
+    _mutex_handle = handle
+    # 锁文件记录当前 PID, 供后续实例激活窗口定位
+    try:
+        with open(os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME), "w") as fh:
+            fh.write(str(os.getpid()))
+    except OSError:
+        _mlog("[single-instance] 写锁文件失败")
+
+
 class TrayIcon:
     """系统托盘/菜单栏图标 (pystray): logo + 显示窗口/退出 菜单.
 
@@ -238,6 +437,33 @@ class WindowApi:
             self._win.minimize()
         return True
 
+    def move_by(self, dx: float, dy: float) -> bool:
+        """标题栏拖动(增量): dx/dy 为屏幕物理像素增量, 直接换算窗口位置.
+
+        自实现拖动替代 pywebview easy_drag: easy_drag 的 JS 用 clientX 记录起点、
+        screenX 计算增量 (两坐标系在 DPI 缩放下不同源), 后端 move() 又把参数
+        乘一次 DPI 缩放, 高 DPI 屏幕上拖动会漂移抽动. 这里 JS 端 screenX 增量
+        已是物理像素, GetWindowRect/SetWindowPos 同为物理坐标, 全程 1:1 跟随.
+
+        加锁: js_api 高频触发时多个调用可能并发进入, 并发读-写会让多个线程
+        读到同一旧位置、各自 SetWindowPos, 增量被覆盖丢失 (实测 50 次调用
+        只移动了 34 段). 锁保证 GetWindowRect→SetWindowPos 原子, 每次移动
+        都基于最新位置.
+        """
+        try:
+            native = self._win.native
+            hwnd = int(native.Handle.ToInt32())
+            with _move_lock:
+                rect = _RECT()
+                ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, None, rect.left + int(dx), rect.top + int(dy),
+                    0, 0, 0x0001 | 0x0004,  # SWP_NOSIZE | SWP_NOZORDER
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     def close(self) -> bool:
         """关闭按钮: 托盘可用时最小化到托盘, 否则真正关闭."""
         global _quitting, _tray_ready
@@ -270,6 +496,12 @@ def _destroy_all_windows() -> None:
 
 def main() -> None:
     global _quitting
+
+    # 单实例守卫 (仅 Windows): 已有实例在运行时激活其窗口, 当前进程直接退出.
+    # macOS 无 Win32 命名互斥体, 不走此路径.
+    if _IS_WIN:
+        _ensure_single_instance()
+
     db.get_db()  # 初始化数据库
 
     host, port = server.start_server()
@@ -278,18 +510,30 @@ def main() -> None:
     api = WindowApi()
 
     # 启动窗口: 始终加载本地页面; 未登录时前端显示欢迎页引导登录
-    # 平台窗口风格:
-    # - macOS: 使用原生标题栏 (frameless=False), 左上角红黄绿交通灯提供原生
-    #   关闭/最小化/缩放(最大化). 原生标题栏本身可拖动, 无需 easy_drag.
-    # - Windows: 无边框 + 自定义标题栏 (后端/前端窗口按钮), easy_drag 拖动.
+    # 初始窗口尺寸:
+    # - Windows: 无边框 + 自定义标题栏; 初始尺寸不超过屏幕工作区, 避免矮屏/高分屏
+    #   底部被裁. 拖动由前端自实现 (js_api.move_by), 不再用 pywebview easy_drag
+    #   (其 JS 用 clientX 记起点/screenX 算增量 + 后端再乘 DPI 缩放, 高 DPI 抽动).
+    # - macOS: 原生标题栏 + 红黄绿交通灯 (frameless=False), 原生标题栏本身可拖动,
+    #   无需 easy_drag; 直接用默认窗口尺寸.
+    if _IS_WIN:
+        wa_w, wa_h = _screen_workarea_logical()
+        win_w = min(WINDOW_SIZE[0], wa_w - 60)
+        win_h = min(WINDOW_SIZE[1], wa_h - 60)
+    else:
+        win_w, win_h = WINDOW_SIZE
     main_win = webview.create_window(
         APP_TITLE,
         dashboard_url,
-        width=WINDOW_SIZE[0],
-        height=WINDOW_SIZE[1],
+        width=win_w,
+        height=win_h,
         min_size=WINDOW_MIN_SIZE,
         frameless=(not _IS_MAC),
-        easy_drag=_IS_WIN,
+        # 显式关闭 easy_drag: 其默认值为 True, 不传会保持开启;
+        # easy_drag 的 JS 用 clientX 记起点/screenX 算增量 + 后端再乘 DPI 缩放,
+        # 高 DPI 屏幕拖动漂移抽动. 窗口拖动由前端自实现 (js_api.move_by, Windows);
+        # macOS 由原生标题栏承担.
+        easy_drag=False,
         js_api=api,
     )
     api.bind(main_win)
