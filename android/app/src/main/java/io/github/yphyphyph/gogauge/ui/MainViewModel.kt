@@ -175,28 +175,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // Sync
     // ------------------------------------------------------------------
 
+    /**
+     * Run a sync in the background. Never holds the pull-refresh spinner hostage to the
+     * full network chain: quota refreshes asynchronously (its flow reloads the dashboard
+     * when it lands) and the dashboard is reloaded from the DB once the sync finishes.
+     * This is Android parity for the desktop's async /api/sync, which queues the work on
+     * a server thread and returns immediately so cached data stays visible.
+     */
     fun startSync(mode: String) {
         scope.launch {
-            // Await the sync to completion (syncUsage resets running=false in its finally
-            // block), then reload the dashboard once — avoids the old polling race that
-            // reloaded stale data before the sync actually started.
-            repo.ensureQuota()
+            repo.ensureQuotaAsync(scope)
             repo.syncUsage(mode)
             loadDashboard()
         }
     }
 
-    /** Manual refresh: incremental sync + force quota refresh (desktop top-bar refresh parity). */
+    /**
+     * Manual refresh: render the cached dashboard instantly, then run the incremental
+     * sync + quota refresh in the background. Previously this awaited the whole
+     * sequential chain (quota → sync → dashboard), so a slow opencode.ai response made
+     * the refresh spinner spin for up to ~90s even on a good network.
+     */
     fun refreshNow() {
         android.util.Log.i("GoGauge", "refreshNow called")
         if (repo.progress.value.running) {
             loadDashboard()
             return
         }
-        scope.launch {
-            repo.ensureQuotaAsync(scope)
-            startSync("incremental")
-        }
+        // Instant paint from the local DB — do not block the spinner on network calls.
+        loadDashboard()
+        startSync("incremental")
     }
 
     private fun fullSync() = startSync("full")

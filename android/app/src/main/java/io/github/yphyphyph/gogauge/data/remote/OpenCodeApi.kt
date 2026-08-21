@@ -31,9 +31,17 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
             "bfd684bfc2e4eed05cd0b518f5e4eafd3f3376e3938abb9e536e7c03df831e5c"
         const val USER_AGENT =
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0"
-        const val REQUEST_TIMEOUT_SEC = 30L
+        // Mobile-tuned network budget. opencode.ai is frequently slow to answer, and with
+        // the desktop's 30s / 3-retry budget a single hung request can stall the refresh
+        // spinner for ~90s. Cap each attempt so failures surface in seconds; the retry
+        // loop still absorbs transient blips on modest mobile links. (Desktop parity:
+        // opencode_api.py uses 30s / 3 retries — fine there because the desktop syncs on
+        // a background thread and never blocks the UI.)
+        const val CONNECT_TIMEOUT_SEC = 10L
+        const val READ_TIMEOUT_SEC = 15L
+        const val WRITE_TIMEOUT_SEC = 15L
         const val MAX_BODY_BYTES = 4 * 1024 * 1024
-        const val FETCH_RETRIES = 3
+        const val FETCH_RETRIES = 2
         private val RETRY_BACKOFF_MS = listOf(500L, 1500L, 3000L)
         private val WORKSPACE_ID_RE = Regex("wrk_[A-Za-z0-9]+")
         private val WORKSPACE_ENTRY_RE = Regex(
@@ -42,9 +50,9 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
         )
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(REQUEST_TIMEOUT_SEC, TimeUnit.SECONDS)
-            .readTimeout(REQUEST_TIMEOUT_SEC, TimeUnit.SECONDS)
-            .writeTimeout(REQUEST_TIMEOUT_SEC, TimeUnit.SECONDS)
+            .connectTimeout(CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT_SEC, TimeUnit.SECONDS)
+            .writeTimeout(WRITE_TIMEOUT_SEC, TimeUnit.SECONDS)
             .followRedirects(true)
             .build()
     }
