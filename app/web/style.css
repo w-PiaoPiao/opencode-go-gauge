@@ -96,6 +96,9 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .side .spacer { flex: 1; }
 .main { flex: 1; overflow: hidden; padding: 14px 18px 16px; min-width: 0; }
 .page { height: 100%; overflow: hidden; animation: fade .18s ease; }
+/* 首页: 内容可超出窗口高度, 允许滚动, 底部内容不再被裁
+   (原先 overflow:hidden + 固定高度, 矮屏/DPI 缩放下今日趋势图被截断且无法滚到) */
+#page-home { overflow-y: auto; overflow-y: overlay; }
 /* overlay 滚动条: 悬浮不占布局宽度, 保证左右空白对称 */
 #page-stats, #page-settings { overflow-y: auto; overflow-y: overlay; }
 
@@ -106,16 +109,28 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 #page-records .tbl tbody tr { height: calc((100% - 28px) / 7); }
 #page-records .pager { flex-shrink: 0; }
 
-/* 两表统一列宽模板: 上下表头垂直对齐, 形成连贯网格 */
+/* 两表统一列宽模板: 上下表头垂直对齐, 形成连贯网格
+   (会话用量表与使用记录表同位置列宽一致, 保证上下对齐) */
 #page-records .tbl { table-layout: fixed; }
 #page-records .tbl th, #page-records .tbl td { overflow: hidden; text-overflow: ellipsis; }
-#page-records .tbl th:nth-child(1), #page-records .tbl td:nth-child(1) { width: 23%; }
-#page-records .tbl th:nth-child(2), #page-records .tbl td:nth-child(2) { width: 15%; }
-#page-records .tbl th:nth-child(3), #page-records .tbl td:nth-child(3) { width: 12%; }
-#page-records .tbl th:nth-child(4), #page-records .tbl td:nth-child(4) { width: 10%; }
-#page-records .tbl th:nth-child(5), #page-records .tbl td:nth-child(5) { width: 10%; }
-#page-records .tbl th:nth-child(6), #page-records .tbl td:nth-child(6) { width: 12%; }
-#page-records .tbl th:nth-child(7), #page-records .tbl td:nth-child(7) { width: 18%; }
+/* 会话用量表: 8列 (Key 12% / 会话 18% / 最后使用 18% / 输入 9% / 输出 9% / 推理 9% / 请求 13% / 成本 12%) */
+#page-records .card.sessions .tbl th:nth-child(1), #page-records .card.sessions .tbl td:nth-child(1) { width: 12%; }
+#page-records .card.sessions .tbl th:nth-child(2), #page-records .card.sessions .tbl td:nth-child(2) { width: 18%; }
+#page-records .card.sessions .tbl th:nth-child(3), #page-records .card.sessions .tbl td:nth-child(3) { width: 18%; }
+#page-records .card.sessions .tbl th:nth-child(4), #page-records .card.sessions .tbl td:nth-child(4) { width: 9%; }
+#page-records .card.sessions .tbl th:nth-child(5), #page-records .card.sessions .tbl td:nth-child(5) { width: 9%; }
+#page-records .card.sessions .tbl th:nth-child(6), #page-records .card.sessions .tbl td:nth-child(6) { width: 9%; }
+#page-records .card.sessions .tbl th:nth-child(7), #page-records .card.sessions .tbl td:nth-child(7) { width: 13%; }
+#page-records .card.sessions .tbl th:nth-child(8), #page-records .card.sessions .tbl td:nth-child(8) { width: 12%; }
+/* 使用记录表: 8列 (Key 12% / 时间 18% / 模型 18% / 输入 9% / 输出 9% / 推理 9% / 缓存读 13% / 费用 12%), 与上表同位置列同宽 */
+#page-records .card.records .tbl th:nth-child(1), #page-records .card.records .tbl td:nth-child(1) { width: 12%; }
+#page-records .card.records .tbl th:nth-child(2), #page-records .card.records .tbl td:nth-child(2) { width: 18%; }
+#page-records .card.records .tbl th:nth-child(3), #page-records .card.records .tbl td:nth-child(3) { width: 18%; }
+#page-records .card.records .tbl th:nth-child(4), #page-records .card.records .tbl td:nth-child(4) { width: 9%; }
+#page-records .card.records .tbl th:nth-child(5), #page-records .card.records .tbl td:nth-child(5) { width: 9%; }
+#page-records .card.records .tbl th:nth-child(6), #page-records .card.records .tbl td:nth-child(6) { width: 9%; }
+#page-records .card.records .tbl th:nth-child(7), #page-records .card.records .tbl td:nth-child(7) { width: 13%; }
+#page-records .card.records .tbl th:nth-child(8), #page-records .card.records .tbl td:nth-child(8) { width: 12%; }
 
 /* 滚动条美化 (细 + 圆角 + 主题色) */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -253,6 +268,10 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .tbl tbody tr:hover { background: var(--muted); }
 .tbl td.num, .tbl th.num { text-align: right; }
 .tbl td.unassigned { color: var(--text3); font-style: italic; }
+.card.sessions .tbl th, .card.records .tbl th, .card.sessions .tbl td, .card.records .tbl td { padding-left: 6px; padding-right: 6px; }
+.card.sessions .tbl td:first-child, .card.records .tbl td:first-child { color: var(--text3); white-space: nowrap; }
+/* 模型列完整显示, 不省略 */
+.card.records .tbl td:nth-child(3) { overflow: hidden; white-space: nowrap; }
 .model-cell { display: flex; align-items: center; gap: 7px; font-weight: 500; }
 .plan-badge { font-size: 10.5px; padding: 2px 8px; border-radius: 99px; font-weight: 700; background: var(--primary-soft); color: var(--primary); letter-spacing: 0.5px; }
 .plan-badge.lite { background: #e6f7f5; color: #0d9488; }
