@@ -48,6 +48,8 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
             """id\s*:\s*"(wrk_[^"]+)"[^{}]*?name\s*:\s*"([^"]*)"""",
             setOf(RegexOption.DOT_MATCHES_ALL),
         )
+        // keys 页面内嵌响应数据形如 {id:"key_xxx",name:"gongsi",key:"sk-...",...}
+        private val KEY_ENTRY_RE = Regex("""\{id:"(key_[A-Za-z0-9]+)",name:"([^"]*)"\""")
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
@@ -275,5 +277,36 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
         val serverId = usageServerId ?: DEFAULT_USAGE_SERVER_ID
         val text = serverCall(serverId, args, "/workspace/$workspaceId/usage", token)
         return UsageParser.parseUsageResponse(text)
+    }
+
+    /**
+     * 拉取工作区下所有 API key 的名称映射 (key_id -> 名称) — port of
+     * opencode_api.fetch_key_names (desktop). keys 页面内嵌响应数据形如
+     * {id:"key_xxx",name:"gongsi",key:"sk-...",...}, 正则提取 id 与 name 即可.
+     * 页面拉取或解析失败时返回空 map, 不影响主流程 (desktop parity).
+     */
+    suspend fun fetchKeyNames(token: String, workspaceId: String): Map<String, String> {
+        val cookie = buildCookieHeader(token)
+        if (cookie.isEmpty()) return emptyMap()
+        val url = "$DASHBOARD_BASE/$workspaceId/keys"
+        val headers = mapOf(
+            "Cookie" to cookie,
+            "User-Agent" to USER_AGENT,
+            "Origin" to "https://opencode.ai",
+            "Referer" to "$DASHBOARD_BASE/$workspaceId/keys",
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        return try {
+            val html = fetch(url, headers)
+            val names = linkedMapOf<String, String>()
+            for (m in KEY_ENTRY_RE.findAll(html)) {
+                val id = m.groupValues[1]
+                val name = m.groupValues[2].trim()
+                if (id.isNotEmpty() && name.isNotEmpty()) names.putIfAbsent(id, name)
+            }
+            names
+        } catch (e: Exception) {
+            emptyMap()
+        }
     }
 }

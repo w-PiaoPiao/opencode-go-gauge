@@ -346,7 +346,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 updateStatus = if (info.hasUpdate) "${s.updateFound} ${info.latest}" else s.updateNone
             } catch (e: Exception) {
-                updateStatus = s.updateFailed
+                // 展示真实原因 (desktop: 把具体错误带给前端展示)
+                updateStatus = e.message?.trim()?.takeIf { it.isNotEmpty() } ?: s.updateFailed
             }
         }
     }

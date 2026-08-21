@@ -181,6 +181,18 @@ private fun SessionRow(st: SessionStat, vm: MainViewModel) {
                 fontFamily = NumFontFamily,
             )
         }
+        // Key 名称 / 无 session 时给出 key 尾号以区分来源 (desktop "Key 名称" 列 parity)
+        val keyLabel = st.keyName?.takeIf { it.isNotEmpty() }
+            ?: st.keyId?.takeIf { st.sessionId.isBlank() }?.let { "…${it.takeLast(6)}" }
+        if (keyLabel != null) {
+            Text(
+                keyLabel,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Text(
             "${s.colLastUsed} ${Fmt.dateTimeShort(st.lastAt)} · ${Fmt.int(st.requestCount)} ${s.colRequests.replace("/Token", "")}",
             fontSize = 11.5.sp,
@@ -221,7 +233,12 @@ private fun RecordRow(r: UsageRecordRow, vm: MainViewModel) {
                 fontFamily = NumFontFamily,
             )
         }
-        Text(Fmt.dateTime(r.createdAt), fontSize = 11.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val metaTime = Fmt.dateTime(r.createdAt)
+        Text(
+            r.keyName?.takeIf { it.isNotEmpty() }?.let { "$metaTime · $it" } ?: metaTime,
+            fontSize = 11.5.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Text(
             "${s.colInput} ${Fmt.tokens(r.inputTokens)} · ${s.colOutput} ${Fmt.tokens(r.outputTokens)} · ${s.colReasoning} ${Fmt.tokens(r.reasoningTokens)} · ${s.colCacheRead} ${Fmt.tokens(r.cacheReadTokens)}",
             fontSize = 11.5.sp,

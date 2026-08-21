@@ -228,8 +228,12 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun modelStatsRaw(query: SupportSQLiteQuery): List<ModelStatRow>
 
+    // 有 session 的行按 session 聚合; 无 session 的行按 key_id 拆分 (直接调 key /
+    // 其他 agent 工具调用等来源一目了然); 兜底聚合为 "" 的"未归属"行 (desktop parity) —
+    // mirrors db.py session_stats_page.
     private val sessionKey =
-        "CASE WHEN session_id IS NULL OR session_id = '' THEN '' ELSE session_id END"
+        "CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id " +
+            "WHEN key_id IS NOT NULL AND key_id != '' THEN key_id ELSE '' END"
 
     /** Session aggregation with paging — mirrors db.session_stats_page. */
     suspend fun sessionStatsPage(page: Int, pageSize: Int, days: Int?): Pair<List<SessionStat>, Int> {
@@ -253,6 +257,7 @@ abstract class UsageDao {
             SimpleSQLiteQuery(
                 """
                 SELECT $sessionKey AS session_id,
+                       MAX(key_id) AS key_id,
                        COALESCE(COUNT(*), 0) AS request_count,
                        COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS total_input_tokens,
                        COALESCE(SUM(input_tokens), 0) AS uncached_input_tokens,
@@ -278,6 +283,7 @@ abstract class UsageDao {
                 totalReasoningTokens = r.totalReasoningTokens,
                 totalCostUsd = r.totalCostUsd,
                 lastAt = r.lastAt,
+                keyId = r.keyId,
             )
         }
         return records to total
@@ -327,6 +333,7 @@ abstract class UsageDao {
                 costUsd = r.costUsd,
                 sessionId = r.sessionId,
                 plan = r.plan,
+                keyId = r.keyId,
             )
         }
         return records to total
@@ -389,6 +396,7 @@ abstract class UsageDao {
 
     data class SessionRow(
         @androidx.room.ColumnInfo(name = "session_id") val sessionId: String,
+        @androidx.room.ColumnInfo(name = "key_id") val keyId: String? = null,
         @androidx.room.ColumnInfo(name = "request_count") val requestCount: Int,
         @androidx.room.ColumnInfo(name = "total_input_tokens") val totalInputTokens: Long,
         @androidx.room.ColumnInfo(name = "uncached_input_tokens") val uncachedInputTokens: Long,
