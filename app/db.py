@@ -1,4 +1,12 @@
-"""SQLite 存储与聚合查询."""
+"""SQLite 存储与聚合查询 (多账号版).
+
+账号模型:
+- ``accounts`` 表存放多个 OpenCode Go 账号 (各自持有 token/workspace),
+  ``settings.payload`` 中的 ``active_account_id`` 指向当前活跃账号;
+- 所有用量记录通过 ``usage_records.account_id`` 归属账号;
+- 同步状态 ``usage_sync_state`` 以 account_id 为主键, 每账号一份增量游标.
+兼容约定: 历史函数名保持不变, 未显式传 account_id 时一律作用于活跃账号.
+"""
 from __future__ import annotations
 
 import json
@@ -91,21 +99,36 @@ def close_db() -> None:
             _db_local.conn = None
 
 
+# ---------------------------------------------------------------------------
+# schema 初始化与存量迁移
+# ---------------------------------------------------------------------------
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+_SS_TAIL = """
+          last_sync_at TEXT,
+          last_sync_status TEXT,
+          last_sync_error TEXT,
+          last_inserted_count INTEGER NOT NULL DEFAULT 0,
+          deepest_page_fetched INTEGER NOT NULL DEFAULT -1,
+          total_records INTEGER NOT NULL DEFAULT 0,
+          oldest_record_at TEXT,
+          newest_record_at TEXT"""
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
-    # 多线程首次并发建表/种子行时串行化 (DDL 与单例行插入不能竞争)
+    # 多线程首次并发建表/种子行时串行化 (DDL 与单例行插入不能竞争; macOS 移植保留)
+    # v2.0.0 多用户新形状 schema 与迁移 1/2/3 取自上游
     with _schema_lock:
+        # 新形状建表: usage_records 自带 account_id; accounts 多行; 同步状态按账号主键
         conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS account (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              name TEXT NOT NULL DEFAULT 'Default',
-              workspace_id TEXT NOT NULL DEFAULT 'Default',
-              resolved_workspace_id TEXT,
-              token TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS usage_records (
               usg_id TEXT PRIMARY KEY,
               created_at TEXT NOT NULL,
@@ -122,14 +145,24 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               key_id TEXT,
               session_id TEXT,
               plan TEXT,
-              synced_at TEXT NOT NULL
+              synced_at TEXT NOT NULL,
+              account_id INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id);
+
+            CREATE TABLE IF NOT EXISTS accounts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL DEFAULT 'Default',
+              workspace_id TEXT NOT NULL DEFAULT 'Default',
+              resolved_workspace_id TEXT,
+              token TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS usage_sync_state (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
+              account_id INTEGER PRIMARY KEY,
               last_sync_at TEXT,
               last_sync_status TEXT,
               last_sync_error TEXT,
@@ -151,95 +184,333 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         if conn.execute("SELECT id FROM settings WHERE id = 1").fetchone() is None:
             conn.execute("INSERT INTO settings (id, payload, updated_at) VALUES (1, '{}', ?)", (_now_iso(),))
             conn.commit()
-        # 迁移: 旧库补充新列
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_records)").fetchall()}
-        for col in ("reasoning_tokens", "session_id"):
-            if col not in cols:
-                if col == "reasoning_tokens":
-                    conn.execute(f"ALTER TABLE usage_records ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
-                else:
-                    conn.execute(f"ALTER TABLE usage_records ADD COLUMN {col} TEXT")
-        # 确保账户行存在
-        row = conn.execute("SELECT id FROM account WHERE id = 1").fetchone()
-        if row is None:
+
+        # 迁移 1: 旧单行 account 表 -> accounts 多行表 (仅当目标为空时拷贝, 保证幂等)
+        if _table_exists(conn, "account"):
+            empty = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"] == 0
+            if empty:
+                conn.execute(
+                    """INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at)
+                       SELECT id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at FROM account"""
+                )
+            conn.execute("DROP TABLE account")
+            conn.commit()
+
+        # 全新库: 种子默认空账号 (未登录态, 与历史行为一致)
+        if conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"] == 0:
             now = _now_iso()
             conn.execute(
-                "INSERT INTO account (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at)"
+                "INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at)"
                 " VALUES (1, 'Default', 'Default', NULL, '', ?, ?)",
                 (now, now),
             )
-        sync = conn.execute("SELECT id FROM usage_sync_state WHERE id = 1").fetchone()
-        if sync is None:
-            conn.execute("INSERT INTO usage_sync_state (id) VALUES (1)")
+            conn.commit()
+
+        # 迁移 2: 旧库补充新列 (含本次的 account_id 维度列)
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_records)").fetchall()}
+        for col, ddl in (
+            ("reasoning_tokens", "ALTER TABLE usage_records ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0"),
+            ("session_id", "ALTER TABLE usage_records ADD COLUMN session_id TEXT"),
+            ("account_id", "ALTER TABLE usage_records ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1"),
+        ):
+            if col not in cols:
+                conn.execute(ddl)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_account_time ON usage_records(account_id, created_at DESC)"
+        )
+
+        # 迁移 3: 单行 usage_sync_state(id 主键) 重建为按账号多行 (数据无损搬运)
+        ss_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_sync_state)").fetchall()}
+        if ss_cols and "id" in ss_cols and "account_id" not in ss_cols:
+            conn.executescript(
+                f"""
+                ALTER TABLE usage_sync_state RENAME TO usage_sync_state_legacy;
+                CREATE TABLE usage_sync_state (
+                  account_id INTEGER PRIMARY KEY,{_SS_TAIL}
+                );
+                INSERT INTO usage_sync_state (account_id, last_sync_at, last_sync_status, last_sync_error,
+                                              last_inserted_count, deepest_page_fetched, total_records,
+                                              oldest_record_at, newest_record_at)
+                SELECT id, last_sync_at, last_sync_status, last_sync_error,
+                       last_inserted_count, deepest_page_fetched, total_records,
+                       oldest_record_at, newest_record_at FROM usage_sync_state_legacy;
+                DROP TABLE usage_sync_state_legacy;
+                """
+            )
         conn.commit()
 
 
 # ---------------------------------------------------------------------------
-# 账户 / token
+# settings payload 底层读写 (key_names 与 active_account_id 等共用一个 JSON)
 # ---------------------------------------------------------------------------
 
 
-def get_account() -> dict[str, Any]:
-    row = get_db().execute(
-        "SELECT * FROM account WHERE id = 1"
-    ).fetchone()
-    if row is None:
+def _raw_payload(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute("SELECT payload FROM settings WHERE id = 1").fetchone()
+    if not row:
         return {}
+    try:
+        data = json.loads(row["payload"])
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _write_payload(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+    conn.execute(
+        "UPDATE settings SET payload = ?, updated_at = ? WHERE id = 1",
+        (json.dumps(data, ensure_ascii=False), _now_iso()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 活跃账号
+# ---------------------------------------------------------------------------
+
+
+def _persist_active(conn: sqlite3.Connection, account_id: int) -> None:
+    data = _raw_payload(conn)
+    data["active_account_id"] = int(account_id)
+    _write_payload(conn, data)
+    conn.commit()
+
+
+def get_active_account_id() -> int:
+    """当前活跃账号 id; 无任何账号时返回 0.
+
+    偏好已登录账号: 存储的活跃账号若未登录, 自动让位给最小的已登录账号,
+    保证应用启动时默认落在可用的账号上; 全部未登录时维持原选择,
+    使欢迎页登录能落到既有行上.
+    """
+    conn = get_db()
+    aid = _raw_payload(conn).get("active_account_id")
+    logged_row = conn.execute(
+        "SELECT MIN(id) AS i FROM accounts WHERE TRIM(token) != ''"
+    ).fetchone()
+    logged_min = int(logged_row["i"]) if logged_row and logged_row["i"] is not None else 0
+    if isinstance(aid, int) and aid > 0:
+        row = conn.execute("SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
+        if row is not None:
+            if row["token"].strip():
+                return aid
+            if logged_min:  # 活跃行未登录但有其他已登录账号 -> 让位
+                _persist_active(conn, logged_min)
+                return logged_min
+            return aid     # 全部未登录: 维持原选择
+    if logged_min:
+        _persist_active(conn, logged_min)
+        return logged_min
+    row = conn.execute("SELECT MIN(id) AS i FROM accounts").fetchone()
+    fallback = int(row["i"]) if row and row["i"] is not None else 0
+    if fallback:
+        _persist_active(conn, fallback)
+    return fallback
+
+
+def _resolve_account_id(account_id: Optional[int]) -> int:
+    """None/0 -> 活跃账号 (可能为 0 表示无账号, 查询将得到空集)."""
+    if account_id:
+        return int(account_id)
+    return get_active_account_id()
+
+
+def set_active_account(account_id: int) -> bool:
+    conn = get_db()
+    row = conn.execute("SELECT id FROM accounts WHERE id = ?", (int(account_id),)).fetchone()
+    if row is None:
+        return False
+    _persist_active(conn, int(account_id))
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 账号 CRUD / token
+# ---------------------------------------------------------------------------
+
+
+def _account_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
+        "id": row["id"],
         "name": row["name"],
         "workspace_id": row["workspace_id"],
         "resolved_workspace_id": row["resolved_workspace_id"],
         "has_token": bool(row["token"].strip()),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
     }
 
 
-def save_token(token: str, workspace_id: str = "Default") -> None:
-    conn = get_db()
-    now = _now_iso()
+def get_account() -> dict[str, Any]:
+    """活跃账号摘要; 无账号返回 {}."""
+    aid = get_active_account_id()
+    if not aid:
+        return {}
+    row = get_db().execute("SELECT * FROM accounts WHERE id = ?", (aid,)).fetchone()
+    return _account_dict(row) if row else {}
+
+
+def list_accounts() -> list[dict[str, Any]]:
+    rows = get_db().execute("SELECT * FROM accounts ORDER BY id ASC").fetchall()
+    return [_account_dict(r) for r in rows]
+
+
+def count_accounts() -> int:
+    return int(get_db().execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"])
+
+
+def count_logged_in_accounts() -> int:
+    row = get_db().execute(
+        "SELECT COUNT(*) AS c FROM accounts WHERE TRIM(token) != ''"
+    ).fetchone()
+    return int(row["c"])
+
+
+def _ensure_state_row(conn: sqlite3.Connection, account_id: int) -> None:
     conn.execute(
-        """UPDATE account SET token = ?, workspace_id = ?, resolved_workspace_id = NULL,
-           updated_at = ? WHERE id = 1""",
-        (token.strip(), workspace_id.strip() or "Default", now),
+        "INSERT OR IGNORE INTO usage_sync_state (account_id, deepest_page_fetched) VALUES (?, -1)",
+        (account_id,),
     )
+
+
+def save_token(token: str, workspace_id: str = "Default") -> None:
+    """重新登录语义: 更新活跃账号的凭证并重置其增量游标."""
+    conn = get_db()
+    aid = get_active_account_id()
+    if not aid:
+        return
     conn.execute(
-        "UPDATE usage_sync_state SET deepest_page_fetched = -1 WHERE id = 1"
+        """UPDATE accounts SET token = ?, workspace_id = ?, resolved_workspace_id = NULL,
+           updated_at = ? WHERE id = ?""",
+        (token.strip(), workspace_id.strip() or "Default", _now_iso(), aid),
+    )
+    _ensure_state_row(conn, aid)
+    conn.execute(
+        "UPDATE usage_sync_state SET deepest_page_fetched = -1 WHERE account_id = ?", (aid,)
     )
     conn.commit()
 
 
-def save_resolved_workspace(workspace_id: str) -> None:
+def save_resolved_workspace(workspace_id: str, account_id: Optional[int] = None) -> None:
     conn = get_db()
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return
     conn.execute(
-        "UPDATE account SET resolved_workspace_id = ?, updated_at = ? WHERE id = 1",
-        (workspace_id, _now_iso()),
+        "UPDATE accounts SET resolved_workspace_id = ?, updated_at = ? WHERE id = ?",
+        (workspace_id, _now_iso(), aid),
     )
     conn.commit()
 
 
 def get_token() -> str:
-    row = get_db().execute("SELECT token FROM account WHERE id = 1").fetchone()
+    aid = get_active_account_id()
+    if not aid:
+        return ""
+    row = get_db().execute("SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
     return row["token"] if row else ""
 
 
 def get_workspace_hint() -> str:
+    aid = get_active_account_id()
+    if not aid:
+        return "Default"
     row = get_db().execute(
-        "SELECT workspace_id, resolved_workspace_id FROM account WHERE id = 1"
+        "SELECT workspace_id, resolved_workspace_id FROM accounts WHERE id = ?", (aid,)
     ).fetchone()
     if row is None:
         return "Default"
     return row["resolved_workspace_id"] or row["workspace_id"] or "Default"
 
 
-def clear_account() -> None:
-    import traceback
-    print("[db] clear_account called from:", "".join(traceback.format_stack()[-6:]), flush=True)
+def add_account(token: str, workspace_hint: str = "", switch: bool = True) -> int:
+    """添加新账号; 若已有完全相同的 token 则视为同一用户, 更新工作区提示后返回其 id."""
     conn = get_db()
-    conn.execute("DELETE FROM usage_records")
-    conn.execute("UPDATE account SET token = '', resolved_workspace_id = NULL, updated_at = ? WHERE id = 1", (_now_iso(),))
+    token = token.strip()
+    hint = (workspace_hint or "").strip()
+    existing = conn.execute(
+        "SELECT id FROM accounts WHERE TRIM(token) = ? ORDER BY id LIMIT 1", (token,)
+    ).fetchone() if token else None
+    if existing is not None:
+        aid = int(existing["id"])
+        if hint:
+            conn.execute(
+                "UPDATE accounts SET workspace_id = ?, updated_at = ? WHERE id = ?",
+                (hint, _now_iso(), aid),
+            )
+        if switch:
+            _persist_active(conn, aid)
+        else:
+            conn.commit()
+        return aid
+    nxt = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 AS n FROM accounts").fetchone()["n"]
+    name = hint[:50] if hint else f"User {nxt}"
+    now = _now_iso()
+    cur = conn.execute(
+        """INSERT INTO accounts (name, workspace_id, resolved_workspace_id, token, created_at, updated_at)
+           VALUES (?, ?, NULL, ?, ?, ?)""",
+        (name, hint or "Default", token, now, now),
+    )
+    aid = int(cur.lastrowid or nxt)
+    _ensure_state_row(conn, aid)
+    if switch:
+        _persist_active(conn, aid)
+    else:
+        conn.commit()
+    return aid
+
+
+def rename_account(account_id: int, name: str) -> bool:
+    name = (name or "").strip()[:50]
+    if not name:
+        return False
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE accounts SET name = ?, updated_at = ? WHERE id = ?",
+        (name, _now_iso(), int(account_id)),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_account(account_id: int) -> int:
+    """删除账号及其本地全部数据 (级联), 返回剩余账号数."""
+    conn = get_db()
+    aid = int(account_id)
+    conn.execute("DELETE FROM usage_records WHERE account_id = ?", (aid,))
+    conn.execute("DELETE FROM usage_sync_state WHERE account_id = ?", (aid,))
+    conn.execute("DELETE FROM accounts WHERE id = ?", (aid,))
+    remaining = int(conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"])
+    active = _raw_payload(conn).get("active_account_id")
+    if active == aid:
+        nxt = conn.execute("SELECT MIN(id) AS i FROM accounts").fetchone()["i"]
+        if nxt is not None:
+            _persist_active(conn, int(nxt))
+        else:
+            data = _raw_payload(conn)
+            data.pop("active_account_id", None)
+            _write_payload(conn, data)
+            conn.commit()
+    conn.commit()
+    return remaining
+
+
+def clear_account() -> None:
+    """退出登录当前活跃账号: 清除其凭证与本地缓存数据 (保留账号行便于重新登录)."""
+    conn = get_db()
+    aid = get_active_account_id()
+    if not aid:
+        return
+    conn.execute("DELETE FROM usage_records WHERE account_id = ?", (aid,))
+    conn.execute(
+        "UPDATE accounts SET token = '', resolved_workspace_id = NULL, updated_at = ? WHERE id = ?",
+        (_now_iso(), aid),
+    )
+    _ensure_state_row(conn, aid)
     conn.execute(
         "UPDATE usage_sync_state SET last_sync_status = NULL, last_sync_error = NULL,"
         " last_inserted_count = 0, deepest_page_fetched = -1, total_records = 0,"
-        " oldest_record_at = NULL, newest_record_at = NULL WHERE id = 1"
+        " oldest_record_at = NULL, newest_record_at = NULL WHERE account_id = ?",
+        (aid,),
     )
     conn.commit()
 
@@ -249,17 +520,18 @@ def clear_account() -> None:
 # ---------------------------------------------------------------------------
 
 
-def insert_usage_records(records: list[dict[str, Any]]) -> int:
-    """批量写入, 按 usg_id 去重; 返回新增条数."""
+def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int] = None) -> int:
+    """批量写入 (归属指定/活跃账号), 按 usg_id 去重; 返回新增条数."""
     if not records:
         return 0
+    aid = _resolve_account_id(account_id)
     conn = get_db()
     synced_at = _now_iso()
     stmt = (
         "INSERT INTO usage_records (usg_id, created_at, model, provider, input_tokens,"
         " output_tokens, reasoning_tokens, cache_read_tokens, cache_write_5m_tokens,"
-        " cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id, plan, synced_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id, plan, synced_at, account_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(usg_id) DO UPDATE SET"
         " input_tokens = excluded.input_tokens,"
         " output_tokens = excluded.output_tokens,"
@@ -286,7 +558,7 @@ def insert_usage_records(records: list[dict[str, Any]]) -> int:
                     rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
                     rec["cache_write_1h_tokens"], rec["cost_raw"], rec["cost_usd"],
                     rec.get("key_id"), rec.get("session_id"), rec.get("plan"),
-                    synced_at,
+                    synced_at, aid,
                 ),
             )
             if not existed:
@@ -298,8 +570,13 @@ def insert_usage_records(records: list[dict[str, Any]]) -> int:
     return inserted
 
 
-def get_sync_state() -> dict[str, Any]:
-    row = get_db().execute("SELECT * FROM usage_sync_state WHERE id = 1").fetchone()
+def get_sync_state(account_id: Optional[int] = None) -> dict[str, Any]:
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return {}
+    row = get_db().execute(
+        "SELECT * FROM usage_sync_state WHERE account_id = ?", (aid,)
+    ).fetchone()
     if row is None:
         return {}
     return {
@@ -314,28 +591,38 @@ def get_sync_state() -> dict[str, Any]:
     }
 
 
-def update_sync_state(status: str, error: Optional[str] = None, inserted: int = 0) -> None:
+def update_sync_state(
+    status: str,
+    error: Optional[str] = None,
+    inserted: int = 0,
+    account_id: Optional[int] = None,
+) -> None:
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return
     conn = get_db()
+    _ensure_state_row(conn, aid)
     conn.execute(
         """UPDATE usage_sync_state
            SET last_sync_at = ?, last_sync_status = ?, last_sync_error = ?,
                last_inserted_count = last_inserted_count + ?
-           WHERE id = 1""",
-        (_now_iso(), status, error, inserted),
+           WHERE account_id = ?""",
+        (_now_iso(), status, error, inserted, aid),
     )
-    _refresh_sync_totals(conn)
+    _refresh_sync_totals(conn, aid)
     conn.commit()
 
 
-def _refresh_sync_totals(conn: sqlite3.Connection) -> None:
+def _refresh_sync_totals(conn: sqlite3.Connection, account_id: int) -> None:
     row = conn.execute(
         "SELECT COUNT(*) AS total, MIN(created_at) AS oldest, MAX(created_at) AS newest"
-        " FROM usage_records"
+        " FROM usage_records WHERE account_id = ?",
+        (account_id,),
     ).fetchone()
     conn.execute(
         "UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?, newest_record_at = ?"
-        " WHERE id = 1",
-        (row["total"], row["oldest"], row["newest"]),
+        " WHERE account_id = ?",
+        (row["total"], row["oldest"], row["newest"], account_id),
     )
 
 
@@ -351,17 +638,28 @@ _DEFAULT_SETTINGS = {
 }
 
 
-def prune_old_records(window_days: int | None) -> int:
+def prune_old_records(window_days: int | None, account_id: Optional[int] = None) -> int:
     """按同步范围裁剪过期记录, 返回删除条数. window_days=None 时不裁剪."""
     if window_days is None:
         return 0
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return 0
     window_days = max(1, min(int(window_days), 3650))
     cur = get_db().execute(
-        "DELETE FROM usage_records WHERE datetime(created_at) < datetime('now', ?)",
-        (f"-{window_days} days",),
+        "DELETE FROM usage_records WHERE account_id = ?"
+        " AND datetime(created_at) < datetime('now', ?)",
+        (aid, f"-{window_days} days"),
     )
     get_db().commit()
     return cur.rowcount
+
+
+def _account_filter(where: str, params: list[Any], aid: int) -> tuple[str, list[Any]]:
+    """把 account_id 过滤拼接到已生成的 WHERE 片段上."""
+    if where:
+        return where + " AND account_id = ?", params + [aid]
+    return "WHERE account_id = ?", params + [aid]
 
 
 def usage_records_page(
@@ -369,6 +667,7 @@ def usage_records_page(
     page_size: int = 20,
     model: Optional[str] = None,
     days: Optional[int] = None,
+    account_id: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """用量明细分页查询 (按时间倒序), 返回 (records, total)."""
     page = max(1, page)
@@ -382,6 +681,7 @@ def usage_records_page(
         where.append("datetime(created_at) >= datetime('now', ?)")
         params.append(f"-{days} days")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    where_sql, params = _account_filter(where_sql, params, _resolve_account_id(account_id))
     conn = get_db()
     total = int(
         conn.execute(f"SELECT COUNT(*) AS c FROM usage_records {where_sql}", params).fetchone()["c"]
@@ -411,9 +711,10 @@ def usage_records_page(
     return records, total
 
 
-def list_models() -> list[str]:
+def list_models(account_id: Optional[int] = None) -> list[str]:
+    where, params = _account_filter("", [], _resolve_account_id(account_id))
     rows = get_db().execute(
-        "SELECT DISTINCT model FROM usage_records ORDER BY model"
+        f"SELECT DISTINCT model FROM usage_records {where} ORDER BY model", params
     ).fetchall()
     return [r["model"] for r in rows]
 
@@ -422,6 +723,7 @@ def session_stats_page(
     page: int = 1,
     page_size: int = 10,
     days: Optional[int] = None,
+    account_id: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """按会话聚合用量, 按成本降序, 返回 (records, total).
 
@@ -438,6 +740,7 @@ def session_stats_page(
         where.append("datetime(created_at) >= datetime('now', ?)")
         params.append(f"-{days} days")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    where_sql, params = _account_filter(where_sql, params, _resolve_account_id(account_id))
     session_key = (
         "CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id "
         "WHEN key_id IS NOT NULL AND key_id != '' THEN key_id ELSE '' END"
@@ -482,53 +785,31 @@ def session_stats_page(
 
 
 def get_settings() -> dict[str, Any]:
-    row = get_db().execute("SELECT payload FROM settings WHERE id = 1").fetchone()
-    if not row:
-        return dict(_DEFAULT_SETTINGS)
-    try:
-        data = json.loads(row["payload"])
-        if not isinstance(data, dict):
-            return dict(_DEFAULT_SETTINGS)
-    except (TypeError, ValueError):
-        return dict(_DEFAULT_SETTINGS)
     merged = dict(_DEFAULT_SETTINGS)
-    merged.update({k: v for k, v in data.items() if k in _DEFAULT_SETTINGS})
+    merged.update({k: v for k, v in _raw_payload(get_db()).items() if k in _DEFAULT_SETTINGS})
     return merged
 
 
 def get_key_names() -> dict[str, str]:
     """读取缓存的 key_id -> 显示名称 映射 (来自 opencode keys 页面)."""
-    row = get_db().execute("SELECT payload FROM settings WHERE id = 1").fetchone()
-    if not row:
-        return {}
-    try:
-        data = json.loads(row["payload"])
-        names = data.get("key_names") or {}
-        return names if isinstance(names, dict) else {}
-    except (TypeError, ValueError):
-        return {}
+    names = _raw_payload(get_db()).get("key_names") or {}
+    return names if isinstance(names, dict) else {}
 
 
 def save_key_names(names: dict[str, str]) -> None:
     """持久化 key_id -> 显示名称 映射到 settings."""
-    row = get_db().execute("SELECT payload FROM settings WHERE id = 1").fetchone()
-    try:
-        data = json.loads(row["payload"]) if row else {}
-        if not isinstance(data, dict):
-            data = {}
-    except (TypeError, ValueError):
-        data = {}
-    data["key_names"] = {k: v for k, v in names.items() if k and v}
     conn = get_db()
-    conn.execute(
-        "UPDATE settings SET payload = ?, updated_at = ? WHERE id = 1",
-        (json.dumps(data, ensure_ascii=False), _now_iso()),
-    )
+    data = _raw_payload(conn)
+    data["key_names"] = {k: v for k, v in names.items() if k and v}
+    _write_payload(conn, data)
     conn.commit()
 
 
 def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
-    current = get_settings()
+    conn = get_db()
+    raw = _raw_payload(conn)
+    current = dict(_DEFAULT_SETTINGS)
+    current.update({k: v for k, v in raw.items() if k in _DEFAULT_SETTINGS})
     for key in _DEFAULT_SETTINGS:
         if key in payload and payload[key] is not None:
             if key == "sync_interval_sec":
@@ -549,11 +830,10 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 current[key] = bool(payload[key])
             else:
                 current[key] = payload[key]
-    conn = get_db()
-    conn.execute(
-        "UPDATE settings SET payload = ?, updated_at = ? WHERE id = 1",
-        (json.dumps(current, ensure_ascii=False), _now_iso()),
-    )
+    # 写回时保留非白名单键 (key_names / active_account_id 等), 避免被整体覆盖丢失
+    out = dict(raw)
+    out.update(current)
+    _write_payload(conn, out)
     conn.commit()
     return current
 
@@ -581,9 +861,10 @@ def _period_where(period: str) -> tuple[str, list[Any]]:
 _NUM_DAYS_RE = __import__("re").compile(r"^(\d+)d$")
 
 
-def model_stats(period: str = "30d") -> list[dict[str, Any]]:
+def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """按模型聚合: 请求数 / 会话数 / 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 命中率."""
     where, params = _period_where(period)
+    where, params = _account_filter(where, params, _resolve_account_id(account_id))
     rows = get_db().execute(
         f"""
         SELECT model,
@@ -627,9 +908,10 @@ def model_stats(period: str = "30d") -> list[dict[str, Any]]:
     return result
 
 
-def daily_stats(days: int = 30) -> list[dict[str, Any]]:
+def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """每日聚合: 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 请求数."""
     days = max(1, min(days, 365))
+    aid = _resolve_account_id(account_id)
     rows = get_db().execute(
         """
         SELECT substr(datetime(created_at, 'localtime'), 1, 10) AS date,
@@ -642,11 +924,12 @@ def daily_stats(days: int = 30) -> list[dict[str, Any]]:
                SUM(cost_usd) AS total_cost_usd,
                COUNT(*) AS request_count
         FROM usage_records
-        WHERE substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
+        WHERE account_id = ?
+          AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
         GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
         ORDER BY date ASC
         """,
-        (f"-{days} days",),
+        (aid, f"-{days} days"),
     ).fetchall()
     result: list[dict[str, Any]] = []
     for r in rows:
@@ -670,8 +953,9 @@ def daily_stats(days: int = 30) -> list[dict[str, Any]]:
     return result
 
 
-def today_trend() -> list[dict[str, Any]]:
+def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """今日 24 小时趋势: 每小时 输入/输出/推理 (本地时区, 无数据补 0)."""
+    aid = _resolve_account_id(account_id)
     rows = get_db().execute(
         """
         SELECT CAST(strftime('%H', datetime(created_at, 'localtime')) AS INTEGER) AS h,
@@ -679,9 +963,11 @@ def today_trend() -> list[dict[str, Any]]:
                SUM(output_tokens) AS output,
                SUM(reasoning_tokens) AS reasoning
         FROM usage_records
-        WHERE substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
+        WHERE account_id = ?
+          AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
         GROUP BY h
-        """
+        """,
+        (aid,),
     ).fetchall()
     by_hour = {int(r["h"]): r for r in rows}
     result: list[dict[str, Any]] = []
@@ -698,9 +984,10 @@ def today_trend() -> list[dict[str, Any]]:
     return result
 
 
-def totals(period: str = "30d") -> dict[str, Any]:
+def totals(period: str = "30d", account_id: Optional[int] = None) -> dict[str, Any]:
     """总览指标, 口径与模型占比一致."""
     where, params = _period_where(period)
+    where, params = _account_filter(where, params, _resolve_account_id(account_id))
     row = get_db().execute(
         f"""
         SELECT COUNT(*) AS request_count,
