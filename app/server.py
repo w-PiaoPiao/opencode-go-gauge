@@ -13,7 +13,8 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__, db
-from .updater import RELEASE_PAGE_URL, check_update
+from .autostart import disable as _autostart_disable, enable as _autostart_enable
+from .updater import RELEASE_PAGE_URL, check_update, download_update
 from .opencode_api import (
     AuthError,
     OpenCodeAPIError,
@@ -297,6 +298,23 @@ def sync_all_async(mode: str) -> None:
 _on_open_login: Optional[Callable[[], None]] = None
 _server: Optional[ThreadingHTTPServer] = None
 
+# 半自动更新下载状态机: idle -> checking -> downloading -> done/no_update/no_asset/error
+_update_download: dict[str, Any] = {"state": "idle", "path": "", "error": "", "latest": ""}
+
+
+def _update_download_worker() -> None:
+    """后台下载新版本 zip 到 ~/Downloads, 完成后在 Finder 中定位."""
+    try:
+        downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+        result = download_update(downloads)
+        _update_download.update(result)
+        if result.get("state") == "done" and result.get("path"):
+            import subprocess
+
+            subprocess.Popen(["open", "-R", result["path"]])
+    except Exception as exc:  # noqa: BLE001
+        _update_download.update({"state": "error", "error": str(exc)[:300]})
+
 
 def set_login_callback(callback: Callable[[], None]) -> None:
     """由 main.py 注册: 前端请求重新登录时触发窗口跳转."""
@@ -510,7 +528,36 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         except Exception:  # noqa: BLE001
             _json_response(handler, {"ok": False, "error": "无效请求体"}, 400)
             return
-        _json_response(handler, db.save_settings(body))
+        old_autostart = bool(db.get_settings().get("autostart"))
+        saved = db.save_settings(body)
+        new_autostart = bool(saved.get("autostart"))
+        # 开机自启副作用: 设置变化时注册/注销 LaunchAgent (仅 mac 打包版实际生效)
+        if new_autostart != old_autostart:
+            try:
+                ok = _autostart_enable() if new_autostart else _autostart_disable()
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                saved["autostart_applied"] = False
+            else:
+                saved["autostart_applied"] = True
+        else:
+            saved["autostart_applied"] = True
+        _json_response(handler, saved)
+        return
+
+    if route == "/api/update/download" and method == "POST":
+        if _update_download["state"] in ("checking", "downloading"):
+            _json_response(handler, {"ok": False, "error": "下载进行中"}, 409)
+            return
+        _update_download.update({"state": "checking", "path": "", "error": "", "latest": ""})
+        threading.Thread(target=_update_download_worker, daemon=True,
+                         name="gousage-update-dl").start()
+        _json_response(handler, {"ok": True})
+        return
+
+    if route == "/api/update/download/status" and method == "GET":
+        _json_response(handler, dict(_update_download))
         return
 
     handler.send_error(404)

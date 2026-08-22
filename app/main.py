@@ -1,18 +1,22 @@
-"""GoGauge - OpenCode Go 用量统计面板 (Python 单文件 exe + WebView).
+"""GoGauge - OpenCode Go 用量统计面板 (Python + WebView, 跨平台 Windows/macOS).
 
 入口: 启动本地 HTTP 服务 → 创建 WebView 窗口 → 未登录时加载授权页登录,
 登录成功后自动进入面板 (首次自动全量同步, 之后读本地数据库).
-系统托盘: 关闭窗口最小化到托盘, 托盘菜单可显示窗口/退出.
+系统托盘 (Windows) / 菜单栏图标 (macOS): 关闭窗口最小化到托盘/菜单栏,
+菜单可显示窗口/退出. 双平台行为一致, 功能完全相同.
 """
 from __future__ import annotations
 
-import ctypes
-import ctypes.wintypes
+import ctypes  # noqa: F401  跨平台均有, Win32 窗口/互斥体逻辑用到
+import ctypes.wintypes  # noqa: F401  Win32 单实例/窗口枚举用 (macOS 可安全 import)
+
+import json
 import os
 import sys
 import tempfile
 import threading
 import time
+from typing import Optional
 
 import webview
 
@@ -23,7 +27,15 @@ APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
 WINDOW_SIZE = (1280, 840)
 WINDOW_MIN_SIZE = (1000, 680)
 
+_IS_MAC = sys.platform == "darwin"
+_IS_WIN = sys.platform == "win32"
 
+_quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
+_tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
+_main_win_ref: dict[str, object] = {"win": None}  # 主窗口引用 (macOS delegate 恢复用)
+
+
+# ── Win32 窗口辅助 (仅 Windows 运行时使用; ctypes 为跨平台标准库) ──
 class _RECT(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                 ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
@@ -41,18 +53,179 @@ def _screen_workarea_logical() -> tuple[int, int]:
         pass
     return WINDOW_SIZE
 
-_quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
-_tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
+
 _move_lock = threading.Lock()  # 拖动 move_by 串行化: 防 js_api 并发读-写丢增量
 
 
-def _enable_taskbar_minimize(win) -> None:
-    """无边框窗口修复: 补上 WS_MINIMIZEBOX 样式, 让任务栏点击可最小化/恢复.
+def _install_macos_app_delegate() -> None:
+    """替换 pywebview 的 macOS AppDelegate, 补齐两个原生行为:
 
-    pywebview frameless -> WinForms FormBorderStyle.None, 该样式不包含
-    WS_MINIMIZEBOX (初始样式仅含 WS_MAXIMIZEBOX), 系统会忽略任务栏按钮的
-    最小化请求 (点击无反应). 给窗口句柄补上该样式, 恢复标准任务栏行为.
+    1. applicationShouldTerminate_: pywebview 原实现退出时会遍历窗口触发 closing
+       事件, 而本应用的 on_closing 在托盘可用时返回 False 取消关闭, 导致
+       Cmd+Q / Dock 右键 Quit / 菜单 Quit 全部被静默取消. 此处先置 _quitting
+       标志, 再调用原逻辑, 使关闭处理放行, 应用正常退出.
+    2. applicationShouldHandleReopen:hasVisibleWindows_: pywebview 未实现该方法,
+       窗口被 orderOut 隐藏后点击 Dock 图标无法重新显示. 此处补上恢复主窗口.
+
+    必须在 webview.start() 之前调用: pywebview 在创建窗口时才执行
+    BrowserView.AppDelegate.alloc().init() (cocoa.py), 替换类属性即可生效.
     """
+    if not _IS_MAC:
+        return
+    from webview.platforms.cocoa import BrowserView  # noqa: E402  仅 macOS 存在
+
+    class _GoGaugeAppDelegate(BrowserView.AppDelegate):  # type: ignore[misc, valid-type]
+        def applicationShouldTerminate_(self, app) -> bool:  # noqa: N802
+            global _quitting
+            _quitting = True
+            return super().applicationShouldTerminate_(app)
+
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag) -> bool:  # noqa: N802
+            win = _main_win_ref.get("win")
+            if win is not None:
+                try:
+                    win.show()
+                    win.restore()
+                except Exception:  # noqa: BLE001
+                    pass
+            _mac_activate_app()  # 其他 App 全屏/在前台时也能把窗口带到最前
+            return True
+
+    BrowserView.AppDelegate = _GoGaugeAppDelegate
+
+
+# ── macOS 平台辅助: 前台激活 / 单实例 / 小屏钳制 / 窗口位置记忆 ──
+_MAC_LOCK_PATH = os.path.expanduser("~/Library/Application Support/GoGauge/GoGauge.lock")
+_MAC_NOTIFY_PORT = 57567  # 本机回环 UDP: 第二实例唤起首实例的通道 (非常用端口)
+_mac_lock_fd = None  # 首实例持有的锁文件句柄 (存活期间 flock 有效, 引用防回收)
+_udp_show_ref: dict[str, object] = {"fn": None}  # 首实例注册的"前置主窗"回调
+
+
+def _mac_activate_app() -> None:
+    """把应用带到前台: Dock 点击/托盘唤起时, 其他 App 全屏时也能正常置前."""
+    try:
+        from AppKit import NSApplication
+
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ensure_single_instance_mac() -> None:
+    """macOS 单实例守卫 (仅打包 .app): flock 原子判定, 二次启动唤起首实例后退出.
+
+    Windows 用内核命名互斥体; macOS 等价物为文件锁 flock (进程退出自动释放,
+    无残留无 PID 复用问题). 唤醒通道用回环 UDP 而非 AppleScript: 后者发
+    Apple Event 可能触发 TCC 自动化权限弹窗, UDP 无任何权限成本; 收包方
+    复用 LoginWatcher 的跨线程窗口调用模式. 监听端口被占时静默降级 ——
+    单实例仍由 flock 保证, 仅丢失"自动弹窗"能力.
+    """
+    global _mac_lock_fd
+    if not getattr(sys, "frozen", False):
+        return  # 源码运行不限制 (与 Windows 开发态行为一致)
+    import fcntl
+    import socket
+
+    os.makedirs(os.path.dirname(_MAC_LOCK_PATH), exist_ok=True)
+    lock_fd = open(_MAC_LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # 已有实例: 通知其显示窗口后本进程退出 (锁句柄即弃).
+        # 盲发 3 次覆盖首实例尚未完成回调注册的启动竞态窗口.
+        lock_fd.close()
+        for _ in range(3):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.sendto(b"show", ("127.0.0.1", _MAC_NOTIFY_PORT))
+            except OSError:
+                pass
+            time.sleep(0.4)
+        sys.exit(0)
+    _mac_lock_fd = lock_fd
+
+    def _listen() -> None:
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.bind(("127.0.0.1", _MAC_NOTIFY_PORT))
+                    while True:
+                        if s.recvfrom(64)[0].strip() == b"show":
+                            fn = _udp_show_ref.get("fn")
+                            if callable(fn):
+                                fn()
+            except Exception:  # noqa: BLE001  端口被占/瞬断: 退避后重建, 不永久失效
+                time.sleep(2)
+
+    threading.Thread(target=_listen, daemon=True, name="gousage-single-instance").start()
+
+
+def _screen_visible_frame_logical() -> tuple[int, int]:
+    """macOS 主屏可用区域 (逻辑像素, 已排除菜单栏/Dock): 初始窗口不超屏.
+
+    与 Windows 的 SPI_GETWORKAREA 对应; 旧 MacBook Air (1366x768) 上
+    固定 1280x840 会底部溢出, 必须按可用区域钳制.
+    """
+    try:
+        from AppKit import NSScreen
+
+        vf = NSScreen.mainScreen().visibleFrame()
+        return max(1, int(vf.size.width)), max(1, int(vf.size.height))
+    except Exception:  # noqa: BLE001
+        return WINDOW_SIZE
+
+
+def _win_frame_path() -> str:
+    """窗口 frame 记录文件路径 (数据目录内)."""
+    return os.path.join(db.data_dir(), "window.json")
+
+
+def _save_window_frame(win) -> None:
+    """记录主窗口位置尺寸 (仅 macOS): 关到菜单栏/退出前调用."""
+    if not (_IS_MAC and win is not None):
+        return
+    try:
+        frame = {
+            "x": int(win.x), "y": int(win.y),
+            "width": int(win.width), "height": int(win.height),
+        }
+        with open(_win_frame_path(), "w", encoding="utf-8") as fh:
+            json.dump(frame, fh)
+    except Exception:  # noqa: BLE001  窗口未就绪/磁盘异常均不影响主流程
+        pass
+
+
+def _load_window_frame(max_w: int, max_h: int) -> Optional[dict]:
+    """读取上次窗口 frame 并做校验; 无有效记录返回 None.
+
+    x/y 直接沿用上次值 (保存/恢复均走 pywebview 自身坐标系, 往返一致);
+    宽高按当前主屏可用区域钳制, 防止换小屏后溢出.
+    """
+    try:
+        with open(_win_frame_path(), "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        x, y = int(d["x"]), int(d["y"])
+        if not (-max_w < x < 100000 and -100 < y < 100000):
+            return None  # 明显异常值 (多屏热插拔等): 回退默认居中
+        return {
+            "x": x, "y": y,
+            "width": min(int(d["width"]), max_w),
+            "height": min(int(d["height"]), max_h),
+        }
+    except Exception:  # noqa: BLE001  文件不存在/损坏/字段缺失
+        return None
+
+
+def _enable_taskbar_minimize(win) -> None:
+    """无边框窗口修复 (仅 Windows): 补上 WS_MINIMIZEBOX 样式.
+
+    pywebview frameless @ Windows -> WinForms FormBorderStyle.None, 该样式不包含
+    WS_MINIMIZEBOX (初始样式仅含 WS_MAXIMIZEBOX), 系统会忽略任务栏按钮的
+    最小化请求. 给窗口句柄补上该样式, 恢复标准任务栏行为.
+    macOS 无此 API, 跳过 (Cocoa 窗口本身支持最小化).
+    """
+    if not _IS_WIN:
+        return
     try:
         # pythonnet IntPtr 需先 ToInt32() 再转 int (直接 int() 会抛 TypeError)
         hwnd = int(win.native.Handle.ToInt32())
@@ -64,14 +237,29 @@ def _enable_taskbar_minimize(win) -> None:
     except Exception:  # noqa: BLE001
         pass
 
-_MAIN_LOG = os.path.join(tempfile.gettempdir(), "gousage_main.log")
+_MAIN_LOG_MAX = 512 * 1024  # 超过后轮转一次 (保留 .old 一份), 防无限增长
+
+
+def _main_log_path() -> str:
+    """日志放数据目录: 含 workspace 等运行信息, 不再写公共 /tmp."""
+    try:
+        return os.path.join(db.data_dir(), "gousage_main.log")
+    except Exception:  # noqa: BLE001  db 未就绪等极端情况回退 /tmp
+        return os.path.join(tempfile.gettempdir(), "gousage_main.log")
 
 
 def _mlog(msg: str) -> None:
-    """主流程日志 (exe 无控制台, 落盘便于排查)."""
+    """主流程日志 (exe 无控制台, 落盘便于排查), 带时间戳 + 超限轮转."""
     try:
-        with open(_MAIN_LOG, "a", encoding="utf-8") as fh:
-            fh.write(msg + "\n")
+        path = _main_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            if os.path.getsize(path) > _MAIN_LOG_MAX:
+                os.replace(path, path + ".old")
+        except OSError:
+            pass
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%m-%d %H:%M:%S ") + msg + "\n")
     except OSError:
         pass
 
@@ -84,7 +272,50 @@ def _asset_path(rel: str) -> str:
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", rel)
 
 
-# ── 单实例检测常量 (Win32) ──
+def _app_icon_path() -> str:
+    """按平台选择应用/托盘图标.
+
+    Windows 使用 .ico; macOS 使用 .png (Dock 与菜单栏图标通用, WKWebView
+    无 .ico 支持, pystray 走菜单栏也只需 PNG). 优先返回实际存在的文件.
+    """
+    candidates = ["GoGauge.png"] if _IS_MAC else ["GoGauge.ico"]
+    for name in candidates:
+        p = _asset_path(name)
+        if os.path.isfile(p):
+            return p
+    # 兜底: 任一可用图标
+    for name in ("GoGauge.png", "GoGauge.ico"):
+        p = _asset_path(name)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+
+def _arm_quit_fallback(timeout: float = 3.0) -> None:
+    """退出兜底: 若 destroy 全部窗口后事件循环未在限时内退出, 强制结束进程.
+
+    pywebview cocoa 在最后一个窗口关闭时会 stop 事件循环, 正常路径无需兜底;
+    但若 WebView 进程异常 (崩溃/挂起) 导致循环不退出, 兜底保证应用不会变成
+    "隐形进程" 只能强杀. 强退前先执行 shutdown() (停 server/关库连接,
+    WAL 落盘 checkpoint), 避免 os._exit 绕过 atexit 造成数据未落盘.
+    """
+    def _force_quit() -> None:
+        try:
+            shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        os._exit(0)
+
+    # 注意: threading.Timer 不接受 name/daemon 关键字 (Py3.9 实测 TypeError,
+    # 会导致兜底未武装就抛异常、退出流程中断), 属性需在实例上设置.
+    timer = threading.Timer(timeout, _force_quit)
+    timer.name = "gousage-quit-fallback"
+    timer.daemon = True
+    timer.start()
+
+
+# ── 单实例检测 (仅 Windows: Win32 命名互斥体; macOS 不走此路径) ──
 _LOCK_FILE_NAME = "GoGauge.lock"
 _MUTEX_NAME = "GoGauge_SingleInstance_Mutex"
 _ERROR_ALREADY_EXISTS = 183  # GetLastError: 命名对象已存在
@@ -260,16 +491,92 @@ def _ensure_single_instance() -> None:
         _mlog("[single-instance] 写锁文件失败")
 
 
+_TRAY_I18N = {
+    "zh": {
+        "show": "显示窗口", "quit": "退出",
+        "today_label": "今日", "req_unit": "次",
+        "remaining_prefix": "剩余 ",
+        "not_login": "未登录 · 打开窗口登录",
+    },
+    "en": {
+        "show": "Show Window", "quit": "Quit",
+        "today_label": "Today", "req_unit": "req",
+        "remaining_prefix": "left ",
+        "not_login": "Not logged in",
+    },
+}
+
+
+def _tray_lang() -> str:
+    """菜单栏菜单语言: macOS 跟随系统首选语言, 其余平台默认中文."""
+    if not _IS_MAC:
+        return "zh"
+    try:
+        from AppKit import NSUserDefaults
+
+        langs = NSUserDefaults.standardUserDefaults().stringArrayForKey_("AppleLanguages") or []
+        first = str(langs[0]).lower() if langs else ""
+        return "en" if first.startswith("en") else "zh"
+    except Exception:  # noqa: BLE001
+        return "zh"
+
+
 class TrayIcon:
-    """系统托盘 (pystray): logo 图标 + 显示窗口/退出 菜单."""
+    """系统托盘/菜单栏图标 (pystray): 显示窗口 + 今日用量面板 + 退出 菜单.
+
+    Windows: 在后台线程运行 pystray 自己的事件循环.
+    macOS: AppKit 必须在主线程, 且需与 pywebview 共享同一个 NSApplication 事件循环,
+    因此在主线程构造图标后调用 run_detached() 注册, 由 webview.start() 驱动菜单栏;
+    图标使用 template 模式 (单色剪影), 自动适配深浅色菜单栏.
+    """
+
+    _REFRESH_SEC = 30  # 面板数据刷新间隔
 
     def __init__(self, icon_path: str) -> None:
         self._icon_path = icon_path
         self._icon = None
         self._win_getter = None
+        self._lang = "zh"
 
     def bind_window(self, getter) -> None:
         self._win_getter = getter
+
+    def _info_items(self, pystray) -> list:
+        """今日用量快捷面板行 (灰显不可点): 免开主窗即可瞄一眼用量."""
+        t = _TRAY_I18N.get(self._lang, _TRAY_I18N["zh"])
+        rows: list = []
+        try:
+            if db.get_token():
+                today = db.totals("today") or {}
+                cost = float(today.get("total_cost_usd") or 0.0)
+                req = int(today.get("request_count") or 0)
+                rows.append(pystray.MenuItem(
+                    f"{t['today_label']}: ${cost:.2f} · {req} {t['req_unit']}",
+                    None, enabled=False))
+                # 读 server 配额缓存 (只读跨线程安全); 未就绪时自然缺省
+                quota = getattr(server, "_quota_cache", {}).get("data") or {}
+                for w in (quota.get("windows") or [])[:3]:
+                    label = str(w.get("label") or "").strip()
+                    remaining = w.get("remaining")
+                    if label and isinstance(remaining, (int, float)):
+                        rows.append(pystray.MenuItem(
+                            f"{label}: {t['remaining_prefix']}{remaining:.0f}%",
+                            None, enabled=False))
+            else:
+                rows.append(pystray.MenuItem(t["not_login"], None, enabled=False))
+        except Exception:  # noqa: BLE001  数据未就绪时面板行省略
+            pass
+        return rows
+
+    def _refresh_loop(self) -> None:
+        """周期 update_menu 让动态行取到最新数据 (cocoa 的 NSMenu 是快照)."""
+        while not _quitting:
+            time.sleep(self._REFRESH_SEC)
+            try:
+                if self._icon and not _quitting:
+                    self._icon.update_menu()
+            except Exception:  # noqa: BLE001
+                pass
 
     def start(self) -> bool:
         global _tray_ready
@@ -280,19 +587,46 @@ class TrayIcon:
             if not os.path.isfile(self._icon_path):
                 return False
             img = Image.open(self._icon_path).convert("RGBA")
+            self._lang = _tray_lang()
+            t = _TRAY_I18N.get(self._lang, _TRAY_I18N["zh"])
             menu = pystray.Menu(
-                pystray.MenuItem("显示窗口", self._show, default=True),
+                pystray.MenuItem(t["show"], self._show, default=True),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("退出", self._quit),
+                *self._info_items(pystray),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(t["quit"], self._quit),
             )
             self._icon = pystray.Icon("GoGauge", img, "GoGauge - OpenCode Go 用量面板", menu)
-            threading.Thread(target=self._icon.run, daemon=True).start()
+            if _IS_MAC:
+                # macOS: 主线程构造(Icon 里创建 NSStatusItem/NSWindow 需在主线程),
+                # run_detached 仅注册, 不启动独立 run loop, 由 pywebview 驱动.
+                self._icon.run_detached(setup=lambda i: setattr(i, "visible", True))
+                self._apply_template_image()
+            else:
+                # Windows / 其它: pystray 自带事件循环, 放入后台线程.
+                threading.Thread(target=self._icon.run, daemon=True).start()
+            threading.Thread(target=self._refresh_loop, daemon=True,
+                             name="gousage-tray-refresh").start()
             _tray_ready = True
             return True
         except Exception as exc:  # noqa: BLE001
             print(f"[tray] 托盘启动失败: {exc}", flush=True)
             _tray_ready = False
             return False
+
+    def _apply_template_image(self) -> None:
+        """macOS 菜单栏图标转 template 模式 (按 alpha 渲染单色剪影).
+
+        彩色 logo 在深色菜单栏上突兀; template 由系统自动黑/白反色.
+        pystray 未暴露该能力, 直接改其内部 NSImage (_icon_image 引用被
+        后续 setImage_ 复用, 原地 setTemplate_ 即可持续生效).
+        """
+        try:
+            nsimg = getattr(self._icon, "_icon_image", None)
+            if nsimg is not None:
+                nsimg.setTemplate_(True)
+        except Exception:  # noqa: BLE001  失败则保持彩色原图
+            pass
 
     def stop(self) -> None:
         if self._icon:
@@ -307,10 +641,18 @@ class TrayIcon:
             if win:
                 win.show()
                 win.restore()
+                if _IS_MAC:
+                    _mac_activate_app()
 
     def _quit(self, icon=None, item=None) -> None:
         global _quitting
         _quitting = True
+        _arm_quit_fallback()
+        try:
+            if self._win_getter:
+                _save_window_frame(self._win_getter())
+        except Exception:  # noqa: BLE001
+            pass
         if icon:
             try:
                 icon.stop()
@@ -380,8 +722,10 @@ class WindowApi:
         if not self._win:
             return True
         if _quitting or not _tray_ready:
+            _arm_quit_fallback()
             self._win.destroy()
         else:
+            _save_window_frame(self._win)
             self._win.hide()  # 最小化到托盘
         return True
 
@@ -389,6 +733,8 @@ class WindowApi:
         """退出应用 (欢迎页/设置页按钮): 真正退出, 不驻留托盘."""
         global _quitting
         _quitting = True
+        _arm_quit_fallback()
+        _save_window_frame(self._win)
         _destroy_all_windows()
         return True
 
@@ -405,8 +751,11 @@ def _destroy_all_windows() -> None:
 def main() -> None:
     global _quitting
 
-    # 单实例守卫: 已有实例在运行时激活其窗口, 当前进程直接退出
-    _ensure_single_instance()
+    # 单实例守卫: Windows 用命名互斥体, macOS 用 flock (源码运行均不限制).
+    if _IS_WIN:
+        _ensure_single_instance()
+    else:
+        _ensure_single_instance_mac()
 
     db.get_db()  # 初始化数据库
 
@@ -416,40 +765,77 @@ def main() -> None:
     api = WindowApi()
 
     # 启动窗口: 始终加载本地页面; 未登录时前端显示欢迎页引导登录
-    # 初始尺寸不超过屏幕工作区 (矮屏/高分屏下避免底部被裁); frameless 拖动由
-    # 前端自实现 (js_api.move_by), 不再使用 pywebview easy_drag (DPI 缩放下抽动)
-    wa_w, wa_h = _screen_workarea_logical()
-    win_w = min(WINDOW_SIZE[0], wa_w - 60)
-    win_h = min(WINDOW_SIZE[1], wa_h - 60)
+    # 初始窗口尺寸:
+    # - Windows: 无边框 + 自定义标题栏; 初始尺寸不超过屏幕工作区, 避免矮屏/高分屏
+    #   底部被裁. 拖动由前端自实现 (js_api.move_by), 不再用 pywebview easy_drag
+    #   (其 JS 用 clientX 记起点/screenX 算增量 + 后端再乘 DPI 缩放, 高 DPI 抽动).
+    # - macOS: 原生标题栏 + 红黄绿交通灯 (frameless=False), 原生标题栏本身可拖动,
+    #   无需 easy_drag; 尺寸按主屏可用区域钳制 (同 Windows 逻辑), 并恢复上次
+    #   窗口位置尺寸 (换小屏时宽高自动收缩, 位置异常则回退默认).
+    if _IS_WIN:
+        wa_w, wa_h = _screen_workarea_logical()
+    elif _IS_MAC:
+        wa_w, wa_h = _screen_visible_frame_logical()
+    else:
+        wa_w, wa_h = WINDOW_SIZE
+    win_w = min(WINDOW_SIZE[0], max(1, wa_w - 60))
+    win_h = min(WINDOW_SIZE[1], max(1, wa_h - 60))
+    saved_frame = _load_window_frame(win_w, win_h) if _IS_MAC else None
+    if saved_frame:
+        win_w, win_h = saved_frame["width"], saved_frame["height"]
     main_win = webview.create_window(
         APP_TITLE,
         dashboard_url,
         width=win_w,
         height=win_h,
+        x=saved_frame["x"] if saved_frame else None,
+        y=saved_frame["y"] if saved_frame else None,
         min_size=WINDOW_MIN_SIZE,
-        frameless=True,  # 自定义标题栏
+        frameless=(not _IS_MAC),
         # 显式关闭 easy_drag: 其默认值为 True, 不传会保持开启;
         # easy_drag 的 JS 用 clientX 记起点/screenX 算增量 + 后端再乘 DPI 缩放,
-        # 高 DPI 屏幕拖动漂移抽动. 窗口拖动由前端自实现 (js_api.move_by).
+        # 高 DPI 屏幕拖动漂移抽动. 窗口拖动由前端自实现 (js_api.move_by, Windows);
+        # macOS 由原生标题栏承担.
         easy_drag=False,
         js_api=api,
     )
     api.bind(main_win)
+    _main_win_ref["win"] = main_win
 
-    # 预创建独立登录子窗口 (hidden, 系统边框含关闭按钮; 点击"立即登录"时弹出)
-    # 用可变引用: 窗口被手动关闭后可重建, 回调始终指向当前登录窗
-    login_win_ref: dict[str, object] = {"win": webview.create_window(
-        "GoGauge - OpenCode Go Login",
-        "about:blank",
-        width=720,
-        height=640,
-        min_size=(560, 500),
-        hidden=True,
-        background_color="#f7f6f4",
-    )}
+    def show_main() -> None:
+        """前置并恢复主窗口 (单实例唤起/Dock 重开共用)."""
+        try:
+            main_win.show()
+            main_win.restore()
+        except Exception:  # noqa: BLE001  窗口可能已销毁 (退出竞态)
+            pass
+
+    # 第二实例 UDP 唤起回调 (注册前收到的包会丢失, 仅启动竞态的极端情况)
+    _udp_show_ref["fn"] = show_main
+
+    # 独立登录子窗口延迟创建: 启动即建 about:blank 隐藏窗会白占一份 WebView
+    # 进程内存; 首次"立即登录"才实例化 (被手动关闭后由 _recreate_login_window 重建).
+    login_win_ref: dict[str, object] = {"win": None}
 
     def login_win() -> object:
-        return login_win_ref["win"]
+        w = login_win_ref["win"]
+        if w is not None:
+            try:
+                if w in webview.windows:
+                    return w
+            except Exception:  # noqa: BLE001
+                pass
+        w = webview.create_window(
+            "GoGauge - OpenCode Go Login",
+            "about:blank",
+            width=720,
+            height=640,
+            min_size=(560, 500),
+            hidden=True,
+            background_color="#f7f6f4",
+        )
+        login_win_ref["win"] = w
+        return w
 
     def on_login_success(auth_cookie: str, workspace_hint: str) -> None:
         """登录成功: 保存 token → 隐藏登录窗口 → 主窗口进入面板 → 首次全量同步."""
@@ -552,13 +938,35 @@ def main() -> None:
     main_win.events.shown += on_shown
     main_win.events.restored += on_restored
 
-    # 系统托盘 (logo 图标)
-    tray = TrayIcon(_asset_path("GoGauge.ico"))
+    if _IS_MAC:
+        def on_closing() -> bool:
+            # macOS 原生红点关闭按钮: 托盘/菜单栏可用时 -> 只隐藏窗口(驻留菜单栏);
+            # 真正退出(托盘退出或欢迎页"退出应用")时 -> 返回 True 允许关闭.
+            global _quitting, _tray_ready
+            if _quitting or not _tray_ready:
+                return True  # 允许真正关闭
+            try:
+                _save_window_frame(main_win)
+                main_win.hide()  # 驻留菜单栏
+            except Exception:  # noqa: BLE001
+                return True
+            return False  # 取消本次关闭
+
+        # 返回 False 即取消原生关闭 (pywebview closing 事件语义)
+        main_win.events.closing += on_closing
+
+    # 系统托盘 (Windows) / 菜单栏图标 (macOS)
+    tray = TrayIcon(_app_icon_path())
     tray.bind_window(lambda: main_win if main_win in webview.windows else None)
     tray.start()
 
-    # 任务栏/窗口图标: 使用 logo (winforms 后端从 start(icon=...) 设置窗口 Icon)
-    webview.start(icon=_asset_path("GoGauge.ico") if os.path.isfile(_asset_path("GoGauge.ico")) else None)
+    # macOS: 在 pywebview 创建窗口/设置 delegate 前替换 AppDelegate,
+    # 补齐 Dock 点击恢复窗口 与 退出放行 (必须在 webview.start() 之前).
+    _install_macos_app_delegate()
+
+    # 窗口/Dock 图标: 按平台选择 (Win=ico, macOS 用 png 生成 dock icon 由 .app 提供)
+    icon_path = _app_icon_path()
+    webview.start(icon=icon_path if icon_path else None)
 
     if not _quitting:
         tray.stop()

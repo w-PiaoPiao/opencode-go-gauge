@@ -1,0 +1,7 @@
+# macOS 打包依赖锁定 (build_macos.sh 优先使用本文件, 保证构建可复现).
+# 升级依赖时: pip3 freeze 后更新对应版本并重新构建验证.
+bottle==0.13.4
+pillow==11.3.0
+pyinstaller==6.22.2
+pystray==0.19.5
+pywebview==6.2.1
