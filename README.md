@@ -82,6 +82,15 @@ build.bat
 输出 `dist/GoGauge.app`（无终端窗口，含 `.icns` 图标与菜单栏托盘支持）。
 
 > 需要 macOS 11+（内置 WebKit，pywebview 使用 WKWebView）。关闭窗口会最小化到菜单栏。
+>
+> **首次打开被 Gatekeeper 拦截？** 开源版未做 Apple 公证（$99/年开发者账号），
+> 在终端执行一次以下命令后正常双击打开：
+>
+> ```bash
+> xattr -cr /Applications/GoGauge.app
+> ```
+>
+> 当前构建为 **Apple Silicon (arm64)** 原生；Intel Mac 请用 Releases 中带 `-x86_64` 后缀的包。
 
 ## 📊 数据说明
 

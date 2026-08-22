@@ -131,27 +131,31 @@ def _ensure_single_instance_mac() -> None:
     try:
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        # 已有实例: 通知其显示窗口后本进程退出 (锁句柄即弃)
+        # 已有实例: 通知其显示窗口后本进程退出 (锁句柄即弃).
+        # 盲发 3 次覆盖首实例尚未完成回调注册的启动竞态窗口.
         lock_fd.close()
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.sendto(b"show", ("127.0.0.1", _MAC_NOTIFY_PORT))
-        except OSError:
-            pass
+        for _ in range(3):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.sendto(b"show", ("127.0.0.1", _MAC_NOTIFY_PORT))
+            except OSError:
+                pass
+            time.sleep(0.4)
         sys.exit(0)
     _mac_lock_fd = lock_fd
 
     def _listen() -> None:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.bind(("127.0.0.1", _MAC_NOTIFY_PORT))
-                while True:
-                    if s.recvfrom(64)[0].strip() == b"show":
-                        fn = _udp_show_ref.get("fn")
-                        if callable(fn):
-                            fn()
-        except Exception:  # noqa: BLE001  端口被占等异常: 静默降级
-            pass
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.bind(("127.0.0.1", _MAC_NOTIFY_PORT))
+                    while True:
+                        if s.recvfrom(64)[0].strip() == b"show":
+                            fn = _udp_show_ref.get("fn")
+                            if callable(fn):
+                                fn()
+            except Exception:  # noqa: BLE001  端口被占/瞬断: 退避后重建, 不永久失效
+                time.sleep(2)
 
     threading.Thread(target=_listen, daemon=True, name="gousage-single-instance").start()
 
@@ -233,14 +237,29 @@ def _enable_taskbar_minimize(win) -> None:
     except Exception:  # noqa: BLE001
         pass
 
-_MAIN_LOG = os.path.join(tempfile.gettempdir(), "gousage_main.log")
+_MAIN_LOG_MAX = 512 * 1024  # 超过后轮转一次 (保留 .old 一份), 防无限增长
+
+
+def _main_log_path() -> str:
+    """日志放数据目录: 含 workspace 等运行信息, 不再写公共 /tmp."""
+    try:
+        return os.path.join(db.data_dir(), "gousage_main.log")
+    except Exception:  # noqa: BLE001  db 未就绪等极端情况回退 /tmp
+        return os.path.join(tempfile.gettempdir(), "gousage_main.log")
 
 
 def _mlog(msg: str) -> None:
-    """主流程日志 (exe 无控制台, 落盘便于排查)."""
+    """主流程日志 (exe 无控制台, 落盘便于排查), 带时间戳 + 超限轮转."""
     try:
-        with open(_MAIN_LOG, "a", encoding="utf-8") as fh:
-            fh.write(msg + "\n")
+        path = _main_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            if os.path.getsize(path) > _MAIN_LOG_MAX:
+                os.replace(path, path + ".old")
+        except OSError:
+            pass
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%m-%d %H:%M:%S ") + msg + "\n")
     except OSError:
         pass
 
@@ -278,9 +297,22 @@ def _arm_quit_fallback(timeout: float = 3.0) -> None:
 
     pywebview cocoa 在最后一个窗口关闭时会 stop 事件循环, 正常路径无需兜底;
     但若 WebView 进程异常 (崩溃/挂起) 导致循环不退出, 兜底保证应用不会变成
-    "隐形进程" 只能强杀.
+    "隐形进程" 只能强杀. 强退前先执行 shutdown() (停 server/关库连接,
+    WAL 落盘 checkpoint), 避免 os._exit 绕过 atexit 造成数据未落盘.
     """
-    threading.Timer(timeout, lambda: os._exit(0), name="gousage-quit-fallback").start()
+    def _force_quit() -> None:
+        try:
+            shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        os._exit(0)
+
+    # 注意: threading.Timer 不接受 name/daemon 关键字 (Py3.9 实测 TypeError,
+    # 会导致兜底未武装就抛异常、退出流程中断), 属性需在实例上设置.
+    timer = threading.Timer(timeout, _force_quit)
+    timer.name = "gousage-quit-fallback"
+    timer.daemon = True
+    timer.start()
 
 
 # ── 单实例检测 (仅 Windows: Win32 命名互斥体; macOS 不走此路径) ──
@@ -459,21 +491,92 @@ def _ensure_single_instance() -> None:
         _mlog("[single-instance] 写锁文件失败")
 
 
+_TRAY_I18N = {
+    "zh": {
+        "show": "显示窗口", "quit": "退出",
+        "today_label": "今日", "req_unit": "次",
+        "remaining_prefix": "剩余 ",
+        "not_login": "未登录 · 打开窗口登录",
+    },
+    "en": {
+        "show": "Show Window", "quit": "Quit",
+        "today_label": "Today", "req_unit": "req",
+        "remaining_prefix": "left ",
+        "not_login": "Not logged in",
+    },
+}
+
+
+def _tray_lang() -> str:
+    """菜单栏菜单语言: macOS 跟随系统首选语言, 其余平台默认中文."""
+    if not _IS_MAC:
+        return "zh"
+    try:
+        from AppKit import NSUserDefaults
+
+        langs = NSUserDefaults.standardUserDefaults().stringArrayForKey_("AppleLanguages") or []
+        first = str(langs[0]).lower() if langs else ""
+        return "en" if first.startswith("en") else "zh"
+    except Exception:  # noqa: BLE001
+        return "zh"
+
+
 class TrayIcon:
-    """系统托盘/菜单栏图标 (pystray): logo + 显示窗口/退出 菜单.
+    """系统托盘/菜单栏图标 (pystray): 显示窗口 + 今日用量面板 + 退出 菜单.
 
     Windows: 在后台线程运行 pystray 自己的事件循环.
     macOS: AppKit 必须在主线程, 且需与 pywebview 共享同一个 NSApplication 事件循环,
-    因此在主线程构造图标后调用 run_detached() 注册, 由 webview.start() 驱动菜单栏.
+    因此在主线程构造图标后调用 run_detached() 注册, 由 webview.start() 驱动菜单栏;
+    图标使用 template 模式 (单色剪影), 自动适配深浅色菜单栏.
     """
+
+    _REFRESH_SEC = 30  # 面板数据刷新间隔
 
     def __init__(self, icon_path: str) -> None:
         self._icon_path = icon_path
         self._icon = None
         self._win_getter = None
+        self._lang = "zh"
 
     def bind_window(self, getter) -> None:
         self._win_getter = getter
+
+    def _info_items(self, pystray) -> list:
+        """今日用量快捷面板行 (灰显不可点): 免开主窗即可瞄一眼用量."""
+        t = _TRAY_I18N.get(self._lang, _TRAY_I18N["zh"])
+        rows: list = []
+        try:
+            if db.get_token():
+                today = db.totals("today") or {}
+                cost = float(today.get("total_cost_usd") or 0.0)
+                req = int(today.get("request_count") or 0)
+                rows.append(pystray.MenuItem(
+                    f"{t['today_label']}: ${cost:.2f} · {req} {t['req_unit']}",
+                    None, enabled=False))
+                # 读 server 配额缓存 (只读跨线程安全); 未就绪时自然缺省
+                quota = getattr(server, "_quota_cache", {}).get("data") or {}
+                for w in (quota.get("windows") or [])[:3]:
+                    label = str(w.get("label") or "").strip()
+                    remaining = w.get("remaining")
+                    if label and isinstance(remaining, (int, float)):
+                        rows.append(pystray.MenuItem(
+                            f"{label}: {t['remaining_prefix']}{remaining:.0f}%",
+                            None, enabled=False))
+            else:
+                rows.append(pystray.MenuItem(t["not_login"], None, enabled=False))
+        except Exception:  # noqa: BLE001  数据未就绪时面板行省略
+            pass
+        return rows
+
+    def _refresh_loop(self) -> None:
+        """周期 update_menu 让动态行取到最新数据 (cocoa 的 NSMenu 是快照)."""
+        while not _quitting:
+            time.sleep(self._REFRESH_SEC)
+            try:
+                if self._icon and not _quitting:
+                    self._icon.update_menu()
+            except Exception:  # noqa: BLE001
+                pass
 
     def start(self) -> bool:
         global _tray_ready
@@ -484,25 +587,46 @@ class TrayIcon:
             if not os.path.isfile(self._icon_path):
                 return False
             img = Image.open(self._icon_path).convert("RGBA")
+            self._lang = _tray_lang()
+            t = _TRAY_I18N.get(self._lang, _TRAY_I18N["zh"])
             menu = pystray.Menu(
-                pystray.MenuItem("显示窗口", self._show, default=True),
+                pystray.MenuItem(t["show"], self._show, default=True),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("退出", self._quit),
+                *self._info_items(pystray),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(t["quit"], self._quit),
             )
             self._icon = pystray.Icon("GoGauge", img, "GoGauge - OpenCode Go 用量面板", menu)
             if _IS_MAC:
                 # macOS: 主线程构造(Icon 里创建 NSStatusItem/NSWindow 需在主线程),
                 # run_detached 仅注册, 不启动独立 run loop, 由 pywebview 驱动.
                 self._icon.run_detached(setup=lambda i: setattr(i, "visible", True))
+                self._apply_template_image()
             else:
                 # Windows / 其它: pystray 自带事件循环, 放入后台线程.
                 threading.Thread(target=self._icon.run, daemon=True).start()
+            threading.Thread(target=self._refresh_loop, daemon=True,
+                             name="gousage-tray-refresh").start()
             _tray_ready = True
             return True
         except Exception as exc:  # noqa: BLE001
             print(f"[tray] 托盘启动失败: {exc}", flush=True)
             _tray_ready = False
             return False
+
+    def _apply_template_image(self) -> None:
+        """macOS 菜单栏图标转 template 模式 (按 alpha 渲染单色剪影).
+
+        彩色 logo 在深色菜单栏上突兀; template 由系统自动黑/白反色.
+        pystray 未暴露该能力, 直接改其内部 NSImage (_icon_image 引用被
+        后续 setImage_ 复用, 原地 setTemplate_ 即可持续生效).
+        """
+        try:
+            nsimg = getattr(self._icon, "_icon_image", None)
+            if nsimg is not None:
+                nsimg.setTemplate_(True)
+        except Exception:  # noqa: BLE001  失败则保持彩色原图
+            pass
 
     def stop(self) -> None:
         if self._icon:
@@ -689,20 +813,29 @@ def main() -> None:
     # 第二实例 UDP 唤起回调 (注册前收到的包会丢失, 仅启动竞态的极端情况)
     _udp_show_ref["fn"] = show_main
 
-    # 预创建独立登录子窗口 (hidden, 系统边框含关闭按钮; 点击"立即登录"时弹出)
-    # 用可变引用: 窗口被手动关闭后可重建, 回调始终指向当前登录窗
-    login_win_ref: dict[str, object] = {"win": webview.create_window(
-        "GoGauge - OpenCode Go Login",
-        "about:blank",
-        width=720,
-        height=640,
-        min_size=(560, 500),
-        hidden=True,
-        background_color="#f7f6f4",
-    )}
+    # 独立登录子窗口延迟创建: 启动即建 about:blank 隐藏窗会白占一份 WebView
+    # 进程内存; 首次"立即登录"才实例化 (被手动关闭后由 _recreate_login_window 重建).
+    login_win_ref: dict[str, object] = {"win": None}
 
     def login_win() -> object:
-        return login_win_ref["win"]
+        w = login_win_ref["win"]
+        if w is not None:
+            try:
+                if w in webview.windows:
+                    return w
+            except Exception:  # noqa: BLE001
+                pass
+        w = webview.create_window(
+            "GoGauge - OpenCode Go Login",
+            "about:blank",
+            width=720,
+            height=640,
+            min_size=(560, 500),
+            hidden=True,
+            background_color="#f7f6f4",
+        )
+        login_win_ref["win"] = w
+        return w
 
     def on_login_success(auth_cookie: str, workspace_hint: str) -> None:
         """登录成功: 保存 token → 隐藏登录窗口 → 主窗口进入面板 → 首次全量同步."""

@@ -9,7 +9,12 @@ echo "============================================"
 echo
 
 echo "[1/5] 安装依赖..."
-python3 -m pip install -q --upgrade pywebview pystray pillow pyinstaller
+# 优先锁定版本 (可复现构建); 无锁文件时回退最新版
+if [ -f requirements-macos.lock.txt ]; then
+  python3 -m pip install -q -r requirements-macos.lock.txt
+else
+  python3 -m pip install -q --upgrade pywebview pystray pillow pyinstaller
+fi
 
 echo "[2/5] 读取版本号 + 生成本次构建信息..."
 APP_VERSION="$(python3 -c 'from app import __version__; print(__version__)')"
