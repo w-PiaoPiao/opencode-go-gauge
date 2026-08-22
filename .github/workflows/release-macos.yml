@@ -51,6 +51,7 @@ jobs:
       - name: Attach assets to release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           # v1.0.3-macos -> 资产命名 GoGauge-v1.0.3-macos-arm64.zip / -x86_64.zip
