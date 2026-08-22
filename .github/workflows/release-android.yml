@@ -1,0 +1,59 @@
+# Android APK 自动构建: 推送 v*-android tag 时触发, 构建产物自动附到同名 release.
+# 签名使用仓库内 debug.keystore (个人侧载用; 上架 Play 需替换正式 keystore).
+name: release-android
+
+on:
+  push:
+    tags: ["v*-android"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 仓库无 wrapper, 固定与 AGP 8.13 兼容的 Gradle 版本
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Build signed release APK
+        working-directory: android
+        run: gradle :app:assembleRelease --no-daemon --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoGauge-android-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Attach assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # v2.0.0-android -> 资产命名 GoGauge-v2.0.0-android.apk
+          VER="${TAG#v}"; VER="${VER%-android}"
+          mv app-release.apk "GoGauge-v${VER}-android.apk"
+          ls -l
+          gh release upload "$TAG" "GoGauge-v${VER}-android.apk" --clobber || \
+            gh release create "$TAG" "GoGauge-v${VER}-android.apk" \
+              --title "GoGauge $TAG" --generate-notes
