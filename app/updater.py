@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import html as _html
 import json
+import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -17,10 +19,35 @@ from typing import Any, Optional
 
 from . import __version__
 
-REPO = "yphyphyph/opencode-go-gauge"
-RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+# 源码/开发态默认上游仓库; 打包产物由 build_macos.sh 生成的 _build_info 覆盖,
+# 使"更新检查源"与实际分发源一致 (fork 发布的版本检查 fork 的 releases).
+_DEFAULT_REPO = "yphyphyph/opencode-go-gauge"
+
+
+def _resolve_repo() -> str:
+    env = (os.environ.get("GOUSAGE_UPDATE_REPO") or "").strip()
+    if env:
+        return env
+    if getattr(sys, "frozen", False):
+        try:
+            from ._build_info import UPDATE_REPO  # type: ignore[import-not-found]
+        except Exception:  # noqa: BLE001  文件不存在(源码运行/旧包)则回退默认
+            pass
+        else:
+            repo = str(UPDATE_REPO or "").strip()
+            if repo:
+                return repo
+    return _DEFAULT_REPO
+
+
+REPO = _resolve_repo()
+# 列表接口而非 /releases/latest: 仓库 Latest 是全平台共享的一个标记,
+# android/windows 版发布后占据 Latest 会把 mac 更新判断带偏 (tag 后缀被
+# 剥掉后 0.1.0-android < 当前版本 → 误判"已是最新"). 这里只认 -macos 条目.
+RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
 ATOM_URL = f"https://github.com/{REPO}/releases.atom"
 RELEASE_PAGE_URL = f"https://github.com/{REPO}/releases/latest"
+_PLATFORM_SUFFIX = "-macos"
 _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 _TIMEOUT = 8  # 秒; GitHub 直连可能超时, 快速失败避免卡住 UI
 _MAX_ATTEMPTS = 3  # 境内直连 GitHub 间歇性 502/超时/重置, 自动重试提高成功率
@@ -89,35 +116,42 @@ def _strip_html(text: str) -> str:
 def _fetch_latest_atom() -> dict[str, str]:
     """从 Releases Atom 流解析最新 release (不受 GitHub API 限流).
 
+    只认本平台 (-macos) 条目: 流内混排各平台 release, 逐条过滤.
+
     Returns:
         {"tag": str, "release_url": str, "notes": str}
 
     Raises:
-        RuntimeError: 流为空或解析失败
+        RuntimeError: 流为空/解析失败/无平台条目
     """
     root = ET.fromstring(_fetch_text(ATOM_URL))
-    entry = root.find("a:entry", _ATOM_NS)
-    if entry is None:
+    entries = root.findall("a:entry", _ATOM_NS)
+    if not entries:
         raise RuntimeError("GitHub Releases 订阅流为空，未获取到版本信息")
 
-    tag = ""
-    id_el = entry.find("a:id", _ATOM_NS)
-    if id_el is not None and id_el.text:
-        tag = id_el.text.rsplit("/", 1)[-1].strip()
+    for entry in entries:
+        tag = ""
+        id_el = entry.find("a:id", _ATOM_NS)
+        if id_el is not None and id_el.text:
+            tag = id_el.text.rsplit("/", 1)[-1].strip()
+        if not _is_platform_tag(tag):
+            continue
 
-    release_url = RELEASE_PAGE_URL
-    for link in entry.findall("a:link", _ATOM_NS):
-        href = link.get("href") or ""
-        if link.get("rel") == "alternate" and "/releases/tag/" in href:
-            release_url = href
-            break
+        release_url = f"https://github.com/{REPO}/releases/tag/{tag}"
+        for link in entry.findall("a:link", _ATOM_NS):
+            href = link.get("href") or ""
+            if link.get("rel") == "alternate" and "/releases/tag/" in href:
+                release_url = href
+                break
 
-    notes = ""
-    content = entry.find("a:content", _ATOM_NS)
-    if content is not None and content.text:
-        notes = _strip_html(content.text)
+        notes = ""
+        content = entry.find("a:content", _ATOM_NS)
+        if content is not None and content.text:
+            notes = _strip_html(content.text)
 
-    return {"tag": tag, "release_url": release_url, "notes": notes}
+        return {"tag": tag, "release_url": release_url, "notes": notes}
+
+    raise RuntimeError(f"Releases 订阅流中暂无 {_PLATFORM_SUFFIX} 版本")
 
 
 def _parse_version(text: str) -> Optional[tuple[int, int, int]]:
@@ -127,11 +161,43 @@ def _parse_version(text: str) -> Optional[tuple[int, int, int]]:
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
-def check_update() -> dict[str, Any]:
-    """请求 GitHub 最新 release 并与本地版本比较.
+def _is_platform_tag(tag: str) -> bool:
+    """tag 是否为本平台 release (如 v1.0.2-macos): 版本前缀合法且带 -macos 后缀."""
+    t = (tag or "").strip().lower()
+    return t.endswith(_PLATFORM_SUFFIX) and _parse_version(t) is not None
 
-    API 首优(数据齐全); 受未认证限流(403)/502/超时影响时降级 Atom 流(约等于无限额),
-    两者均失败才抛错, 并把具体原因带给前端展示.
+
+def _fetch_latest_platform_release() -> dict[str, str]:
+    """从 Releases 列表取最新的本平台 (-macos) release.
+
+    API 按创建时间倒序返回, 首个匹配即最新; 各平台 tag 互不干扰.
+
+    Returns:
+        {"tag": str, "release_url": str, "notes": str}
+
+    Raises:
+        RuntimeError: 列表为空或无平台条目
+    """
+    data = _fetch_json(RELEASES_URL)
+    if isinstance(data, list):
+        for rel in data:
+            tag = str(rel.get("tag_name") or "").strip()
+            if not _is_platform_tag(tag):
+                continue
+            return {
+                "tag": tag,
+                "release_url": rel.get("html_url")
+                or f"https://github.com/{REPO}/releases/tag/{tag}",
+                "notes": str(rel.get("body") or "").strip(),
+            }
+    raise RuntimeError(f"Releases 中暂无 {_PLATFORM_SUFFIX} 版本")
+
+
+def check_update() -> dict[str, Any]:
+    """请求 GitHub 最新本平台 release 并与本地版本比较.
+
+    列表 API 首优(可按平台过滤); 受未认证限流(403)/502/超时影响时降级
+    Atom 流(约等于无限额), 两者均失败才抛错, 并把具体原因带给前端展示.
 
     Returns:
         {"has_update": bool, "current": str, "latest": str,
@@ -141,21 +207,15 @@ def check_update() -> dict[str, Any]:
         RuntimeError: 两种来源均失败时的可读提示
     """
     errors: list[str] = []
-    tag = release_url = notes = ""
+    info: Optional[dict[str, str]] = None
     try:
-        data = _fetch_json(RELEASES_URL)
-        tag = data.get("tag_name") or ""
-        release_url = data.get("html_url") or RELEASE_PAGE_URL
-        notes = (data.get("body") or "").strip()[:600]
+        info = _fetch_latest_platform_release()
     except Exception as exc:  # noqa: BLE001 首次失败仅记录, 交由 Atom 兜底
         errors.append(str(exc))
 
-    if not tag:
+    if info is None:
         try:
-            atom = _fetch_latest_atom()
-            tag = atom["tag"]
-            release_url = atom["release_url"]
-            notes = atom["notes"][:600]
+            info = _fetch_latest_atom()
         except Exception as exc:  # noqa: BLE001 双来源都失败 -> 友好提示
             errors.append(str(exc))
             raise RuntimeError(
@@ -164,6 +224,7 @@ def check_update() -> dict[str, Any]:
                 "或开启系统代理 / VPN 后再次「检查更新」。"
             )
 
+    tag = info["tag"]
     latest = _parse_version(tag)
     current = _parse_version(__version__)
     has_update = bool(latest and current and latest > current)
@@ -171,6 +232,6 @@ def check_update() -> dict[str, Any]:
         "has_update": has_update,
         "current": __version__,
         "latest": tag,
-        "release_url": release_url,
-        "notes": notes,
+        "release_url": info["release_url"],
+        "notes": info["notes"][:600],
     }
