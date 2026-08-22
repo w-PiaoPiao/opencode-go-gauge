@@ -10,11 +10,13 @@ from __future__ import annotations
 import ctypes  # noqa: F401  跨平台均有, Win32 窗口/互斥体逻辑用到
 import ctypes.wintypes  # noqa: F401  Win32 单实例/窗口枚举用 (macOS 可安全 import)
 
+import json
 import os
 import sys
 import tempfile
 import threading
 import time
+from typing import Optional
 
 import webview
 
@@ -86,9 +88,128 @@ def _install_macos_app_delegate() -> None:
                     win.restore()
                 except Exception:  # noqa: BLE001
                     pass
+            _mac_activate_app()  # 其他 App 全屏/在前台时也能把窗口带到最前
             return True
 
     BrowserView.AppDelegate = _GoGaugeAppDelegate
+
+
+# ── macOS 平台辅助: 前台激活 / 单实例 / 小屏钳制 / 窗口位置记忆 ──
+_MAC_LOCK_PATH = os.path.expanduser("~/Library/Application Support/GoGauge/GoGauge.lock")
+_MAC_NOTIFY_PORT = 57567  # 本机回环 UDP: 第二实例唤起首实例的通道 (非常用端口)
+_mac_lock_fd = None  # 首实例持有的锁文件句柄 (存活期间 flock 有效, 引用防回收)
+_udp_show_ref: dict[str, object] = {"fn": None}  # 首实例注册的"前置主窗"回调
+
+
+def _mac_activate_app() -> None:
+    """把应用带到前台: Dock 点击/托盘唤起时, 其他 App 全屏时也能正常置前."""
+    try:
+        from AppKit import NSApplication
+
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ensure_single_instance_mac() -> None:
+    """macOS 单实例守卫 (仅打包 .app): flock 原子判定, 二次启动唤起首实例后退出.
+
+    Windows 用内核命名互斥体; macOS 等价物为文件锁 flock (进程退出自动释放,
+    无残留无 PID 复用问题). 唤醒通道用回环 UDP 而非 AppleScript: 后者发
+    Apple Event 可能触发 TCC 自动化权限弹窗, UDP 无任何权限成本; 收包方
+    复用 LoginWatcher 的跨线程窗口调用模式. 监听端口被占时静默降级 ——
+    单实例仍由 flock 保证, 仅丢失"自动弹窗"能力.
+    """
+    global _mac_lock_fd
+    if not getattr(sys, "frozen", False):
+        return  # 源码运行不限制 (与 Windows 开发态行为一致)
+    import fcntl
+    import socket
+
+    os.makedirs(os.path.dirname(_MAC_LOCK_PATH), exist_ok=True)
+    lock_fd = open(_MAC_LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # 已有实例: 通知其显示窗口后本进程退出 (锁句柄即弃)
+        lock_fd.close()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.sendto(b"show", ("127.0.0.1", _MAC_NOTIFY_PORT))
+        except OSError:
+            pass
+        sys.exit(0)
+    _mac_lock_fd = lock_fd
+
+    def _listen() -> None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.bind(("127.0.0.1", _MAC_NOTIFY_PORT))
+                while True:
+                    if s.recvfrom(64)[0].strip() == b"show":
+                        fn = _udp_show_ref.get("fn")
+                        if callable(fn):
+                            fn()
+        except Exception:  # noqa: BLE001  端口被占等异常: 静默降级
+            pass
+
+    threading.Thread(target=_listen, daemon=True, name="gousage-single-instance").start()
+
+
+def _screen_visible_frame_logical() -> tuple[int, int]:
+    """macOS 主屏可用区域 (逻辑像素, 已排除菜单栏/Dock): 初始窗口不超屏.
+
+    与 Windows 的 SPI_GETWORKAREA 对应; 旧 MacBook Air (1366x768) 上
+    固定 1280x840 会底部溢出, 必须按可用区域钳制.
+    """
+    try:
+        from AppKit import NSScreen
+
+        vf = NSScreen.mainScreen().visibleFrame()
+        return max(1, int(vf.size.width)), max(1, int(vf.size.height))
+    except Exception:  # noqa: BLE001
+        return WINDOW_SIZE
+
+
+def _win_frame_path() -> str:
+    """窗口 frame 记录文件路径 (数据目录内)."""
+    return os.path.join(db.data_dir(), "window.json")
+
+
+def _save_window_frame(win) -> None:
+    """记录主窗口位置尺寸 (仅 macOS): 关到菜单栏/退出前调用."""
+    if not (_IS_MAC and win is not None):
+        return
+    try:
+        frame = {
+            "x": int(win.x), "y": int(win.y),
+            "width": int(win.width), "height": int(win.height),
+        }
+        with open(_win_frame_path(), "w", encoding="utf-8") as fh:
+            json.dump(frame, fh)
+    except Exception:  # noqa: BLE001  窗口未就绪/磁盘异常均不影响主流程
+        pass
+
+
+def _load_window_frame(max_w: int, max_h: int) -> Optional[dict]:
+    """读取上次窗口 frame 并做校验; 无有效记录返回 None.
+
+    x/y 直接沿用上次值 (保存/恢复均走 pywebview 自身坐标系, 往返一致);
+    宽高按当前主屏可用区域钳制, 防止换小屏后溢出.
+    """
+    try:
+        with open(_win_frame_path(), "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        x, y = int(d["x"]), int(d["y"])
+        if not (-max_w < x < 100000 and -100 < y < 100000):
+            return None  # 明显异常值 (多屏热插拔等): 回退默认居中
+        return {
+            "x": x, "y": y,
+            "width": min(int(d["width"]), max_w),
+            "height": min(int(d["height"]), max_h),
+        }
+    except Exception:  # noqa: BLE001  文件不存在/损坏/字段缺失
+        return None
 
 
 def _enable_taskbar_minimize(win) -> None:
@@ -396,11 +517,18 @@ class TrayIcon:
             if win:
                 win.show()
                 win.restore()
+                if _IS_MAC:
+                    _mac_activate_app()
 
     def _quit(self, icon=None, item=None) -> None:
         global _quitting
         _quitting = True
         _arm_quit_fallback()
+        try:
+            if self._win_getter:
+                _save_window_frame(self._win_getter())
+        except Exception:  # noqa: BLE001
+            pass
         if icon:
             try:
                 icon.stop()
@@ -473,6 +601,7 @@ class WindowApi:
             _arm_quit_fallback()
             self._win.destroy()
         else:
+            _save_window_frame(self._win)
             self._win.hide()  # 最小化到托盘
         return True
 
@@ -481,6 +610,7 @@ class WindowApi:
         global _quitting
         _quitting = True
         _arm_quit_fallback()
+        _save_window_frame(self._win)
         _destroy_all_windows()
         return True
 
@@ -497,10 +627,11 @@ def _destroy_all_windows() -> None:
 def main() -> None:
     global _quitting
 
-    # 单实例守卫 (仅 Windows): 已有实例在运行时激活其窗口, 当前进程直接退出.
-    # macOS 无 Win32 命名互斥体, 不走此路径.
+    # 单实例守卫: Windows 用命名互斥体, macOS 用 flock (源码运行均不限制).
     if _IS_WIN:
         _ensure_single_instance()
+    else:
+        _ensure_single_instance_mac()
 
     db.get_db()  # 初始化数据库
 
@@ -515,18 +646,26 @@ def main() -> None:
     #   底部被裁. 拖动由前端自实现 (js_api.move_by), 不再用 pywebview easy_drag
     #   (其 JS 用 clientX 记起点/screenX 算增量 + 后端再乘 DPI 缩放, 高 DPI 抽动).
     # - macOS: 原生标题栏 + 红黄绿交通灯 (frameless=False), 原生标题栏本身可拖动,
-    #   无需 easy_drag; 直接用默认窗口尺寸.
+    #   无需 easy_drag; 尺寸按主屏可用区域钳制 (同 Windows 逻辑), 并恢复上次
+    #   窗口位置尺寸 (换小屏时宽高自动收缩, 位置异常则回退默认).
     if _IS_WIN:
         wa_w, wa_h = _screen_workarea_logical()
-        win_w = min(WINDOW_SIZE[0], wa_w - 60)
-        win_h = min(WINDOW_SIZE[1], wa_h - 60)
+    elif _IS_MAC:
+        wa_w, wa_h = _screen_visible_frame_logical()
     else:
-        win_w, win_h = WINDOW_SIZE
+        wa_w, wa_h = WINDOW_SIZE
+    win_w = min(WINDOW_SIZE[0], max(1, wa_w - 60))
+    win_h = min(WINDOW_SIZE[1], max(1, wa_h - 60))
+    saved_frame = _load_window_frame(win_w, win_h) if _IS_MAC else None
+    if saved_frame:
+        win_w, win_h = saved_frame["width"], saved_frame["height"]
     main_win = webview.create_window(
         APP_TITLE,
         dashboard_url,
         width=win_w,
         height=win_h,
+        x=saved_frame["x"] if saved_frame else None,
+        y=saved_frame["y"] if saved_frame else None,
         min_size=WINDOW_MIN_SIZE,
         frameless=(not _IS_MAC),
         # 显式关闭 easy_drag: 其默认值为 True, 不传会保持开启;
@@ -538,6 +677,17 @@ def main() -> None:
     )
     api.bind(main_win)
     _main_win_ref["win"] = main_win
+
+    def show_main() -> None:
+        """前置并恢复主窗口 (单实例唤起/Dock 重开共用)."""
+        try:
+            main_win.show()
+            main_win.restore()
+        except Exception:  # noqa: BLE001  窗口可能已销毁 (退出竞态)
+            pass
+
+    # 第二实例 UDP 唤起回调 (注册前收到的包会丢失, 仅启动竞态的极端情况)
+    _udp_show_ref["fn"] = show_main
 
     # 预创建独立登录子窗口 (hidden, 系统边框含关闭按钮; 点击"立即登录"时弹出)
     # 用可变引用: 窗口被手动关闭后可重建, 回调始终指向当前登录窗
@@ -663,6 +813,7 @@ def main() -> None:
             if _quitting or not _tray_ready:
                 return True  # 允许真正关闭
             try:
+                _save_window_frame(main_win)
                 main_win.hide()  # 驻留菜单栏
             except Exception:  # noqa: BLE001
                 return True
