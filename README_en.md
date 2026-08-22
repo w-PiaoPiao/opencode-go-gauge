@@ -65,11 +65,32 @@ python entry.py
 
 ### Build
 
+**Windows**
+
 ```bash
 build.bat
 ```
 
 Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon and tray support included).
+
+**macOS**
+
+```bash
+./build_macos.sh
+```
+
+Output: `dist/GoGauge.app` (no console window; `.icns` icon and menu-bar tray support included).
+
+> Requires macOS 11+ (built-in WebKit; pywebview uses WKWebView). Closing the window minimizes to the menu bar.
+>
+> **Blocked by Gatekeeper on first launch?** The open-source build is not notarized (requires a $99/yr Apple Developer account).
+> Run this once in Terminal, then open the app normally:
+>
+> ```bash
+> xattr -cr /Applications/GoGauge.app
+> ```
+>
+> Current build is **Apple Silicon (arm64)** native; for Intel Macs use the `-x86_64` package from Releases.
 
 ## 📊 Data Notes
 

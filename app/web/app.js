@@ -17,6 +17,8 @@ const I18N = {
     sessionUsage: "会话用量", colSession: "会话", colKey: "Key 名称", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
     setUpdate: "软件更新", currentVersion: "当前版本", checkUpdate: "检查更新", checkUpdateDesc: "检查 GitHub 上是否有新版本", checkUpdateBtn: "检查更新",
     checkingUpdate: "检查中…", updateFound: "发现新版本", updateNone: "已是最新版本", updateFailed: "检查更新失败", goDownload: "前往下载",
+    autostart: "开机自启", autostartDesc: "登录系统时自动启动并驻留菜单栏",
+    downloading: "下载中…", updateReady: "新版本已下载到「下载」文件夹", downloadFailed: "下载失败", openReleasePage: "打开发布页", autostartFail: "开机自启设置失败",
     colTime: "时间", colModel: "模型", colInput: "输入", colOutput: "输出",
     colReasoning: "推理", colCacheRead: "缓存读", colCost: "费用", colPlan: "PLAN",
     prev: "上一页", next: "下一页",
@@ -82,6 +84,8 @@ const I18N = {
     sessionUsage: "Session Usage", colSession: "Session", colKey: "Key Name", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
     setUpdate: "Software Update", currentVersion: "Current Version", checkUpdate: "Check Updates", checkUpdateDesc: "Check GitHub for new versions", checkUpdateBtn: "Check Updates",
     checkingUpdate: "Checking…", updateFound: "New Version Available", updateNone: "You're up to date", updateFailed: "Check failed", goDownload: "Go to Download",
+    autostart: "Launch at Login", autostartDesc: "Start automatically and stay in the menu bar when you log in",
+    downloading: "Downloading…", updateReady: "New version saved to Downloads", downloadFailed: "Download failed", openReleasePage: "Open Releases Page", autostartFail: "Failed to update launch-at-login",
     colTime: "Time", colModel: "Model", colInput: "Input", colOutput: "Output",
     colReasoning: "Reasoning", colCacheRead: "Cache Read", colCost: "Cost", colPlan: "PLAN",
     prev: "Prev", next: "Next",
@@ -208,14 +212,24 @@ function escapeHtml(s) {
 }
 
 /* ---------------- API ---------------- */
+const API_TIMEOUT_MS = 15000;  // 本地服务异常时避免永久"加载中"
 async function api(path, opts = {}) {
-  const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!resp.ok) {
-    let msg = "HTTP " + resp.status;
-    try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch (e) { /* 无 body 或非 JSON 时保持默认 */ }
-    throw new Error(msg);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  try {
+    const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, signal: ctrl.signal, ...opts });
+    if (!resp.ok) {
+      let msg = "HTTP " + resp.status;
+      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch (e) { /* 无 body 或非 JSON 时保持默认 */ }
+      throw new Error(msg);
+    }
+    return await resp.json();
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("请求超时");
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return resp.json();
 }
 
 /* ---------------- 语言切换 ---------------- */
@@ -269,11 +283,22 @@ function toast(msg, type = "ok") {
 }
 
 /* ---------------- 标题栏 ---------------- */
+// macOS 使用原生标题栏 + 左上角红黄绿交通灯; 隐藏自定义窗口控制按钮.
+function isMac() {
+  return /Mac|iPhone|iPod|iPad/i.test((navigator.platform || "") + (navigator.userAgent || ""));
+}
 async function pywebviewApi() {
   try { if (window.pywebview && window.pywebview.api) return window.pywebview.api; } catch (e) { /* ignore */ }
   return null;
 }
+function adaptTitlebar() {
+  // macOS: 原生标题栏提供 关闭/最小化/缩放, 移除页内自定义窗口按钮.
+  const mac = isMac();
+  ["tb-min", "tb-close", "tb-sep"].forEach((id) => { const el = $(id); if (el) el.hidden = mac; });
+  document.documentElement.classList.toggle("os-mac", mac);
+}
 function bindTitlebar() {
+  adaptTitlebar();
   $("tb-min").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.minimize(); });
   $("tb-close").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.close(); });
   $("tb-theme").addEventListener("click", () => applyDarkMode(document.documentElement.dataset.theme !== "dark"));
@@ -769,6 +794,10 @@ async function renderSettings() {
     state.settings = settings;
     syncSettingsPills();
     $("set-auto-sync").checked = settings.auto_sync !== false;
+    // 开机自启仅 mac 打包版展示 (LaunchAgent 实现)
+    const macApp = isMac() && window.pywebview !== undefined;
+    $("row-autostart").hidden = !macApp;
+    if (macApp) $("set-autostart").checked = settings.autostart === true;
   } catch (e) { /* ignore */ }
 }
 function syncSettingsPills() {
@@ -840,7 +869,34 @@ function bindEvents() {
   $("ses-next").addEventListener("click", () => { state.sessions.page++; loadSessions(); });
   $("rec-model-filter").addEventListener("change", (e) => { state.records.model = e.target.value; state.records.page = 1; loadRecords(); });
 
-  // 检查更新: 有新版 -> 弹窗 -> 打开浏览器前往 GitHub Releases 下载
+  // 半自动更新: 后台下载新版本 zip 到 ~/Downloads, 完成后 Finder 定位;
+  // 失败兜底打开 Releases 页手动下载.
+  async function downloadUpdateFlow(desc) {
+    try {
+      const start = await api("/api/update/download", { method: "POST" });
+      if (start && start.ok === false) throw new Error(start.error || "");
+      if (desc) desc.textContent = t("downloading");
+      for (let i = 0; i < 120; i++) {  // 1.5s x 120 ≈ 3 分钟上限
+        await new Promise((res) => setTimeout(res, 1500));
+        const st = await api("/api/update/download/status");
+        if (st.state === "done") {
+          toast(t("updateReady"));
+          if (desc) desc.textContent = `${t("updateReady")}${st.latest ? ` (${st.latest})` : ""}`;
+          return;
+        }
+        if (st.state === "no_update") { toast(t("updateNone")); return; }
+        if (st.state === "error" || st.state === "no_asset") throw new Error(st.error || st.state);
+      }
+      throw new Error("timeout");
+    } catch (e) {
+      showModal({
+        title: t("downloadFailed"), message: escapeHtml(e.message || ""), okText: t("openReleasePage"),
+        onOk: () => { api("/api/update/open", { method: "POST" }).catch(() => {}); },
+      });
+    }
+  }
+
+  // 检查更新: 有新版 -> 弹窗 -> 应用内下载 zip 并在 Finder 定位
   $("btn-check-update").addEventListener("click", async () => {
     const btn = $("btn-check-update");
     const desc = $("set-update-desc");
@@ -856,7 +912,7 @@ function bindEvents() {
           title: t("updateFound"),
           message: `<b>${r.latest}</b> (${t("currentVersion")} v${r.current})<br><br>${escapeHtml((r.notes || "").slice(0, 300)) || ""}`,
           okText: t("goDownload"),
-          onOk: () => { api("/api/update/open", { method: "POST" }).catch(() => {}); },
+          onOk: () => { downloadUpdateFlow(desc); },
         });
       } else {
         desc.textContent = `${t("updateNone")} (v${r.current})`;
@@ -890,6 +946,12 @@ function bindEvents() {
     state.settings.auto_sync = e.target.checked;
     api("/api/settings", { method: "PUT", body: JSON.stringify({ auto_sync: e.target.checked }) }).catch(() => {});
     restartAutoSync();
+  });
+  $("set-autostart").addEventListener("change", (e) => {
+    state.settings.autostart = e.target.checked;
+    api("/api/settings", { method: "PUT", body: JSON.stringify({ autostart: e.target.checked }) })
+      .then((r) => { if (r && r.autostart_applied === false) toast(t("autostartFail")); })
+      .catch(() => {});
   });
   $("btn-relogin").addEventListener("click", () => {
     showModal({
