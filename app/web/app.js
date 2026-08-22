@@ -69,6 +69,16 @@ const I18N = {
     quotaFail: "配额获取失败", retryTip: "点击右上角刷新重试",
     syncIntervalSet: "同步间隔已设为", syncRangeUpdated: "同步范围已更新，下次全量同步生效",
     trendHint: "30 天", totalTokenHint: "含缓存命中",
+    setUsers: "用户管理", addUser: "添加用户", addUserTip: "登录新的 OpenCode Go 账号并保存到本机",
+    userSwitchTip: "切换用户", userCountTip: "已登录用户数",
+    switchTo: "切换", currentUserBadge: "当前", renameBtn: "重命名", deleteUser: "删除",
+    renameTitle: "重命名用户", save: "保存", deleteUserTitle: "删除用户",
+    deleteUserConfirm: "确定删除用户「{name}」？其本地用量数据与同步记录将一并清除，且无法恢复。",
+    userDeleted: "用户已删除", userRenamed: "已重命名", switchedAccount: "已切换账号",
+    noUsers: "暂无账号，点击右上角「添加用户」登录",
+    setToCurrent: "设为当前", loggedOut: "已退出登录",
+    logoutUserConfirm: "将退出「{name}」并清除其本地用量数据与同步记录，确定？",
+    reloginConfirmNew: "将打开官方授权页重新登录当前账号，确定？",
   },
   en: {
     syncing: "Syncing", themeDark: "Dark", themeLight: "Light", refresh: "Refresh",
@@ -134,6 +144,16 @@ const I18N = {
     quotaFail: "Quota fetch failed", retryTip: "Click refresh in top bar to retry",
     syncIntervalSet: "Sync interval set to", syncRangeUpdated: "Sync range updated, takes effect on next full sync",
     trendHint: "30 days", totalTokenHint: "incl. cache hits",
+    setUsers: "User Management", addUser: "Add User", addUserTip: "Sign in with another OpenCode Go account",
+    userSwitchTip: "Switch user", userCountTip: "Logged-in users",
+    switchTo: "Switch", currentUserBadge: "Active", renameBtn: "Rename", deleteUser: "Delete",
+    renameTitle: "Rename User", save: "Save", deleteUserTitle: "Delete User",
+    deleteUserConfirm: "Delete user \"{name}\"? Their local usage data and sync history will be removed permanently.",
+    userDeleted: "User deleted", userRenamed: "Renamed", switchedAccount: "Account switched",
+    noUsers: "No accounts yet — click \"Add User\" to sign in",
+    setToCurrent: "Make Active", loggedOut: "Signed out",
+    logoutUserConfirm: "Sign out \"{name}\" and remove their local usage data and sync history?",
+    reloginConfirmNew: "This opens the auth page to re-login the current account. Continue?",
   },
 };
 let lang = "zh";
@@ -670,9 +690,12 @@ async function loadRecords() {
 
 /* ---------------- 模型图标 ---------------- */
 function modelIcon(m) {
-  const base = String(m || "").toLowerCase().split("-")[0];
+  const s = String(m || "").toLowerCase();
+  const base = s.split("-")[0];
   const map = { deepseek: "deepseek", glm: "glm", gpt: "gpt", grok: "grok", kimi: "kimi", meta: "meta", mimo: "mimo", minimax: "minimax", muse: "meta", qwen: "qwen", hy: "hy" };
-  const name = map[base] || "deepseek";
+  // hy2/hy3 等混元系列模型统一使用 hy 图标 (首段非精确 hy 时按前缀匹配)
+  let name = map[base];
+  if (!name) name = base.startsWith("hy") ? "hy" : "deepseek";
   const dark = document.documentElement.dataset.theme === "dark";
   const themed = dark && ["gpt", "grok", "mimo"].includes(name) ? `${name}-color` : name;
   return `<img src="icons/${themed}.svg" alt="${escapeHtml(m)}" title="${escapeHtml(m)}" style="width:16px;height:16px">`;
@@ -699,8 +722,16 @@ function renderAll(data) {
     $("trend-hint").textContent = t("trendHint");
   }
   $("tb-sync").textContent = data.logged_in ? `${t("lastSync")} ${fmtRelative(data.sync?.last_sync_at)} · ${fmtInt(data.sync?.total_records || 0)} ${t("records")}` : t("notLoggedIn");
-  $("tb-login").innerHTML = data.logged_in ? `<b>${t("loggedIn")}</b> ${maskWs(data)}` : t("notLoggedIn");
+  const accLabel = data.account_name || maskWs(data);
+  $("tb-login").innerHTML = data.logged_in ? `<b>${t("loggedIn")}</b> · ${escapeHtml(accLabel)}` : t("notLoggedIn");
   $("tb-login").style.color = data.logged_in ? "" : "var(--red)";
+  $("tb-login").title = t("userSwitchTip");
+  const uc = $("tb-user-count");
+  if (uc) {
+    uc.hidden = !(Number(data.accounts_logged_in) > 0);
+    uc.textContent = String(data.accounts_logged_in ?? 0);  // 仅已登录数 (与列表口径一致)
+    uc.title = t("userCountTip");
+  }
   const st = data.server_time || "";
   if (st) $("tb-updated").textContent = `${t("updatedAt")} ${st.slice(0, 16).replace("T", " ")}`;
   renderSyncBanner(data.progress);
@@ -753,28 +784,206 @@ function renderSettingsSyncProgress(progress) {
 async function renderSettings() {
   try {
     const st = await api("/api/state");
-    const acc = st.account || {};
-    const sync = st.sync || {};
-    const logged = st.logged_in;
-    $("set-login-state").textContent = logged ? `${t("loggedIn")} · ${acc.workspace_id || "—"}` : t("notLoggedIn");
-    const badge = $("set-login-badge");
-    badge.textContent = logged ? t("connected") : t("notConnected");
-    badge.className = "badge " + (logged ? "ok" : "no");
-    $("set-workspace").textContent = acc.workspace_id || "—";
-    $("set-sync-info").textContent = sync.last_sync_at
-      ? `${t("lastSync")} ${fmtDateTime(sync.last_sync_at)} (${sync.last_sync_status}) · ${t("totalN")} ${fmtInt(sync.total_records || 0)} ${t("items")}`
+    $("set-sync-info").textContent = st.sync && st.sync.last_sync_at
+      ? `${t("lastSync")} ${fmtDateTime(st.sync.last_sync_at)} (${st.sync.last_sync_status}) · ${t("totalN")} ${fmtInt(st.sync.total_records || 0)} ${t("items")}`
       : t("never");
     $("set-datadir").textContent = st.datadir || "—";
     const settings = await api("/api/settings");
     state.settings = settings;
     syncSettingsPills();
     $("set-auto-sync").checked = settings.auto_sync !== false;
+    await fetchAccounts();  // 账户列表 (失败不阻塞其他设置渲染)
   } catch (e) { /* ignore */ }
 }
 function syncSettingsPills() {
   const s = state.settings;
   document.querySelectorAll("#set-interval-pills .pill").forEach((b) => b.classList.toggle("active", Number(b.dataset.v) === Number(s.sync_interval_sec)));
   document.querySelectorAll("#set-window-pills .pill").forEach((b) => b.classList.toggle("active", (s.window_days == null ? "all" : String(s.window_days)) === b.dataset.v));
+}
+
+/* ---------------- 多用户: 顶栏切换器 ---------------- */
+
+/* 登录流程期间的账户变化监视: 登录窗是独立窗口, 成功后的跨窗口通知
+   (load_url 同URL跳过 / evaluate_js 时序) 均不可靠, 用短轮询兜底保证
+   账户列表/顶栏计数即时刷新. 5 分钟无变化自动停止. */
+let loginWatchTimer = null;
+function startLoginWatch() {
+  stopLoginWatch();
+  let baseline = "";
+  const startedAt = Date.now();
+  const poll = async () => {
+    if (Date.now() - startedAt > 5 * 60 * 1000) { stopLoginWatch(); return; }
+    try {
+      const r = await api("/api/accounts");
+      const sig = JSON.stringify((r.accounts || []).map((a) => [a.id, a.has_token, a.name])) + "|" + r.active_id;
+      if (!baseline) { baseline = sig; return; }  // 首轮采基线
+      if (sig !== baseline) {
+        stopLoginWatch();
+        await loadDashboard();
+        if (state.page === "settings") renderSettings().catch(() => {});
+        else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
+      }
+    } catch (e) { /* ignore */ }
+  };
+  poll();
+  loginWatchTimer = setInterval(poll, 2000);
+}
+function stopLoginWatch() {
+  if (loginWatchTimer) { clearInterval(loginWatchTimer); loginWatchTimer = null; }
+}
+
+async function toggleUserMenu(force) {
+  const menu = $("user-menu");
+  if (!menu) return;
+  const show = force !== undefined ? force : menu.hidden;
+  if (!show) { menu.hidden = true; return; }
+  try {
+    const r = await api("/api/accounts");
+    renderUserMenu((r.accounts || []).filter((a) => a.has_token), r.active_id);
+    menu.hidden = false;
+  } catch (e) { toast(t("loadFailed"), "err"); }
+}
+function renderUserMenu(accounts, activeId) {
+  const menu = $("user-menu");
+  menu.innerHTML = (accounts.length ? accounts.map((a) => `
+    <div class="um-item" data-id="${a.id}">
+      <span class="um-check">${a.id === activeId ? "✓" : ""}</span>
+      <span class="um-meta">
+        <span class="um-name">${escapeHtml(a.name)}</span>
+        <span class="um-ws">${escapeHtml(a.workspace_id || "—")}${a.has_token ? "" : " · " + t("notLoggedIn")}</span>
+      </span>
+    </div>`).join("") : `<div class="um-item um-empty">${t("noUsers")}</div>`) +
+    `<div class="um-item um-manage" id="um-manage"><span class="um-check">⚙</span><span class="um-meta"><span class="um-name">${t("setUsers")}</span></span></div>`;
+  menu.querySelectorAll(".um-item[data-id]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const id = Number(el.dataset.id);
+      toggleUserMenu(false);
+      if (id === activeId) return;
+      try {
+        await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
+        toast(t("switchedAccount"));
+        await loadDashboard();
+        if (state.page === "settings") renderSettings().catch(() => {});
+        else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
+      } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+    });
+  });
+  const mg = $("um-manage");
+  if (mg) mg.addEventListener("click", () => { toggleUserMenu(false); switchPage("settings"); });
+}
+
+/* ---------------- 多用户: 设置页列表 ---------------- */
+async function fetchAccounts() {
+  const r = await api("/api/accounts");
+  renderUsersList(r.accounts || [], r.active_id);
+}
+function renderUsersList(accounts, activeId) {
+  const box = $("users-list");
+  if (!box) return;
+  const users = (accounts || []).filter((a) => a.has_token);  // 未登录行不展示 (退出即移除语义)
+  if (!users.length) {
+    box.innerHTML = `<div class="hint" style="padding:12px 16px">${t("noUsers")}</div>`;
+    return;
+  }
+  box.innerHTML = users.map((a) => {
+    const isActive = a.id === activeId;
+    const actions = isActive
+      ? `<button class="btn" data-act="relogin">${t("relogin")}</button>
+         <button class="btn" data-act="rename">${t("renameBtn")}</button>
+         <button class="btn btn-danger" data-act="logout">${t("logout")}</button>`
+      : `<button class="btn" data-act="switch">${t("switchTo")}</button>
+         <button class="btn" data-act="rename">${t("renameBtn")}</button>
+         <button class="btn btn-danger" data-act="delete">${t("deleteUser")}</button>`;
+    return `
+    <div class="user-row${isActive ? " active" : ""}" data-id="${a.id}">
+      <div class="ur-meta">
+        <div class="ur-name">${escapeHtml(a.name)}${isActive ? `<span class="badge ok ur-badge">${t("currentUserBadge")}</span>` : ""}</div>
+        <div class="ur-ws">${escapeHtml(a.workspace_id || "—")} · ${t("loggedIn")}</div>
+      </div>
+      <div class="ur-actions">${actions}</div>
+    </div>`;
+  }).join("");
+}
+async function onUserRowAction(id, act) {
+  if (act === "switch") {
+    try {
+      await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
+      toast(t("switchedAccount"));
+      await loadDashboard();
+      renderSettings().catch(() => {});
+    } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+    return;
+  }
+  if (act === "relogin") {
+    startLoginWatch();
+    const a = await pywebviewApi();
+    if (a && a.open_login) { a.open_login("relogin"); return; }
+    try {  // 浏览器兜底
+      await api("/api/relogin", { method: "POST", body: "{}" });
+      toast(t("loginNote"));
+    } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+    return;
+  }
+  if (act === "logout") {
+    const accounts = (await api("/api/accounts").catch(() => ({ accounts: [] }))).accounts || [];
+    const acc = accounts.find((x) => x.id === id);
+    showModal({
+      title: t("logout"), danger: true,
+      message: escapeHtml(t("logoutUserConfirm").replace("{name}", acc ? acc.name : "")),
+      okText: t("confirm"),
+      onOk: async () => {
+        try {
+          await api("/api/logout", { method: "POST", body: "{}" });
+          toast(t("loggedOut"));
+          const r = await api("/api/accounts").catch(() => ({ accounts: [] }));
+          renderUsersList(r.accounts || [], r.active_id);
+          await loadDashboard();
+          if (!(r.accounts || []).some((x) => x.has_token)) showLoginOverlay(true);  // 全部退出 -> 欢迎页
+        } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+      },
+    });
+    return;
+  }
+  const accounts = (await api("/api/accounts").catch(() => ({ accounts: [] }))).accounts || [];
+  const acc = accounts.find((x) => x.id === id);
+  if (act === "rename") {
+    let renamed = acc ? acc.name : "";
+    showModal({
+      title: t("renameTitle"),
+      message: `<input id="rename-input" class="select" maxlength="50" value="${escapeHtml(renamed)}">`,
+      okText: t("save"),
+      onOk: async () => {
+        try {
+          await api("/api/accounts/rename", { method: "POST", body: JSON.stringify({ id, name: renamed }) });
+          toast(t("userRenamed"));
+          renderSettings().catch(() => {});
+          loadDashboard(true);
+        } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+      },
+    });
+    const input = $("rename-input");
+    if (input) {
+      input.addEventListener("input", () => { renamed = input.value; });
+      input.focus();
+    }
+    return;
+  }
+  if (act === "delete") {
+    showModal({
+      title: t("deleteUserTitle"), danger: true,
+      message: escapeHtml(t("deleteUserConfirm").replace("{name}", acc ? acc.name : `#${id}`)),
+      okText: t("confirm"),
+      onOk: async () => {
+        try {
+          const r = await api("/api/accounts/delete", { method: "POST", body: JSON.stringify({ id }) });
+          toast(t("userDeleted"));
+          await loadDashboard();
+          renderSettings().catch(() => {});
+          if ((r.remaining ?? 1) === 0) showLoginOverlay(true);
+        } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+      },
+    });
+  }
 }
 
 /* ---------------- 登录状态 ---------------- */
@@ -811,6 +1020,18 @@ async function checkState() {
     await loadDashboard();
   } catch (e) { console.error("state check failed", e); }
 }
+
+/* 登录成功通知 (后端 evaluate_js 触发, 见 main.on_login_success):
+   就地刷新数据/顶栏/账户列表, 不依赖整页重载 (同 URL load_url 可能被跳过) */
+window.gousageOnLoginSuccess = async function () {
+  try {
+    const st = await api("/api/state");
+    if (st.logged_in) showLoginOverlay(false);  // 欢迎页场景: 直接进入面板
+  } catch (e) { /* ignore */ }
+  loadDashboard().catch(() => {});
+  if (state.page === "settings") renderSettings().catch(() => {});
+  else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
+};
 
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
@@ -891,21 +1112,32 @@ function bindEvents() {
     api("/api/settings", { method: "PUT", body: JSON.stringify({ auto_sync: e.target.checked }) }).catch(() => {});
     restartAutoSync();
   });
-  $("btn-relogin").addEventListener("click", () => {
-    showModal({
-      title: t("relogin"), message: t("reloginConfirm"), okText: t("goLogin"),
-      onOk: async () => {
-        await api("/api/logout", { method: "POST" });  // 清除旧凭据
-        const a = await pywebviewApi();
-        if (a && a.open_login) { a.open_login(); return; }
-        await api("/api/relogin", { method: "POST" });  // 浏览器兜底
-      },
-    });
+  // 账户操作已合并进「OpenCode 账户」卡片内的账号行 (relogin/logout 为行级动作)
+
+  // 多用户: 顶栏切换器 + 设置页账户列表
+  $("tb-login").addEventListener("click", () => toggleUserMenu());
+  document.addEventListener("click", (e) => {
+    const menu = $("user-menu");
+    if (menu && !menu.hidden && !e.target.closest(".user-switch")) toggleUserMenu(false);
   });
-  $("btn-logout").addEventListener("click", () => {
-    showModal({ title: t("logout"), danger: true, message: t("logoutConfirm"), okText: t("quit"), onOk: async () => { await api("/api/logout", { method: "POST" }); showLoginOverlay(true); } });
+  $("btn-add-user").addEventListener("click", async () => {
+    startLoginWatch();
+    const a = await pywebviewApi();
+    if (a && a.open_login) { a.open_login("add"); return; }
+    try {  // 浏览器环境兜底
+      await api("/api/accounts/add", { method: "POST", body: "{}" });
+      toast(t("loginNote"));
+    } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+  });
+  $("users-list").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const row = e.target.closest(".user-row");
+    if (!row) return;
+    onUserRowAction(Number(row.dataset.id), btn.dataset.act).catch((err) => toast(String(err.message || err), "err"));
   });
   $("btn-login").addEventListener("click", async () => {
+    startLoginWatch();
     const a = await pywebviewApi();
     if (a && a.open_login) { a.open_login(); return; }  // 弹出独立登录窗口
     // 浏览器环境兜底: 跳转授权页
