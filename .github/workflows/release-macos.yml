@@ -1,0 +1,63 @@
+# macOS 双架构自动构建: 推送 v*-macos tag 时触发, 构建产物自动附到同名 release.
+# arm64 = Apple Silicon (macos-14), x86_64 = Intel (macos-13).
+name: release-macos
+
+on:
+  push:
+    tags: ["v*-macos"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build .app
+        run: ./build_macos.sh
+
+      - name: Zip (保留签名/权限)
+        run: ditto -c -k --keepParent dist/GoGauge.app "GoGauge-${{ matrix.arch }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoGauge-macos-${{ matrix.arch }}
+          path: GoGauge-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Attach assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # v1.0.3-macos -> 资产命名 GoGauge-v1.0.3-macos-arm64.zip / -x86_64.zip
+          VER="${TAG#v}"; VER="${VER%-macos}"
+          mv GoGauge-arm64.zip   "GoGauge-v${VER}-macos-arm64.zip"
+          mv GoGauge-x86_64.zip  "GoGauge-v${VER}-macos-x86_64.zip"
+          ls -l
+          gh release upload "$TAG" GoGauge-v${VER}-macos-*.zip --clobber || \
+            gh release create "$TAG" GoGauge-v${VER}-macos-*.zip \
+              --title "GoGauge $TAG" --generate-notes

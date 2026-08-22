@@ -235,3 +235,71 @@ def check_update() -> dict[str, Any]:
         "release_url": info["release_url"],
         "notes": info["notes"][:600],
     }
+
+
+_ASSET_NAME = "gogauge-macos.zip"  # release 资产的标准文件名 (小写比较)
+
+
+def fetch_asset_url(tag: str) -> str:
+    """取指定 release 中 mac 分发包的下载直链.
+
+    优先精确匹配 GoGauge-macos.zip, 否则回退任一 .zip 资产.
+
+    Returns:
+        browser_download_url; 找不到返回空串
+    """
+    try:
+        data = _fetch_json(f"https://api.github.com/repos/{REPO}/releases/tags/{tag}")
+    except Exception:  # noqa: BLE001
+        return ""
+    fallback = ""
+    for asset in data.get("assets") or []:
+        name = str(asset.get("name") or "").strip().lower()
+        url = str(asset.get("browser_download_url") or "")
+        if not url:
+            continue
+        if name == _ASSET_NAME:
+            return url
+        if not fallback and name.endswith(".zip"):
+            fallback = url
+    return fallback
+
+
+def download_update(dest_dir: str) -> dict[str, Any]:
+    """检查更新并下载新版本 zip 到 dest_dir (调用方放后台线程执行).
+
+    Returns:
+        {"state": "done|no_update|no_asset|error",
+         "path": str, "latest": str, "error": str}
+    """
+    result: dict[str, Any] = {"state": "error", "path": "", "latest": "", "error": ""}
+    try:
+        info = check_update()
+        result["latest"] = str(info.get("latest") or "")
+        if not info.get("has_update"):
+            result["state"] = "no_update"
+            return result
+        url = fetch_asset_url(result["latest"])
+        if not url:
+            result["state"] = "no_asset"
+            result["error"] = f"release {result['latest']} 中未找到 {_ASSET_NAME}"
+            return result
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, f"GoGauge-{result['latest']}-macos.zip")
+        req = urllib.request.Request(
+            url, headers={"User-Agent": f"GoGauge/{__version__}"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            with open(dest + ".part", "wb") as fh:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+        os.replace(dest + ".part", dest)  # .part 中间态防半截文件
+        result["state"] = "done"
+        result["path"] = dest
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result["state"] = "error"
+        result["error"] = str(exc)[:300]
+        return result

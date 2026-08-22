@@ -347,6 +347,7 @@ _DEFAULT_SETTINGS = {
     "sync_interval_sec": 300,  # 自动增量同步间隔 (1/5/15/30 分钟)
     "window_days": 60,  # 同步范围: 30/60/90/180, None=所有
     "auto_sync": True,  # 自动增量同步开关
+    "autostart": False,  # 开机自启 (macOS LaunchAgent; 仅 mac 打包版生效)
 }
 
 
