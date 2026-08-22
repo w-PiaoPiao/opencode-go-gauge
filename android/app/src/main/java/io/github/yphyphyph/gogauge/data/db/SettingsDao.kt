@@ -49,10 +49,16 @@ abstract class SettingsDao {
             windowDays = patch.windowDays?.coerceIn(1, 3650),
             autoSync = patch.autoSync,
         )
-        // 保存时合并保留已有的 key_names — desktop db.save_settings 同 payload 行
-        // 覆盖写, 若不保留, 设置修改会清掉 key 名称缓存 (desktop parity).
+        // 保存时在既有 payload 上合并覆盖 (与桌面 db.save_settings 的整行 JSON 覆盖不同,
+        // 安卓端 settings 行还承载 active_account_id 等运行时键, 不能整包丢弃)
+        val base = try {
+            json.parseToJsonElement(payload() ?: "{}").jsonObject
+        } catch (e: Exception) {
+            buildJsonObject {}
+        }
         val keyNames = getKeyNames()
         val payload = buildJsonObject {
+            for ((k, v) in base) put(k, v)
             put("sync_interval_sec", JsonPrimitive(merged.syncIntervalSec))
             put("window_days", merged.windowDays?.let { JsonPrimitive(it) } ?: JsonNull)
             put("auto_sync", JsonPrimitive(merged.autoSync))

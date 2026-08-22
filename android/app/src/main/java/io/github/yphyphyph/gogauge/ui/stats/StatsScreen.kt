@@ -38,6 +38,7 @@ import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.components.KpiCard
+import io.github.yphyphyph.gogauge.ui.components.ModelIcon
 import io.github.yphyphyph.gogauge.ui.components.ModelPieChart
 import io.github.yphyphyph.gogauge.ui.components.PillRow
 import io.github.yphyphyph.gogauge.ui.components.TrendLineChart
@@ -146,6 +147,7 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                     ) {
                         Text("#${i + 1}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = NumFontFamily, fontSize = 12.sp)
                         Spacer(Modifier.padding(horizontal = 6.dp))
+                        ModelIcon(model = m.model, dark = vm.darkMode, modifier = Modifier.padding(end = 6.dp))
                         Text(m.model, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, modifier = Modifier.weight(1f))
                         Text(
                             "${Fmt.int(m.requestCount)} · ${s.hitRate} ${m.hitRate.toInt()}%",

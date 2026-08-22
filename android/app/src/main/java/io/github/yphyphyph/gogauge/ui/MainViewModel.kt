@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.yphyphyph.gogauge.GoGaugeApp
+import io.github.yphyphyph.gogauge.data.model.AccountInfo
 import io.github.yphyphyph.gogauge.data.model.AppSettings
 import io.github.yphyphyph.gogauge.data.model.DashboardData
 import io.github.yphyphyph.gogauge.data.model.PageResult
@@ -22,8 +23,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
- * Shared ViewModel for all pages — ports the frontend state machine of app.js
- * (dashboard data, paging, settings, login state, auto sync timer).
+ * Shared ViewModel for all pages — ports the frontend state machine of app.js v2.0.0
+ * (dashboard data, paging, settings, 多用户登录状态/切换, auto sync timer).
  */
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -44,6 +45,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- app state ----
     var showLogin by mutableStateOf(false)
         private set
+
+    /** 登录流程意图: "add"=添加新用户 / "relogin"=重登当前用户 (desktop open_login(mode) parity). */
+    var pendingLoginMode by mutableStateOf("relogin")
+        private set
     var loggedIn by mutableStateOf(false)
         private set
     var dashboard by mutableStateOf<DashboardData?>(null)
@@ -52,6 +57,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var progress by mutableStateOf(SyncProgress())
         private set
+
+    // ---- 多账号状态 (desktop /api/accounts parity) ----
+    var accounts by mutableStateOf<List<AccountInfo>>(emptyList())
+        private set
+    var activeAccountId by mutableIntStateOf(0)
+        private set
+
+    /** 已登录账号数 (顶栏计数与列表口径一致). */
+    val loggedInCount: Int get() = accounts.count { it.hasToken }
 
     // ---- home page ----
     var homeRange by mutableStateOf("today")
@@ -81,7 +95,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var datadir by mutableStateOf("")
         private set
-    var account by mutableStateOf(io.github.yphyphyph.gogauge.data.model.AccountInfo("Default", "Default", null, false))
+    var account by mutableStateOf<AccountInfo?>(null)
         private set
 
     var updateStatus by mutableStateOf("")
@@ -98,7 +112,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Quota arrives asynchronously (30s cache): refresh the dashboard when it lands
         scope.launch {
             repo.quota.collectLatest { q ->
-                android.util.Log.i("GoGauge", "quota flow: loggedIn=$loggedIn dash=${dashboard != null} q=$q")
                 if (loggedIn && dashboard != null) loadDashboard()
             }
         }
@@ -107,16 +120,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------------
-    // Login / state
+    // Login / state (多账号版)
     // ------------------------------------------------------------------
 
     fun checkState() {
         scope.launch {
-            val acc = repo.account()
-            account = acc
-            loggedIn = acc.hasToken
+            account = repo.account()
+            refreshAccounts()
+            loggedIn = repo.countLoggedInAccounts() > 0
             datadir = getApplication<Application>().filesDir.absolutePath
-            if (acc.hasToken) {
+            if (loggedIn) {
                 showLogin = false
                 loadDashboard()
                 // first run with empty db → auto full sync (desktop parity);
@@ -131,24 +144,79 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun onLoginSuccess() {
+    fun startLogin(mode: String) {
+        pendingLoginMode = if (mode in listOf("add", "relogin")) mode else "relogin"
+        showLogin = true
+    }
+
+    /**
+     * 登录成功按模式落库 (desktop on_login_success):
+     * add=新建账号(同 token 去重为既有账号)并切换; relogin=更新当前活跃账号凭证.
+     */
+    fun completeLogin(token: String, workspaceHint: String) {
         scope.launch {
+            repo.loginSuccess(token, workspaceHint, pendingLoginMode)
             loggedIn = true
             showLogin = false
             checkState()
-            fullSync()
+            startSync("full")
         }
     }
 
-    /** Called by LoginScreen after the auth cookie is captured. */
-    fun completeLogin(token: String, workspaceHint: String) {
+    // ------------------------------------------------------------------
+    // 多账号管理 (desktop 设置页用户管理 + 顶栏切换器 parity)
+    // ------------------------------------------------------------------
+
+    private fun refreshAccounts() {
         scope.launch {
-            repo.saveLogin(token, workspaceHint)
-            loggedIn = true
-            showLogin = false
-            refreshSettings()
-            startSync("full")
+            accounts = repo.accounts()
+            activeAccountId = repo.activeAccountId()
+            account = repo.account()
         }
+    }
+
+    /** 切换活跃账号后统一刷新面板与分页数据. */
+    fun switchAccount(id: Int) {
+        scope.launch {
+            if (!repo.switchAccount(id)) return@launch
+            resetPagedData()
+            checkState()
+        }
+    }
+
+    fun renameAccount(id: Int, name: String, onDone: (Boolean) -> Unit = {}) {
+        scope.launch {
+            val ok = repo.renameAccount(id, name)
+            if (ok) refreshAccounts()
+            onDone(ok)
+        }
+    }
+
+    /** 删除账号及其本地数据; 无剩余已登录账号时回欢迎页 (desktop delete remaining==0 口径). */
+    fun deleteAccount(id: Int) {
+        scope.launch {
+            repo.deleteAccount(id)
+            resetPagedData()
+            checkState()
+        }
+    }
+
+    /** 退出登录当前活跃账号 (清其数据保留行); 其他已登录账号自动接管活跃位. */
+    fun logoutActive() {
+        scope.launch {
+            repo.logout()
+            resetPagedData()
+            checkState()
+        }
+    }
+
+    private fun resetPagedData() {
+        dashboard = null
+        records = null
+        sessions = null
+        recordsPage = 1
+        sessionsPage = 1
+        models = emptyList()
     }
 
     // ------------------------------------------------------------------
@@ -294,7 +362,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshSettings() {
         scope.launch {
             settings = repo.settings()
-            account = repo.account()
             restartAutoSync()
         }
     }
@@ -319,21 +386,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun changeCurrency(c: String) {
         currency = c
         prefs.edit().putString("currency", c).apply()
-    }
-
-    fun logout() {
-        scope.launch {
-            repo.logout()
-            loggedIn = false
-            showLogin = true
-            dashboard = null
-            records = null
-            sessions = null
-        }
-    }
-
-    fun relogin() {
-        logout()
     }
 
     fun checkUpdate() {

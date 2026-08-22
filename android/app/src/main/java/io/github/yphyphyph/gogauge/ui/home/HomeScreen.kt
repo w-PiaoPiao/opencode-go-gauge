@@ -1,6 +1,8 @@
 package io.github.yphyphyph.gogauge.ui.home
 
+import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,27 +14,40 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
 import io.github.yphyphyph.gogauge.data.model.Totals
 import io.github.yphyphyph.gogauge.ui.MainViewModel
+import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.components.Accent
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
@@ -47,7 +62,7 @@ import io.github.yphyphyph.gogauge.util.Fmt
 /** Home page: quota windows + overview KPIs + today's 24h trend. Pull-to-refresh at top. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(vm: MainViewModel = viewModel()) {
+fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) {
     val s = vm.s
     LaunchedEffect(Unit) {
         if (vm.dashboard == null) vm.loadDashboard(range = vm.homeRange)
@@ -69,18 +84,21 @@ fun HomeScreen(vm: MainViewModel = viewModel()) {
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // page header: title + refresh on one row; range pills full-width below
+        // page header: title + account chip + refresh; range pills full-width below
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(s.homeTitle, style = MaterialTheme.typography.titleLarge)
-            IconButton(
-                onClick = vm::refreshNow,
-                enabled = !vm.isSyncing(),
-            ) {
-                Icon(
-                    Icons.Filled.Refresh,
-                    contentDescription = s.refresh,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AccountSwitcher(vm, s, onManageUsers = onManageUsers)
+                IconButton(
+                    onClick = vm::refreshNow,
+                    enabled = !vm.isSyncing(),
+                ) {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = s.refresh,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
         PillRow(
@@ -143,8 +161,109 @@ fun HomeScreen(vm: MainViewModel = viewModel()) {
     }
 }
 
+/**
+ * 主页头部账号胶囊 — desktop 顶栏 tb-login 胶囊 + 快捷切换菜单的移动端对应物:
+ * 显示当前账号名与已登录数徽标 (>1 时), 点击弹出底部弹窗快捷切换/管理入口.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun quotaLabel(label: String, s: io.github.yphyphyph.gogauge.ui.Strings): String = when (label) {
+private fun AccountSwitcher(vm: MainViewModel, s: Strings, onManageUsers: () -> Unit) {
+    val context = LocalContext.current
+    var showSheet by remember { mutableStateOf(false) }
+    val active = vm.accounts.firstOrNull { it.id == vm.activeAccountId && it.hasToken }
+        ?: return
+    // 未登录态由欢迎页接管; 单账号时隐藏计数徽标避免噪音
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        modifier = Modifier.clickable { showSheet = true },
+    ) {
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(active.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            if (vm.loggedInCount > 1) {
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "${vm.loggedInCount}",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 4.dp),
+                )
+            }
+        }
+    }
+    if (showSheet) {
+        ModalBottomSheet(onDismissRequest = { showSheet = false }) {
+            Text(
+                s.userSwitchTip,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+            )
+            vm.accounts.filter { it.hasToken }.forEach { acc ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            showSheet = false
+                            if (acc.id != vm.activeAccountId) {
+                                vm.switchAccount(acc.id)
+                                Toast.makeText(context, s.switchedAccount, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (acc.id == vm.activeAccountId) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.width(22.dp),
+                        )
+                    } else {
+                        Spacer(Modifier.width(22.dp))
+                    }
+                    Column(Modifier.padding(start = 8.dp)) {
+                        Text(acc.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            acc.workspaceId,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            HorizontalDivider()
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        showSheet = false
+                        onManageUsers()
+                    }
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.width(22.dp),
+                )
+                Text(s.manageUsers, fontSize = 14.sp, modifier = Modifier.padding(start = 8.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun quotaLabel(label: String, s: Strings): String = when (label) {
     "5h Rolling" -> s.rolling
     "Weekly" -> s.weekly
     "Monthly" -> s.monthly
@@ -171,7 +290,7 @@ private fun QuotaSkeleton() {
 }
 
 @Composable
-private fun QuotaErrorCard(quota: QuotaResult, s: io.github.yphyphyph.gogauge.ui.Strings, onRetry: () -> Unit) {
+private fun QuotaErrorCard(quota: QuotaResult, s: Strings, onRetry: () -> Unit) {
     GgCard {
         Text(
             "${s.quotaFail}：${quota.error ?: "?"}",
