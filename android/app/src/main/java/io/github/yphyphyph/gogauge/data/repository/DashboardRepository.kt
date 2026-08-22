@@ -1,5 +1,6 @@
 package io.github.yphyphyph.gogauge.data.repository
 
+import io.github.yphyphyph.gogauge.data.model.AccountInfo
 import io.github.yphyphyph.gogauge.data.model.DashboardData
 import io.github.yphyphyph.gogauge.data.model.PageResult
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
@@ -30,7 +31,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 import java.time.temporal.ChronoUnit
-import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /** Sync outcome — mirrors server.py sync_usage return dict. */
@@ -44,8 +44,10 @@ data class SyncResult(
 )
 
 /**
- * Dashboard repository — ports of server.py (sync engine, quota/exchange caches)
+ * Dashboard repository — ports of server.py v2.0.0 (多账号同步引擎, 配额按账号分槽缓存)
  * plus db.py aggregations, exposed as a single service to ViewModels.
+ *
+ * 未显式传 accountId 的接口一律作用于活跃账号 (desktop db 兼容约定).
  */
 class DashboardRepository(
     private val db: AppDatabase,
@@ -57,16 +59,20 @@ class DashboardRepository(
     private val syncDao: SyncDao get() = db.syncDao()
 
     // ------------------------------------------------------------------
-    // Caches (server.py parity)
+    // Caches (server.py parity — quota 按账号分槽)
     // ------------------------------------------------------------------
 
     private class QuotaCache {
         @Volatile var at = 0.0
         @Volatile var data: QuotaResult? = null
     }
-    private val quotaCache = QuotaCache()
+
+    /** {account_id: slot} — desktop _quota_cache: dict[int, dict]. */
+    private val quotaCache = HashMap<Int, QuotaCache>()
     private val quotaMutex = Mutex()
-    private var quotaRefreshing = false
+
+    /** 防重入: 同一账号同一时刻只允许一个刷新协程 — desktop _quota_refreshing: set[int]. */
+    private val quotaRefreshing = mutableSetOf<Int>()
     private val _quota = MutableStateFlow<QuotaResult?>(null)
     val quota: StateFlow<QuotaResult?> = _quota.asStateFlow()
 
@@ -91,38 +97,82 @@ class DashboardRepository(
     }
 
     // ------------------------------------------------------------------
-    // Quota refresh (server.py _ensure_quota_async parity)
+    // Active account helpers
     // ------------------------------------------------------------------
 
-    /** Refresh quota in the background if cache is stale; non-blocking for dashboard. */
+    suspend fun activeAccountId(): Int = syncDao.getActiveAccountId()
+
+    suspend fun accounts(): List<AccountInfo> = syncDao.listAccounts()
+
+    suspend fun countLoggedInAccounts(): Int = syncDao.countLoggedInAccounts()
+
+    suspend fun account(): AccountInfo? = syncDao.getAccount()
+
+    suspend fun switchAccount(accountId: Int): Boolean {
+        val ok = syncDao.setActiveAccount(accountId)
+        if (ok) _quota.value = null
+        return ok
+    }
+
+    suspend fun renameAccount(accountId: Int, name: String): Boolean = syncDao.renameAccount(accountId, name)
+
+    /** 返回剩余账号数 (desktop /api/accounts/delete remaining 口径). */
+    suspend fun deleteAccount(accountId: Int): Int {
+        val remaining = syncDao.deleteAccount(accountId)
+        _quota.value = null
+        return remaining
+    }
+
+    /** 登录成功按模式落库: add=新建账号(同 token 去重)并切换; relogin=更新活跃账号凭证. */
+    suspend fun loginSuccess(token: String, workspaceHint: String, mode: String) {
+        if (mode == "add") syncDao.addAccount(token, workspaceHint, switch = true)
+        else syncDao.saveToken(token, workspaceHint.trim().ifEmpty { "Default" })
+        _quota.value = null
+    }
+
+    // ------------------------------------------------------------------
+    // Quota refresh (server.py _ensure_quota_async parity, per-account slots)
+    // ------------------------------------------------------------------
+
+    /** Refresh active account's quota in the background if cache is stale; non-blocking. */
     fun ensureQuotaAsync(scope: CoroutineScope) {
         scope.launch { ensureQuota() }
     }
 
     suspend fun ensureQuota() {
+        ensureQuotaFor(activeAccountId())
+    }
+
+    private suspend fun ensureQuotaFor(accountId: Int) {
+        if (accountId == 0) return
         val now = System.currentTimeMillis() / 1000.0
-        if (quotaCache.data != null && now - quotaCache.at < QUOTA_CACHE_TTL) return
+        val slot = synchronized(quotaCache) { quotaCache[accountId] }
+        if (slot?.data != null && now - slot.at < QUOTA_CACHE_TTL) return
         quotaMutex.withLock {
-            if (quotaRefreshing) return
-            val token = syncDao.getToken()
+            if (accountId in quotaRefreshing) return
+            val token = syncDao.getTokenFor(accountId)
             if (token.isEmpty()) return
-            quotaRefreshing = true
+            quotaRefreshing.add(accountId)
         }
         try {
             // failure also writes cache (null data) so the UI doesn't retry every load
-            val token = syncDao.getToken()
-            val hint = syncDao.getWorkspaceHint()
-            quotaCache.at = System.currentTimeMillis() / 1000.0
-            quotaCache.data = try {
+            val target = synchronized(quotaCache) { quotaCache.getOrPut(accountId) { QuotaCache() } }
+            val token = syncDao.getTokenFor(accountId)
+            val hint = syncDao.getWorkspaceHintFor(accountId)
+            target.at = System.currentTimeMillis() / 1000.0
+            target.data = try {
                 api.fetchQuota(token, hint)
             } catch (e: Exception) {
                 android.util.Log.e("GoGauge", "quota refresh failed", e)
                 null
             }
-            _quota.value = quotaCache.data
-            android.util.Log.i("GoGauge", "quota refreshed: success=" + (quotaCache.data?.success) + " err=" + (quotaCache.data?.error))
+            if (accountId == activeAccountId()) _quota.value = target.data
+            android.util.Log.i(
+                "GoGauge",
+                "quota refreshed acc=$accountId success=" + (target.data?.success) + " err=" + (target.data?.error),
+            )
         } finally {
-            quotaRefreshing = false
+            quotaRefreshing.remove(accountId)
         }
     }
 
@@ -143,23 +193,24 @@ class DashboardRepository(
     }
 
     // ------------------------------------------------------------------
-    // Dashboard bundle (server.py /api/dashboard parity)
+    // Dashboard bundle (server.py /api/dashboard parity — 活跃账号视角)
     // ------------------------------------------------------------------
 
     suspend fun loadDashboard(range: String): DashboardData {
-        val token = syncDao.getToken()
+        val aid = activeAccountId()
+        val token = syncDao.getTokenFor(aid)
         val quota = if (token.isNotEmpty()) _quota.value else null
         val now = java.time.LocalDateTime.now()
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
         // Run the independent DB/exchange queries concurrently to cut first-paint latency.
         return coroutineScope {
-            val totalsDeferred = async { usageDao.totals(range) }
-            val todayDeferred = async { usageDao.totals("today") }
-            val dailyDeferred = async { usageDao.dailyStats(7) }
-            val trendDeferred = async { usageDao.dailyStats(30) }
-            val todayTrendDeferred = async { usageDao.todayTrend() }
-            val modelsDeferred = async { usageDao.modelStats(range) }
-            val syncDeferred = async { syncDao.getSyncState() }
+            val totalsDeferred = async { usageDao.totals(range, aid) }
+            val todayDeferred = async { usageDao.totals("today", aid) }
+            val dailyDeferred = async { usageDao.dailyStats(7, aid) }
+            val trendDeferred = async { usageDao.dailyStats(30, aid) }
+            val todayTrendDeferred = async { usageDao.todayTrend(aid) }
+            val modelsDeferred = async { usageDao.modelStats(range, aid) }
+            val syncDeferred = async { syncDao.getSyncStateFor(aid) }
             val usdCnyDeferred = async { usdCny() }
             DashboardData(
                 loggedIn = token.isNotEmpty(),
@@ -180,18 +231,78 @@ class DashboardRepository(
     }
 
     // ------------------------------------------------------------------
-    // Sync engine (server.py sync_usage parity)
+    // Sync engine (server.py v2.0.0 sync_usage parity — 多账号轮询)
     // ------------------------------------------------------------------
 
     suspend fun syncUsage(mode: String): SyncResult {
-        val token = syncDao.getToken()
-        if (token.isEmpty()) return SyncResult(ok = false, error = "未登录")
+        // incremental 轮询所有已登录账号; full 仅作用于活跃账号 (desktop parity)
+        val targets: List<Pair<Int, String>> = if (mode == "full") {
+            val aid = activeAccountId()
+            if (aid != 0 && syncDao.getTokenFor(aid).isNotEmpty()) {
+                listOf(aid to (account()?.name ?: "#$aid"))
+            } else emptyList()
+        } else {
+            accounts().filter { it.hasToken }.map { it.id to it.name }
+        }
+        if (targets.isEmpty()) return SyncResult(ok = false, error = "未登录")
         if (_progress.value.running) return SyncResult(ok = false, error = "已有同步任务进行中")
 
-        var workspaceId = syncDao.getWorkspaceHint()
         val windowDays = db.settingsDao().getSettings().windowDays
 
         _progress.value = SyncProgress(running = true, mode = mode, phase = "usage")
+
+        try {
+            var totalInserted = 0
+            var pages = 0
+            var anyError = ""
+            var partial = false
+
+            for ((aid, name) in targets) {
+                setProgress { it.copy(account = name) }
+                val result = syncOneAccount(aid, name, mode, windowDays)
+                totalInserted += result.inserted
+                pages += result.pages
+                if (!result.ok) {
+                    anyError = result.error ?: "同步失败"
+                    if (mode == "incremental") {
+                        val msg = "[$name] $anyError"
+                        failSync(msg, anyError)
+                        return SyncResult(ok = false, error = anyError, inserted = totalInserted)
+                    }
+                }
+                if (result.partial) partial = true
+            }
+
+            return if (partial || (mode != "incremental" && anyError.isNotEmpty())) {
+                val msg = if (anyError.isNotEmpty()) "部分账号同步异常" else "完成, 但部分页面拉取失败"
+                setProgress { it.copy(phase = "done", message = msg) }
+                SyncResult(ok = true, partial = true, inserted = totalInserted, pages = pages)
+            } else {
+                val msg = "同步完成, 新增 $totalInserted 条"
+                setProgress { it.copy(phase = "done", message = msg) }
+                SyncResult(ok = true, inserted = totalInserted, pages = pages)
+            }
+        } catch (e: Exception) {
+            failSync(e.message ?: "同步失败", e.message)
+            return SyncResult(ok = false, error = e.message)
+        } finally {
+            setProgress { it.copy(running = false, account = "") }
+        }
+    }
+
+    /**
+     * 同步单个账号的用量记录 (原单账号逻辑, 显式传入账号上下文) —
+     * desktop server._sync_one_account parity.
+     */
+    private suspend fun syncOneAccount(
+        accountId: Int,
+        name: String,
+        mode: String,
+        windowDays: Int?,
+    ): SyncResult {
+        val token = syncDao.getTokenFor(accountId)
+        if (token.isEmpty()) return SyncResult(ok = false, error = "未登录")
+        var workspaceId = syncDao.getWorkspaceHintFor(accountId)
 
         try {
             // ensure workspace id is resolved
@@ -199,13 +310,17 @@ class DashboardRepository(
                 val resolved = api.resolveWorkspaceId(workspaceId, token)
                 if (!workspaceId.startsWith("wrk_")) {
                     workspaceId = resolved
-                    syncDao.saveResolvedWorkspace(resolved, Instant.now().toString())
+                    syncDao.saveResolvedWorkspace(accountId, resolved, Instant.now().toString())
                 }
             } catch (e: AuthException) {
-                failSync("工作区解析失败: ${e.message}", e.message)
+                val msg = "工作区解析失败: ${e.message}"
+                syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
+                setProgress { it.copy(phase = "error", message = msg) }
                 return SyncResult(ok = false, error = e.message)
             } catch (e: OpenCodeApiException) {
-                failSync("工作区解析失败: ${e.message}", e.message)
+                val msg = "工作区解析失败: ${e.message}"
+                syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
+                setProgress { it.copy(phase = "error", message = msg) }
                 return SyncResult(ok = false, error = e.message)
             }
 
@@ -245,7 +360,13 @@ class DashboardRepository(
                             }
                         }
                     }
-                    val inserted = usageDao.insertUsageRecords(result.map { it.toEntity(Instant.now().toString()) })
+                    val inserted = usageDao.insertUsageRecords(
+                        result.map { r ->
+                            val entity = r.toEntity(Instant.now().toString())
+                            entity.copy(accountId = accountId)
+                        },
+                        accountId,
+                    )
                     totalInserted += inserted
                     batchInserted += inserted
                     if (result.size >= 50) batchFullPages++
@@ -259,7 +380,10 @@ class DashboardRepository(
                     failedPages += batchFailed
                     if (mode == "incremental") {
                         val msg = "网络请求失败 (IncompleteRead/超时)"
-                        failSync("第 ${page - 4} 页拉取失败: $msg", msg)
+                        syncDao.updateSyncStateAndTotals(
+                            accountId, "error", "[$name] 第 ${page - 4} 页拉取失败: $msg", totalInserted,
+                        )
+                        setProgress { it.copy(phase = "error", message = "[$name] 第 ${page - 4} 页拉取失败: $msg") }
                         return SyncResult(ok = false, error = msg, inserted = totalInserted)
                     }
                 }
@@ -276,42 +400,37 @@ class DashboardRepository(
 
             // prune records outside the window (independent of this run's inserts)
             if (windowDays != null) {
-                usageDao.pruneOldRecords("-${windowDays} days")
+                usageDao.pruneOldRecords("-${windowDays} days", accountId)
             }
 
-            // 顺带刷新 key 显示名称缓存 (供会话/记录页展示 key 名称, 失败不影响同步结果
-            // — desktop server.py sync_usage parity)
+            // 顺带刷新该账号的 key 显示名称缓存 — 多账号合并写入 (key_id 全局唯一),
+            // 单账号失败不影响已有缓存 (desktop server.py v2.0.0 parity)
             try {
                 val names = api.fetchKeyNames(token, workspaceId)
-                if (names.isNotEmpty()) db.settingsDao().saveKeyNames(names)
+                if (names.isNotEmpty()) {
+                    val merged = HashMap(db.settingsDao().getKeyNames())
+                    merged.putAll(names)
+                    db.settingsDao().saveKeyNames(merged)
+                }
             } catch (e: Exception) {
                 android.util.Log.w("GoGauge", "fetchKeyNames failed", e)
             }
 
             if (failedPages > 0) {
                 val msg = "完成, 但 $failedPages 页拉取失败 (数据不完整, 可再次全量同步补全)"
-                syncDao.updateSyncStateAndTotals("partial", msg, totalInserted)
-                setProgress { it.copy(phase = "done", message = msg) }
-                _progress.value = _progress.value.copy(running = false)
+                syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
                 return SyncResult(ok = true, partial = true, failedPages = failedPages, inserted = totalInserted, pages = page)
             }
-            val msg = "同步完成, 新增 $totalInserted 条"
-            syncDao.updateSyncStateAndTotals("ok", null, totalInserted)
-            setProgress { it.copy(phase = "done", message = msg) }
-            _progress.value = _progress.value.copy(running = false)
+            syncDao.updateSyncStateAndTotals(accountId, "ok", null, totalInserted)
             return SyncResult(ok = true, inserted = totalInserted, pages = page)
         } catch (e: Exception) {
-            syncDao.updateSyncStateAndTotals("error", e.message, 0)
-            failSync(e.message ?: "同步失败", e.message)
+            syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0)
             return SyncResult(ok = false, error = e.message)
-        } finally {
-            _progress.value = _progress.value.copy(running = false)
         }
     }
 
     private suspend fun failSync(phaseMsg: String, errMsg: String?) {
         setProgress { it.copy(phase = "error", message = phaseMsg) }
-        if (errMsg != null) syncDao.updateSyncStateAndTotals("error", errMsg, 0)
     }
 
     /** Concurrently fetch up to 5 pages; null = failed page. */
@@ -339,11 +458,12 @@ class DashboardRepository(
     }
 
     // ------------------------------------------------------------------
-    // Pages / settings / account (server.py API parity)
+    // Pages / settings / account (server.py API parity — 活跃账号)
     // ------------------------------------------------------------------
 
     suspend fun recordsPage(page: Int, pageSize: Int, model: String?, days: Int?): PageResult<UsageRecordRow> {
-        val (records, total) = usageDao.usageRecordsPage(page, pageSize, model, days)
+        val aid = activeAccountId()
+        val (records, total) = usageDao.usageRecordsPage(page, pageSize, model, days, aid)
         // 注入缓存的 key 显示名称 (desktop server.py /api/usage/records parity)
         val names = db.settingsDao().getKeyNames()
         val enriched = if (names.isEmpty()) records
@@ -355,7 +475,8 @@ class DashboardRepository(
     }
 
     suspend fun sessionsPage(page: Int, pageSize: Int, days: Int?): PageResult<SessionStat> {
-        val (records, total) = usageDao.sessionStatsPage(page, pageSize, days)
+        val aid = activeAccountId()
+        val (records, total) = usageDao.sessionStatsPage(page, pageSize, days, aid)
         // 注入 key 名称 + 无 session 的拆分行按 key 分组, 前端据此显示"未归属"
         // (desktop server.py /api/usage/sessions parity)
         val names = db.settingsDao().getKeyNames()
@@ -370,7 +491,7 @@ class DashboardRepository(
         return PageResult(enriched, total)
     }
 
-    suspend fun listModels(): List<String> = usageDao.listModels()
+    suspend fun listModels(): List<String> = usageDao.listModels(activeAccountId())
 
     /** Persisted sync progress/state (desktop get_sync_state parity). */
     suspend fun syncState(): SyncState = syncDao.getSyncState()
@@ -379,18 +500,11 @@ class DashboardRepository(
 
     suspend fun saveSettings(patch: AppSettings): AppSettings = db.settingsDao().saveSettings(patch)
 
+    /** 退出登录当前活跃账号 (清其数据, 保留账号行). */
     suspend fun logout() = syncDao.clearAccount()
 
-    /** Save login token + workspace hint — port of db.save_token (desktop). */
-    suspend fun saveLogin(token: String, workspaceHint: String) {
-        syncDao.saveToken(
-            token.trim(),
-            workspaceHint.trim().ifEmpty { "Default" },
-            Instant.now().toString(),
-        )
-    }
+    @Deprecated("Use loginSuccess(token, hint, mode)", ReplaceWith("loginSuccess(token, workspaceHint, \"relogin\")"))
+    suspend fun saveLogin(token: String, workspaceHint: String) = loginSuccess(token, workspaceHint, "relogin")
 
     suspend fun checkUpdate(currentVersion: String): UpdateInfo = updateApi.checkUpdate(currentVersion)
-
-    suspend fun account() = syncDao.getAccount()
 }

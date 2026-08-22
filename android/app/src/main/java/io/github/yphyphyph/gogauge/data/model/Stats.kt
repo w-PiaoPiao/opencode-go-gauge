@@ -66,7 +66,7 @@ data class SyncState(
     val newestRecordAt: String? = null,
 )
 
-/** In-flight sync progress — mirrors server._sync_state (desktop). */
+/** In-flight sync progress — mirrors server._sync_state (desktop); account = 正在同步的账号名. */
 data class SyncProgress(
     val running: Boolean = false,
     val mode: String = "",
@@ -74,6 +74,7 @@ data class SyncProgress(
     val inserted: Int = 0,
     val phase: String = "idle", // idle | quota | usage | done | error
     val message: String = "",
+    val account: String = "",
 )
 
 /** App settings — mirrors db._DEFAULT_SETTINGS (desktop). */
@@ -100,8 +101,9 @@ data class DashboardData(
     val serverTime: String,
 )
 
-/** Account info — mirrors db.get_account (desktop). */
+/** Account info — mirrors db._account_dict (desktop v2.0.0). */
 data class AccountInfo(
+    val id: Int = 0,
     val name: String,
     val workspaceId: String,
     val resolvedWorkspaceId: String?,

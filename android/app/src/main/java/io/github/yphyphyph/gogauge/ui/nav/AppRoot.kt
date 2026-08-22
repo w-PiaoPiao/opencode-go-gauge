@@ -80,7 +80,15 @@ private fun MainShell(vm: MainViewModel) {
             startDestination = GgTab.Home.route,
             modifier = Modifier.padding(innerPadding),
         ) {
-            composable(GgTab.Home.route) { HomeScreen(vm) }
+            composable(GgTab.Home.route) {
+                HomeScreen(vm, onManageUsers = {
+                    navController.navigate(GgTab.Settings.route) {
+                        popUpTo(navController.graph.startDestinationId) { saveState = true }
+                        launchSingleTop = true
+                        restoreState = true
+                    }
+                })
+            }
             composable(GgTab.Stats.route) { StatsScreen(vm) }
             composable(GgTab.Records.route) { RecordsScreen(vm) }
             composable(GgTab.Settings.route) { SettingsScreen(vm) }

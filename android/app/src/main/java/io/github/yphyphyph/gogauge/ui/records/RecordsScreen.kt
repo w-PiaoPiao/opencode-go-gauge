@@ -44,6 +44,7 @@ import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
+import io.github.yphyphyph.gogauge.ui.components.ModelIcon
 import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import io.github.yphyphyph.gogauge.util.Fmt
@@ -218,6 +219,7 @@ private fun RecordRow(r: UsageRecordRow, vm: MainViewModel) {
             .padding(horizontal = 12.dp, vertical = 9.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            ModelIcon(model = r.model, dark = vm.darkMode, modifier = Modifier.padding(end = 6.dp))
             Text(
                 r.model,
                 fontWeight = FontWeight.SemiBold,

@@ -1,6 +1,7 @@
 package io.github.yphyphyph.gogauge.ui.settings
 
-import androidx.compose.foundation.clickable
+import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,10 +13,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -29,27 +32,34 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.yphyphyph.gogauge.data.model.AccountInfo
 import io.github.yphyphyph.gogauge.data.model.AppSettings
 import io.github.yphyphyph.gogauge.BuildConfig
 import io.github.yphyphyph.gogauge.ui.MainViewModel
+import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.PillRow
 import io.github.yphyphyph.gogauge.util.Fmt
 
-/** Settings page: account / auto-sync / appearance / data / update / about. */
+/** Settings page: 用户管理 / auto-sync / appearance / data / update / about. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(vm: MainViewModel = viewModel()) {
     val s = vm.s
+    val context = LocalContext.current
     LaunchedEffect(Unit) { vm.refreshSettings() }
 
     var confirmDialog by remember { mutableStateOf<ConfirmAction?>(null) }
+    var renameTarget by remember { mutableStateOf<AccountInfo?>(null) }
+
+    fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
     val ptrState = rememberPullToRefreshState()
     Box(Modifier.fillMaxSize()) {
@@ -69,37 +79,48 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
     ) {
         Text(s.settingsTitle, style = MaterialTheme.typography.titleLarge)
 
-        // ---- account ----
+        // ---- account: 用户管理 (desktop 设置页用户列表 parity) ----
         GgCard {
-            CardHeader(s.setAccount)
-            SetRow(
-                s.setLoginState,
-                if (vm.loggedIn) "${s.loggedIn} · ${vm.account.workspaceId}" else s.notLoggedIn,
-                trailing = {
-                    Text(
-                        if (vm.loggedIn) s.connected else s.notConnected,
-                        fontSize = 12.sp,
-                        color = if (vm.loggedIn) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error,
-                    )
-                },
-            )
-            SetRow(s.setWorkspace, vm.account.workspaceId)
-            SetRow(
-                s.setLoginMethod, s.loginMethodDesc,
-                trailing = {
-                    TextButton(onClick = { confirmDialog = ConfirmAction.Relogin }) {
-                        Text(s.relogin, fontSize = 13.sp)
+            CardHeader(s.setAccount, trailing = {
+                TextButton(onClick = { vm.startLogin("add") }) {
+                    Text(s.addUser, fontSize = 13.sp)
+                }
+            })
+            val users = vm.accounts.filter { it.hasToken }
+            if (users.isEmpty()) {
+                Text(
+                    s.noUsers,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                )
+            } else {
+                Column {
+                    users.forEachIndexed { i, acc ->
+                        UserRow(
+                            acc = acc,
+                            isActive = acc.id == vm.activeAccountId,
+                            s = s,
+                            onSwitch = {
+                                vm.switchAccount(acc.id)
+                                toast(s.switchedAccount)
+                            },
+                            onRelogin = { confirmDialog = ConfirmAction.Relogin },
+                            onRename = { renameTarget = acc },
+                            onLogout = { confirmDialog = ConfirmAction.LogoutUser(acc.id, acc.name) },
+                            onDelete = { confirmDialog = ConfirmAction.DeleteUser(acc.id, acc.name) },
+                        )
+                        if (i < users.lastIndex) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                            )
+                        }
                     }
-                },
-            )
-            SetRow(
-                s.setLogout, s.logoutDesc,
-                trailing = {
-                    TextButton(onClick = { confirmDialog = ConfirmAction.Logout }) {
-                        Text(s.logout, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
-                    }
-                },
-            )
+                }
+            }
         }
 
         // ---- auto sync ----
@@ -259,10 +280,37 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
     )
     }
 
+    renameTarget?.let { acc ->
+        var name by remember(acc.id) { mutableStateOf(acc.name) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text(s.renameTitle) },
+            text = {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(50) },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.renameAccount(acc.id, name) { ok -> if (ok) toast(s.userRenamed) }
+                    renameTarget = null
+                }) { Text(s.save) }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text(s.cancel) }
+            },
+        )
+    }
+
     confirmDialog?.let { action ->
         val (title, message, okText, danger) = when (action) {
             ConfirmAction.Relogin -> Quad(s.relogin, s.reloginConfirm, s.goLogin, false)
-            ConfirmAction.Logout -> Quad(s.logout, s.logoutConfirm, s.quit, true)
+            is ConfirmAction.LogoutUser ->
+                Quad(s.logout, s.logoutUserConfirm.replace("{name}", action.name), s.ok, true)
+            is ConfirmAction.DeleteUser ->
+                Quad(s.deleteTitle, s.deleteUserConfirm.replace("{name}", action.name), s.confirm, true)
             ConfirmAction.FullSync -> Quad(s.fullSync, s.fullSyncConfirm, s.startSync, false)
         }
         AlertDialog(
@@ -273,8 +321,15 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 TextButton(onClick = {
                     confirmDialog = null
                     when (action) {
-                        ConfirmAction.Relogin -> vm.relogin()
-                        ConfirmAction.Logout -> vm.logout()
+                        ConfirmAction.Relogin -> vm.startLogin("relogin")
+                        is ConfirmAction.LogoutUser -> {
+                            vm.logoutActive()
+                            toast(s.loggedOut)
+                        }
+                        is ConfirmAction.DeleteUser -> {
+                            vm.deleteAccount(action.id)
+                            toast(s.userDeleted)
+                        }
                         ConfirmAction.FullSync -> vm.startSync("full")
                     }
                 }) {
@@ -288,9 +343,76 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
     }
 }
 
-private enum class ConfirmAction { Relogin, Logout, FullSync }
+private sealed interface ConfirmAction {
+    data object Relogin : ConfirmAction
+    data class LogoutUser(val id: Int, val name: String) : ConfirmAction
+    data class DeleteUser(val id: Int, val name: String) : ConfirmAction
+    data object FullSync : ConfirmAction
+}
 
 private data class Quad<T>(val a: T, val b: T, val c: T, val d: Boolean)
+
+/** 单个用户行 — desktop renderUsersList user-row parity. */
+@Composable
+private fun UserRow(
+    acc: AccountInfo,
+    isActive: Boolean,
+    s: Strings,
+    onSwitch: () -> Unit,
+    onRelogin: () -> Unit,
+    onRename: () -> Unit,
+    onLogout: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(acc.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                if (isActive) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        s.currentUserBadge,
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier
+                            .background(
+                                MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f),
+                                RoundedCornerShape(6.dp),
+                            )
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                    )
+                }
+            }
+            Text(
+                "${acc.workspaceId} · ${s.loggedIn}",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (isActive) {
+                TextButton(onClick = onRelogin) { Text(s.relogin, fontSize = 13.sp) }
+                TextButton(onClick = onRename) { Text(s.renameBtn, fontSize = 13.sp) }
+                TextButton(onClick = onLogout) {
+                    Text(s.logout, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                }
+            } else {
+                TextButton(onClick = onSwitch) { Text(s.switchTo, fontSize = 13.sp) }
+                TextButton(onClick = onRename) { Text(s.renameBtn, fontSize = 13.sp) }
+                TextButton(onClick = onDelete) {
+                    Text(s.deleteUser, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun SetRow(

@@ -15,7 +15,8 @@ import io.github.yphyphyph.gogauge.data.model.Totals
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
 
 /**
- * Usage records DAO — every query is a direct port of desktop db.py SQL.
+ * Usage records DAO — every query is a direct port of desktop db.py SQL,
+ * v2.0.0 起全部按 account_id 维度过滤 (desktop parity).
  */
 @Dao
 abstract class UsageDao {
@@ -24,23 +25,35 @@ abstract class UsageDao {
     // Write
     // ------------------------------------------------------------------
 
-    @Query("SELECT usg_id FROM usage_records WHERE usg_id IN (:ids)")
-    abstract suspend fun existingIds(ids: List<String>): List<String>
+    data class OwnershipRow(
+        @androidx.room.ColumnInfo(name = "usg_id") val usgId: String,
+        @androidx.room.ColumnInfo(name = "account_id") val accountId: Int,
+    )
+
+    @Query("SELECT usg_id, account_id FROM usage_records WHERE usg_id IN (:ids)")
+    abstract suspend fun existingOwnership(ids: List<String>): List<OwnershipRow>
 
     @Upsert
     abstract suspend fun upsertAll(records: List<UsageRecordEntity>)
 
-    /** Batch insert with dedup; returns count of newly inserted rows. */
+    /**
+     * Batch insert with dedup; returns count of newly inserted rows.
+     * 已存在的记录保留原归属账号 (desktop ON CONFLICT DO UPDATE 不更新 account_id).
+     */
     @Transaction
-    open suspend fun insertUsageRecords(records: List<UsageRecordEntity>): Int {
+    open suspend fun insertUsageRecords(records: List<UsageRecordEntity>, accountId: Int): Int {
         if (records.isEmpty()) return 0
-        val existing = existingIds(records.map { it.usgId }).toHashSet()
-        upsertAll(records)
-        return records.count { it.usgId !in existing }
+        val existingAccount = existingOwnership(records.map { it.usgId })
+            .associate { it.usgId to it.accountId }
+        upsertAll(records.map { r -> r.copy(accountId = existingAccount[r.usgId] ?: accountId) })
+        return records.count { it.usgId !in existingAccount }
     }
 
-    @Query("DELETE FROM usage_records WHERE datetime(created_at) < datetime('now', :intervalArg)")
-    abstract suspend fun pruneOldRecords(intervalArg: String): Int
+    @Query(
+        "DELETE FROM usage_records WHERE account_id = :accountId" +
+            " AND datetime(created_at) < datetime('now', :intervalArg)"
+    )
+    abstract suspend fun pruneOldRecords(intervalArg: String, accountId: Int): Int
 
     @Query("DELETE FROM usage_records")
     abstract suspend fun deleteAll()
@@ -49,9 +62,12 @@ abstract class UsageDao {
     // Aggregations (desktop db.py ports)
     // ------------------------------------------------------------------
 
-    /** Period where clause builder — mirrors db._PERIOD_CLAUSES + _period_where. */
-    private fun periodWhere(period: String): Pair<String, Array<Any>> {
-        val clause: String
+    /**
+     * Period where builder — mirrors db._PERIOD_CLAUSES + _period_where;
+     * 返回不含 WHERE 前缀的条件与参数, 由调用方与 account_id 过滤组合.
+     */
+    private fun periodClause(period: String): Pair<String?, Array<Any>> {
+        val clause: String?
         val args: Array<Any>
         when (period) {
             "5h" -> {
@@ -62,14 +78,25 @@ abstract class UsageDao {
                 clause = "substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')"
                 args = emptyArray()
             }
-            "all" -> return "" to emptyArray()
+            "all" -> return null to emptyArray()
             else -> {
                 val days = Regex("^(\\d+)d$").find(period)?.groupValues?.get(1)?.toIntOrNull()?.coerceIn(1, 365) ?: 30
                 clause = "datetime(created_at) >= datetime('now', ?)"
                 args = arrayOf("-${days} days")
             }
         }
-        return "WHERE $clause" to args
+        return clause to args
+    }
+
+    /** 组合 WHERE: account 过滤恒在首位, 周期条件以 AND 追加. */
+    private fun buildWhere(period: String, accountId: Int): Pair<String, Array<Any>> {
+        val (clause, args) = periodClause(period)
+        val allArgs = listOf<Any>(accountId) + args.toList()
+        return if (clause == null) {
+            "WHERE account_id = ?" to arrayOf<Any>(accountId)
+        } else {
+            "WHERE account_id = ? AND $clause" to allArgs.toTypedArray()
+        }
     }
 
     private fun totalsSql(where: String): String = """
@@ -89,8 +116,8 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun totalsRaw(query: SupportSQLiteQuery): TotalsRow
 
-    suspend fun totals(period: String): Totals {
-        val (where, args) = periodWhere(period)
+    suspend fun totals(period: String, accountId: Int): Totals {
+        val (where, args) = buildWhere(period, accountId)
         val row = totalsRaw(SimpleSQLiteQuery(totalsSql(where), args))
         val hit = row.cacheHitTokens
         val miss = row.uncachedInputTokens
@@ -112,8 +139,8 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun dailyStatsRaw(query: SupportSQLiteQuery): List<DailyStatRow>
 
-    /** Daily aggregation — mirrors db.daily_stats. */
-    suspend fun dailyStats(days: Int): List<DailyStat> {
+    /** Daily aggregation — mirrors db.daily_stats (按账号). */
+    suspend fun dailyStats(days: Int, accountId: Int): List<DailyStat> {
         val clamped = days.coerceIn(1, 365)
         val rows = dailyStatsRaw(
             SimpleSQLiteQuery(
@@ -128,11 +155,11 @@ abstract class UsageDao {
                        COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
                        COALESCE(COUNT(*), 0) AS request_count
                 FROM usage_records
-                WHERE substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
+                WHERE account_id = ? AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
                 GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
                 ORDER BY date ASC
                 """.trimIndent(),
-                arrayOf("-${clamped} days"),
+                arrayOf(accountId, "-${clamped} days"),
             )
         )
         return rows.map { r ->
@@ -161,15 +188,16 @@ abstract class UsageDao {
                COALESCE(SUM(output_tokens), 0) AS output,
                COALESCE(SUM(reasoning_tokens), 0) AS reasoning
         FROM usage_records
-        WHERE substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
+        WHERE account_id = :accountId
+          AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
         GROUP BY hour
         """
     )
-    abstract suspend fun todayTrendRaw(): List<HourTrendRow>
+    abstract suspend fun todayTrendRaw(accountId: Int): List<HourTrendRow>
 
-    /** Today 24-hour trend, zero-filled — mirrors db.today_trend. */
-    suspend fun todayTrend(): List<HourStat> {
-        val byHour = todayTrendRaw().associate { it.hour to it }
+    /** Today 24-hour trend, zero-filled — mirrors db.today_trend (按账号). */
+    suspend fun todayTrend(accountId: Int): List<HourStat> {
+        val byHour = todayTrendRaw(accountId).associate { it.hour to it }
         return (0 until 24).map { h ->
             val r = byHour[h]
             HourStat(
@@ -181,9 +209,9 @@ abstract class UsageDao {
         }
     }
 
-    /** Per-model aggregation — mirrors db.model_stats. */
-    suspend fun modelStats(period: String): List<ModelStat> {
-        val (where, args) = periodWhere(period)
+    /** Per-model aggregation — mirrors db.model_stats (按账号). */
+    suspend fun modelStats(period: String, accountId: Int): List<ModelStat> {
+        val (where, args) = buildWhere(period, accountId)
         val rows = modelStatsRaw(
             SimpleSQLiteQuery(
                 """
@@ -235,15 +263,15 @@ abstract class UsageDao {
         "CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id " +
             "WHEN key_id IS NOT NULL AND key_id != '' THEN key_id ELSE '' END"
 
-    /** Session aggregation with paging — mirrors db.session_stats_page. */
-    suspend fun sessionStatsPage(page: Int, pageSize: Int, days: Int?): Pair<List<SessionStat>, Int> {
-        val whereParts = mutableListOf<String>()
-        val params = mutableListOf<Any>()
+    /** Session aggregation with paging — mirrors db.session_stats_page (按账号). */
+    suspend fun sessionStatsPage(page: Int, pageSize: Int, days: Int?, accountId: Int): Pair<List<SessionStat>, Int> {
+        val whereParts = mutableListOf("account_id = ?")
+        val params = mutableListOf<Any>(accountId)
         if (days != null) {
             whereParts.add("datetime(created_at) >= datetime('now', ?)")
             params.add("-${days.coerceIn(1, 365)} days")
         }
-        val where = if (whereParts.isEmpty()) "" else "WHERE ${whereParts.joinToString(" AND ")}"
+        val where = "WHERE ${whereParts.joinToString(" AND ")}"
 
         val totalRow = totalRaw(
             SimpleSQLiteQuery(
@@ -292,10 +320,10 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun sessionStatsRaw(query: SupportSQLiteQuery): List<SessionRow>
 
-    /** Paginated usage records — mirrors db.usage_records_page. */
-    suspend fun usageRecordsPage(page: Int, pageSize: Int, model: String?, days: Int?): Pair<List<UsageRecordRow>, Int> {
-        val whereParts = mutableListOf<String>()
-        val params = mutableListOf<Any>()
+    /** Paginated usage records — mirrors db.usage_records_page (按账号). */
+    suspend fun usageRecordsPage(page: Int, pageSize: Int, model: String?, days: Int?, accountId: Int): Pair<List<UsageRecordRow>, Int> {
+        val whereParts = mutableListOf("account_id = ?")
+        val params = mutableListOf<Any>(accountId)
         if (model != null) {
             whereParts.add("model = ?")
             params.add(model)
@@ -304,7 +332,7 @@ abstract class UsageDao {
             whereParts.add("datetime(created_at) >= datetime('now', ?)")
             params.add("-${days.coerceIn(1, 365)} days")
         }
-        val where = if (whereParts.isEmpty()) "" else "WHERE ${whereParts.joinToString(" AND ")}"
+        val where = "WHERE ${whereParts.joinToString(" AND ")}"
 
         val totalRow = totalRaw(
             SimpleSQLiteQuery("SELECT COUNT(*) AS count FROM usage_records $where", params.toTypedArray())
@@ -345,11 +373,14 @@ abstract class UsageDao {
     @RawQuery
     abstract suspend fun totalRaw(query: SupportSQLiteQuery): CountRow
 
-    @Query("SELECT DISTINCT model FROM usage_records ORDER BY model")
-    abstract suspend fun listModels(): List<String>
+    @Query("SELECT DISTINCT model FROM usage_records WHERE account_id = :accountId ORDER BY model")
+    abstract suspend fun listModels(accountId: Int): List<String>
 
-    @Query("SELECT COUNT(*) AS count, MIN(created_at) AS oldest, MAX(created_at) AS newest FROM usage_records")
-    abstract suspend fun recordBounds(): BoundsRow
+    @Query(
+        "SELECT COUNT(*) AS count, MIN(created_at) AS oldest, MAX(created_at) AS newest" +
+            " FROM usage_records WHERE account_id = :accountId"
+    )
+    abstract suspend fun recordBounds(accountId: Int): BoundsRow
 
     // ------------------------------------------------------------------
     // Row projections
