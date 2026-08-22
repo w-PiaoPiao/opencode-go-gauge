@@ -20,7 +20,11 @@
     <button class="pill small" id="tb-theme" title="切换主题">◐ <span data-i18n="themeDark">暗色</span></button>
     <button class="pill small refresh" id="tb-refresh" title="刷新">⟳ <span data-i18n="refresh">刷新</span></button>
     <span class="chip num" id="tb-updated">—</span>
-    <span class="chip" id="tb-login">—</span>
+    <div class="user-switch">
+      <button class="chip user-chip" id="tb-login" data-i18n-title="userSwitchTip">—</button>
+      <span class="chip num user-count" id="tb-user-count" hidden title="已登录用户数">0</span>
+      <div class="user-menu" id="user-menu" hidden></div>
+    </div>
     <span class="tb-sep"></span>
     <button class="tb-btn" id="tb-min" title="Minimize"><svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg></button>
     <button class="tb-btn tb-close" id="tb-close" title="Close"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6"/></svg></button>
@@ -121,11 +125,9 @@
       <div class="ph"><h2 class="ph-title" data-i18n="settingsTitle">设置</h2></div>
 
       <div class="card set">
-        <div class="card-h"><h3 data-i18n="setAccount">OpenCode 账户</h3></div>
-        <div class="set-row"><div><div class="sl" data-i18n="setLoginState">登录状态</div><div class="sd" id="set-login-state">—</div></div><span class="badge" id="set-login-badge">—</span></div>
-        <div class="set-row"><div><div class="sl" data-i18n="setWorkspace">工作区</div><div class="sd" id="set-workspace">—</div></div><div></div></div>
-        <div class="set-row"><div><div class="sl" data-i18n="setLoginMethod">登录方式</div><div class="sd" data-i18n="loginMethodDesc">内置浏览器 (WebView2) 打开官方授权页，自动回填</div></div><button class="btn" id="btn-relogin" data-i18n="relogin">重新登录</button></div>
-        <div class="set-row"><div><div class="sl" data-i18n="setLogout">退出登录</div><div class="sd" data-i18n="logoutDesc">清除本地 token 与缓存数据</div></div><button class="btn danger" id="btn-logout" data-i18n="logout">退出登录</button></div>
+        <div class="card-h"><h3 data-i18n="setAccount">OpenCode 账户</h3><button class="btn" id="btn-add-user" data-i18n="addUser">添加用户</button></div>
+        <div id="users-list" class="users-list"></div>
+        <div class="set-row"><div><div class="sl" data-i18n="setLoginMethod">登录方式</div><div class="sd" data-i18n="loginMethodDesc">内置浏览器 (WebView2) 打开官方授权页，自动回填</div></div><div></div></div>
       </div>
 
       <div class="card set">
