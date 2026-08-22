@@ -678,10 +678,10 @@ class WindowApi:
     def set_login_callback(self, cb) -> None:
         self._on_open_login = cb
 
-    def open_login(self) -> bool:
-        """前端"立即登录"点击: 弹出独立登录窗口."""
+    def open_login(self, mode: str = "relogin") -> bool:
+        """前端登录入口: 弹出独立登录窗口. mode: "add"=添加新用户 / "relogin"=重登当前用户."""
         if self._on_open_login:
-            self._on_open_login()
+            self._on_open_login(mode if mode in ("add", "relogin") else "relogin")
         return True
 
     def minimize(self) -> bool:
@@ -837,11 +837,42 @@ def main() -> None:
         login_win_ref["win"] = w
         return w
 
-    def on_login_success(auth_cookie: str, workspace_hint: str) -> None:
-        """登录成功: 保存 token → 隐藏登录窗口 → 主窗口进入面板 → 首次全量同步."""
-        _mlog(f"on_login_success: ws={workspace_hint}")
+    def _bind_login_close_cleanup(win) -> None:
+        """登录窗被手动关闭时: 停掉其监听线程并清理引用 (仅当引用仍指向该窗口).
+
+        修复: 关闭登录窗后旧 Watcher 残留, 再次点击"添加账号/重新登录"被单飞守卫
+        静默拦截导致弹不出窗口.
+        """
+        def _on_closed() -> None:
+            w = watcher.get("ref")
+            if isinstance(w, LoginWatcher) and getattr(w, "win", None) is win:
+                w.stop()
+                watcher["ref"] = None
+                _mlog("  login window closed -> watcher cleaned")
+
         try:
-            db.save_token(auth_cookie, workspace_hint)
+            win.events.closed += _on_closed
+        except Exception as exc:  # noqa: BLE001
+            _mlog(f"  bind login closed event error: {exc}")
+
+    _bind_login_close_cleanup(login_win_ref["win"])
+
+    # 登录模式: open_login(mode) 记录意图, on_login_success 按模式落库
+    pending_mode = {"mode": "relogin"}
+
+    def on_login_success(auth_cookie: str, workspace_hint: str) -> None:
+        """登录成功: 按模式保存 → 隐藏登录窗口 → 主窗口进入面板 → 全量同步.
+
+        - add: 新建账号 (同 token 自动去重为既有账号) 并切换为活跃
+        - relogin: 更新当前活跃账号凭证
+        """
+        mode = pending_mode.get("mode", "relogin")
+        _mlog(f"on_login_success: ws={workspace_hint} mode={mode}")
+        try:
+            if mode == "add":
+                db.add_account(auth_cookie, workspace_hint, switch=True)
+            else:
+                db.save_token(auth_cookie, workspace_hint)
             _mlog("  token saved")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  save_token ERROR: {exc}")
@@ -855,6 +886,15 @@ def main() -> None:
             _mlog("  dashboard load_url called")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  load_url ERROR: {exc}")
+        # 同 URL 的 load_url 可能被 WebView 跳过 (不重载): 显式通知前端就地刷新,
+        # 否则停留在设置页时看不到新增账号 (需手动切页才会拉取)
+        try:
+            main_win.evaluate_js(
+                "window.gousageOnLoginSuccess && window.gousageOnLoginSuccess();"
+            )
+            _mlog("  evaluate_js gousageOnLoginSuccess sent")
+        except Exception as exc:  # noqa: BLE001
+            _mlog(f"  evaluate_js ERROR: {exc}")
         server.sync_all_async("full")
 
     def _start_watcher(lw) -> None:
@@ -879,11 +919,29 @@ def main() -> None:
         # 兜底: shown 事件在打包环境可能不触发, 3s 后无条件启动监听
         threading.Timer(3.0, w.start).start()
 
-    def open_login() -> None:
+    def _login_win_alive() -> bool:
+        try:
+            return login_win() in webview.windows
+        except Exception:  # noqa: BLE001
+            return False
+
+    def open_login(mode: str = "relogin") -> None:
         """弹出独立登录窗口并开始监听 (欢迎页/设置页按钮). 单飞守卫: 已有登录流程时忽略."""
+        # 登录窗已被手动关闭 => 旧监听已失效: 先停旧线程再重建窗口.
+        # (修复: 依赖"线程存活"的单飞守卫会把死窗口场景永久拦截, 导致再次点击无响应)
+        if not _login_win_alive():
+            w = watcher.get("ref")
+            if isinstance(w, LoginWatcher):
+                w.stop()
+            watcher["ref"] = None
+            _mlog("[main] login window gone -> recreate")
+            pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
+            _recreate_login_window()
+            return
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher) and w._thread and w._thread.is_alive() and not w.done:
-            return  # 已有登录监听进行中
+            return  # 已有登录监听进行中 (窗口存活)
+        pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
         lw = login_win()
         try:
             lw.show()
@@ -912,6 +970,7 @@ def main() -> None:
             background_color="#f7f6f4",
         )
         login_win_ref["win"] = new_win
+        _bind_login_close_cleanup(new_win)
         _start_watcher(new_win)
 
     api.set_login_callback(open_login)

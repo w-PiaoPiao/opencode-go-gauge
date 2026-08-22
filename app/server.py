@@ -51,9 +51,10 @@ _sync_state: dict[str, Any] = {
     "inserted": 0,
     "phase": "idle",  # idle | quota | usage | done | error
     "message": "",
+    "account": "",  # 当前正在同步的账号名 (多账号顺序轮询)
 }
-_quota_cache: dict[str, Any] = {"at": 0.0, "data": None}
-_quota_refreshing = False  # 防重入: 同一时刻只允许一个 quota 刷新线程
+_quota_cache: dict[int, dict[str, Any]] = {}  # {account_id: {"at": float, "data": ...}}
+_quota_refreshing: set[int] = set()  # 防重入: 同一账号同一时刻只允许一个 quota 刷新线程
 _exchange_cache: dict[str, Any] = {"at": 0.0, "usd_cny": 7.2}
 _EXCHANGE_TTL = 6 * 3600  # 汇率缓存 6 小时
 _DEFAULT_USD_CNY = 7.2
@@ -97,40 +98,44 @@ def _set_phase(phase: str, message: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_quota_with_cache(token: str, workspace_hint: str) -> dict[str, Any]:
+def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str) -> dict[str, Any]:
+    slot = _quota_cache.setdefault(account_id, {"at": 0.0, "data": None})
     now = time.time()
-    if _quota_cache["data"] and now - _quota_cache["at"] < QUOTA_CACHE_TTL:
-        return _quota_cache["data"]
+    if slot["data"] and now - slot["at"] < QUOTA_CACHE_TTL:
+        return slot["data"]
     result = fetch_quota(token, workspace_hint)
-    _quota_cache["at"] = now
-    _quota_cache["data"] = result.to_dict()
-    return _quota_cache["data"]
+    slot["at"] = now
+    slot["data"] = result.to_dict()
+    return slot["data"]
 
 
-def _ensure_quota_async() -> None:
-    """若配额缓存过期, 在后台线程刷新 (不阻塞 dashboard 响应, 防重入)."""
-    global _quota_refreshing
-    now = time.time()
-    if _quota_cache["data"] and now - _quota_cache["at"] < QUOTA_CACHE_TTL:
+def _ensure_quota_async(account_id: Optional[int] = None) -> None:
+    """若该账号配额缓存过期, 在后台线程刷新 (不阻塞 dashboard 响应, 防重入)."""
+    aid = account_id or db.get_active_account_id()
+    if not aid:
         return
-    if _quota_refreshing:
-        return  # 已有刷新线程在跑
-    token = db.get_token()
+    slot = _quota_cache.get(aid)
+    now = time.time()
+    if slot and slot["data"] and now - slot["at"] < QUOTA_CACHE_TTL:
+        return
+    if aid in _quota_refreshing:
+        return  # 该账号已有刷新线程在跑
+    token = db.get_token() if aid == db.get_active_account_id() else ""
     if not token:
         return
     workspace_hint = db.get_workspace_hint()
-    _quota_refreshing = True
+    _quota_refreshing.add(aid)
 
     def worker() -> None:
-        global _quota_refreshing
         try:
-            # 失败也写入缓存 (None), 60 秒内不再重试, 避免前端无限刷新
-            _fetch_quota_with_cache(token, workspace_hint)
+            # 失败也写入缓存 (None), TTL 内不再重试, 避免前端无限刷新
+            _fetch_quota_with_cache(aid, token, workspace_hint)
         except Exception:  # noqa: BLE001
-            _quota_cache["at"] = time.time()
-            _quota_cache["data"] = None
+            _quota_cache.setdefault(aid, {"at": 0.0, "data": None})
+            _quota_cache[aid]["at"] = time.time()
+            _quota_cache[aid]["data"] = None
         finally:
-            _quota_refreshing = False
+            _quota_refreshing.discard(aid)
 
     threading.Thread(target=worker, daemon=True, name="gousage-quota").start()
 
@@ -154,34 +159,32 @@ def _fetch_usage_batch(
     return results
 
 
-def sync_usage(mode: str = "incremental") -> dict[str, Any]:
-    """同步用量记录: full=首次全量拉取; incremental=增量 (只拉最新几页).
-
-    按设置中的同步范围 (window_days) 拉取与裁剪:
-    - window_days=None ("所有"): 拉取至空页 (受 MAX_FULL_PAGES 保险上限)
-    - window_days=N: 首次拉取至页内最早记录早于窗口边界; 同步后裁剪过期记录
-    """
-    token = db.get_token()
-    if not token:
+def _sync_one_account(
+    account_id: int, name: str, mode: str, window_days: Optional[int]
+) -> dict[str, Any]:
+    """同步单个账号的用量记录 (原单账号逻辑, 显式传入账号上下文)."""
+    token = db.get_db().execute(
+        "SELECT token, workspace_id, resolved_workspace_id FROM accounts WHERE id = ?",
+        (account_id,),
+    ).fetchone()
+    if token is None or not token["token"].strip():
         return {"ok": False, "error": "未登录"}
-    workspace_id = db.get_workspace_hint()
-    window_days = db.get_settings().get("window_days")
+    token_str = token["token"].strip()
+    workspace_id = token["resolved_workspace_id"] or token["workspace_id"] or "Default"
 
     with _sync_lock:
-        if _sync_state["running"]:
-            return {"ok": False, "error": "已有同步任务进行中"}
-        _sync_state.update(running=True, mode=mode, page=0, inserted=0, phase="usage", message="")
+        _sync_state.update(account=name)
 
     try:
         # 确保工作区 ID 已解析
         try:
-            resolved = resolve_workspace_id(workspace_id, token)
+            resolved = resolve_workspace_id(workspace_id, token_str)
             if not workspace_id.startswith("wrk_"):
                 workspace_id = resolved
-                db.save_resolved_workspace(resolved)
+                db.save_resolved_workspace(resolved, account_id)
         except (AuthError, OpenCodeAPIError) as exc:
-            _set_phase("error", f"工作区解析失败: {exc}")
-            db.update_sync_state("error", str(exc))
+            _set_phase("error", f"[{name}] 工作区解析失败: {exc}")
+            db.update_sync_state("error", str(exc), 0, account_id)
             return {"ok": False, "error": str(exc)}
 
         total_inserted = 0
@@ -195,7 +198,7 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
             batch_pages = list(range(page, min(page + FETCH_BATCH, max_pages)))
             with _sync_lock:
                 _sync_state["page"] = page
-            results = _fetch_usage_batch(token, workspace_id, batch_pages)
+            results = _fetch_usage_batch(token_str, workspace_id, batch_pages)
 
             batch_inserted = 0
             batch_full_pages = 0
@@ -219,7 +222,9 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
                                 window_boundary_reached = True
                         except (ValueError, TypeError):
                             pass
-                inserted = db.insert_usage_records([r.to_db_dict() for r in result])
+                inserted = db.insert_usage_records(
+                    [r.to_db_dict() for r in result], account_id
+                )
                 total_inserted += inserted
                 batch_inserted += inserted
                 if len(result) >= PAGE_SIZE:
@@ -235,8 +240,8 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
                 failed_pages += batch_failed
                 if mode == "incremental":
                     msg = "网络请求失败 (IncompleteRead/超时)"
-                    _set_phase("error", f"第 {page - FETCH_BATCH + 1} 页拉取失败: {msg}")
-                    db.update_sync_state("error", msg, total_inserted)
+                    _set_phase("error", f"[{name}] 第 {page - FETCH_BATCH + 1} 页拉取失败: {msg}")
+                    db.update_sync_state("error", msg, total_inserted, account_id)
                     return {"ok": False, "error": msg, "partial_inserted": total_inserted}
 
             # 本批没有任何满页 → 到底了
@@ -252,25 +257,78 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
 
         # 按同步范围裁剪窗口外记录 (与本次新增数独立)
         if window_days is not None:
-            db.prune_old_records(window_days)
+            db.prune_old_records(window_days, account_id)
 
-        # 顺带刷新 key 显示名称缓存 (供会话/记录页展示 key 名称, 失败不影响同步结果)
+        # 顺带刷新该账号的 key 显示名称缓存 (合并写入: key_id 全局唯一,
+        # 多账号各补各的条目; 单账号失败不影响已有缓存)
         try:
-            db.save_key_names(fetch_key_names(token, workspace_id))
+            fresh_keys = fetch_key_names(token_str, workspace_id)
+            merged = dict(db.get_key_names())
+            merged.update(fresh_keys)
+            db.save_key_names(merged)
         except Exception:  # noqa: BLE001
             pass
 
         if failed_pages:
             msg = f"完成, 但 {failed_pages} 页拉取失败 (数据不完整, 可再次全量同步补全)"
-            db.update_sync_state("partial", msg, total_inserted)
-            _set_phase("done", msg)
+            db.update_sync_state("partial", msg, total_inserted, account_id)
             return {"ok": True, "partial": True, "failed_pages": failed_pages,
                     "inserted": total_inserted, "pages": page}
-        db.update_sync_state("ok", None, total_inserted)
-        _set_phase("done", f"同步完成, 新增 {total_inserted} 条")
+        db.update_sync_state("ok", None, total_inserted, account_id)
         return {"ok": True, "inserted": total_inserted, "pages": page}
     except Exception as exc:  # noqa: BLE001
-        db.update_sync_state("error", str(exc))
+        db.update_sync_state("error", str(exc), 0, account_id)
+        return {"ok": False, "error": str(exc)}
+
+
+def sync_usage(mode: str = "incremental") -> dict[str, Any]:
+    """同步用量记录.
+
+    - incremental: 顺序轮询所有已登录账号 (各账号独立游标/状态)
+    - full: 仅对当前活跃账号全量拉取
+    进度快照在原有字段上追加 account (当前正在同步的账号名), 前端兼容旧字段.
+    """
+    window_days = db.get_settings().get("window_days")
+
+    if mode == "full":
+        aid = db.get_active_account_id()
+        targets = [(aid, db.get_account().get("name") or f"#{aid}")] if aid and db.get_token() else []
+    else:
+        targets = [
+            (a["id"], a["name"]) for a in db.list_accounts() if a["has_token"]
+        ]
+    if not targets:
+        return {"ok": False, "error": "未登录"}
+
+    with _sync_lock:
+        if _sync_state["running"]:
+            return {"ok": False, "error": "已有同步任务进行中"}
+        _sync_state.update(running=True, mode=mode, page=0, inserted=0, phase="usage", message="")
+
+    try:
+        total_inserted = 0
+        any_error = ""
+        partial = False
+        pages = 0
+        for aid, name in targets:
+            result = _sync_one_account(aid, name, mode, window_days)
+            total_inserted += int(result.get("inserted") or 0)
+            pages += int(result.get("pages") or 0)
+            if not result.get("ok"):
+                any_error = result.get("error") or "同步失败"
+                if mode == "incremental":
+                    _set_phase("error", f"[{name}] {any_error}")
+                    return {"ok": False, "error": any_error, "partial_inserted": total_inserted}
+            if result.get("partial"):
+                partial = True
+
+        if partial or (mode != "incremental" and any_error):
+            msg = "部分账号同步异常" if any_error else "完成, 但部分页面拉取失败"
+            _set_phase("done", msg)
+            return {"ok": True, "partial": True, "inserted": total_inserted, "pages": pages}
+        _set_phase("done", f"同步完成, 新增 {total_inserted} 条")
+        return {"ok": True, "inserted": total_inserted, "pages": pages}
+    except Exception as exc:  # noqa: BLE001
         _set_phase("error", str(exc))
         return {"ok": False, "error": str(exc)}
     finally:
@@ -295,7 +353,7 @@ def sync_all_async(mode: str) -> None:
 # HTTP 服务
 # ---------------------------------------------------------------------------
 
-_on_open_login: Optional[Callable[[], None]] = None
+_on_open_login: Optional[Callable[[str], None]] = None
 _server: Optional[ThreadingHTTPServer] = None
 
 # 半自动更新下载状态机: idle -> checking -> downloading -> done/no_update/no_asset/error
@@ -316,10 +374,19 @@ def _update_download_worker() -> None:
         _update_download.update({"state": "error", "error": str(exc)[:300]})
 
 
-def set_login_callback(callback: Callable[[], None]) -> None:
-    """由 main.py 注册: 前端请求重新登录时触发窗口跳转."""
+def set_login_callback(callback: Callable[[str], None]) -> None:
+    """由 main.py 注册: 前端请求登录时触发窗口跳转.
+
+    回调契约: callback(mode), mode 为 "add" (添加新用户) 或 "relogin" (重新登录当前用户).
+    """
     global _on_open_login
     _on_open_login = callback
+
+
+def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
+    """读取并解析 JSON 请求体, 失败抛 ValueError."""
+    length = int(handler.headers.get("Content-Length") or 0)
+    return json.loads(handler.rfile.read(length).decode("utf-8", errors="replace"))
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
@@ -383,8 +450,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         _json_response(
             handler,
             {
-                "logged_in": account.get("has_token", False),
+                "logged_in": bool(db.count_logged_in_accounts()),
                 "account": account,
+                "accounts": db.list_accounts(),
+                "accounts_total": db.count_accounts(),
+                "accounts_logged_in": db.count_logged_in_accounts(),
                 "sync": sync,
                 "progress": _sync_progress_snapshot(),
                 "datadir": db.data_dir(),
@@ -397,8 +467,12 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         if mode not in ("incremental", "full"):
             _json_response(handler, {"ok": False, "error": "invalid mode"}, 400)
             return
-        token = db.get_token()
-        if not token:
+        # incremental 轮询所有已登录账号; full 仅作用于活跃账号 (需其 token)
+        if mode == "incremental":
+            if not db.count_logged_in_accounts():
+                _json_response(handler, {"ok": False, "error": "未登录"}, 401)
+                return
+        elif not db.get_token():
             _json_response(handler, {"ok": False, "error": "未登录"}, 401)
             return
         sync_all_async(mode)
@@ -417,13 +491,20 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         else:
             period, days = "30d", 30
         token = db.get_token()
-        # quota 使用缓存, 过期时后台刷新, 不阻塞 dashboard 响应
-        _ensure_quota_async()
-        quota = _quota_cache["data"] if token else None
+        # quota 使用缓存 (按账号分槽), 过期时后台刷新, 不阻塞 dashboard 响应
+        active_id = db.get_active_account_id()
+        _ensure_quota_async(active_id)
+        slot = _quota_cache.get(active_id) or {}
+        quota = slot.get("data") if token else None
+        account = db.get_account()
         _json_response(
             handler,
             {
                 "logged_in": bool(token),
+                "account": account,
+                "account_name": account.get("name", ""),
+                "accounts_total": db.count_accounts(),
+                "accounts_logged_in": db.count_logged_in_accounts(),
                 "quota": quota,
                 "totals": db.totals(period),
                 "today": db.totals("today"),
@@ -446,10 +527,85 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         return
 
     if route == "/api/relogin" and method == "POST":
-        db.clear_account()
         if _on_open_login:
-            _on_open_login()
+            _on_open_login("relogin")
         _json_response(handler, {"ok": True})
+        return
+
+    # ---------------- 多账号管理 ----------------
+
+    if route == "/api/accounts" and method == "GET":
+        _json_response(
+            handler,
+            {
+                "ok": True,
+                "accounts": db.list_accounts(),
+                "active_id": db.get_active_account_id(),
+            },
+        )
+        return
+
+    if route.startswith("/api/accounts/") and method == "POST":
+        try:
+            body = _read_json_body(handler)
+            if not isinstance(body, dict):
+                raise ValueError
+        except Exception:  # noqa: BLE001
+            _json_response(handler, {"ok": False, "error": "无效请求体"}, 400)
+            return
+        action = route[len("/api/accounts/"):]
+
+        if action == "switch":
+            try:
+                aid = int(body.get("id"))
+            except (TypeError, ValueError):
+                aid = 0
+            row = db.get_db().execute(
+                "SELECT TRIM(token) AS t FROM accounts WHERE id = ?", (aid,)
+            ).fetchone() if aid else None
+            if row is None:
+                _json_response(handler, {"ok": False, "error": "账号不存在"}, 404)
+                return
+            if not row["t"]:
+                _json_response(handler, {"ok": False, "error": "该账号未登录"}, 400)
+                return
+            db.set_active_account(aid)
+            _json_response(handler, {"ok": True, "active_id": aid})
+            return
+
+        if action == "rename":
+            try:
+                aid = int(body.get("id"))
+            except (TypeError, ValueError):
+                aid = 0
+            if not db.rename_account(aid, str(body.get("name") or "")):
+                _json_response(handler, {"ok": False, "error": "重命名失败 (账号不存在或名称为空)"}, 400)
+                return
+            _json_response(handler, {"ok": True})
+            return
+
+        if action == "delete":
+            try:
+                aid = int(body.get("id"))
+            except (TypeError, ValueError):
+                aid = 0
+            remaining = db.delete_account(aid) if aid else -1
+            if remaining < 0:
+                _json_response(handler, {"ok": False, "error": "无效账号 id"}, 400)
+                return
+            _quota_cache.pop(aid, None)  # 清理该账号的配额缓存槽
+            _json_response(handler, {"ok": True, "remaining": remaining})
+            return
+
+        if action == "add":
+            # 触发登录窗口 (add 模式); 无窗口环境 (纯浏览器/冒烟) 时返回未打开状态
+            opened = bool(_on_open_login)
+            if opened:
+                _on_open_login("add")
+            _json_response(handler, {"ok": True, "opened": opened})
+            return
+
+        _json_response(handler, {"ok": False, "error": "未知操作"}, 404)
         return
 
     if route == "/api/usage/records" and method == "GET":
