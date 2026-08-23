@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- GoGauge: gauge dial + needle -->
+    <path
+        android:pathData="M54,40 m-20,0 a20,20 0 1 1 40,0 a20,20 0 1 1 -40,0"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,40 L70,24"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,40 L54,27"
+        android:strokeColor="#A78BFA"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,58 m-11,0 a11,11 0 1 1 22,0 a11,11 0 1 1 -22,0"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M54,58 m-5,0 a5,5 0 1 1 10,0 a5,5 0 1 1 -10,0"
+        android:fillColor="#7C5CF6" />
+</vector>
