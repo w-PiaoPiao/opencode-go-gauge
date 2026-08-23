@@ -12,6 +12,18 @@
   <a href="./README_en.md">🌐 English</a>
 </p>
 
+> 🔀 本仓库 fork 自 [yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge)，
+> 在原 Windows 版基础上新增 **macOS** 与 **Android** 平台支持。
+> macOS / Android 安装包发布在本仓库 [Releases](releases)，Windows 安装包由上游仓库发布。
+
+## 🗺 平台支持
+
+| 平台 | 状态 | 安装包 | 文档 |
+|:---:|:---:|:---|:---|
+| **Windows** | ✅ 正式版 | [上游 Releases](https://github.com/yphyphyph/opencode-go-gauge/releases)：`GoGauge.exe`（单文件，无需安装） | — |
+| **macOS** | ✅ 正式版 | [本仓库 Releases](releases)：arm64 / x86_64 分包（以 Releases 页实际产物为准） | [docs/macos.md](docs/macos.md) |
+| **Android** | ✅ 正式版 | [本仓库 Releases](releases)：`GoGauge-v2.0.0-android.apk`（APK 侧载） | [android/README.md](android/README.md) |
+
 ---
 
 ## 📸 截图
@@ -37,24 +49,40 @@
 - **今日趋势**：24 小时输入 / 输出柱状图
 - **用量统计**：Token 构成（输入 / 输出 / 推理 / 缓存读 / 缓存写 / 会话）、模型用量环形图 + 排行、费用/请求/总 TOKEN 三线趋势
 - **会话历史**：按会话聚合请求数 / 输入 / 输出 / 推理 / 总 Token / 成本，分页浏览
-- **使用记录**：请求级明细分页浏览，支持模型筛选
+- **使用记录**：请求级明细分页浏览，支持模型筛选，含模型 / Key 名称列
+- **多账号支持**：用户管理（添加 / 切换 / 重命名 / 删除 / 重新登录），用量按账号隔离，记录与会话表显示 Key 名称列
 - **内置 WebView 登录**：独立登录窗口打开官方授权页，自动回填 cookie 与工作区，无需手动复制
 - **自动同步**：增量同步（1/5/15/30 分钟可选）+ 同步范围设置（30/60/90/180 天 / 所有）
 - **双主题**：亮色 / 深色一键切换；中英双语界面
-- **系统托盘**：关闭窗口最小化到托盘；应用图标使用品牌 Logo
+- **系统托盘 / 菜单栏**：Windows 关闭窗口最小化到托盘，macOS 关闭窗口最小化到菜单栏；应用图标使用品牌 Logo
+- **macOS 增强**：菜单栏今日用量快捷面板（30s 刷新）、半自动更新、开机自启 —— 详见 [docs/macos.md](docs/macos.md)
 - **本地优先**：所有数据保存在本机 SQLite，登录凭据仅用于同步官方接口
 
 ## 🖥 快速开始
 
-### 直接使用（Windows）
+### Windows
 
-下载 [Releases](../../releases) 中的 `GoGauge.exe`（单文件，无需安装）：
+从上方 [平台支持](#-平台支持) 的**上游 Releases** 下载 `GoGauge.exe`（单文件，无需安装）：
 
 1. 双击运行，欢迎页点击「立即登录」弹出官方授权窗口
 2. 完成登录后自动进入面板并同步用量数据
 3. 数据保存在 exe 同目录 `data\` 文件夹
 
 > 需要 Windows 10/11（自带 WebView2 Runtime）。关闭窗口会最小化到系统托盘。
+> Windows 安装包由上游仓库维护发布。
+
+### macOS
+
+从本仓库 [Releases](releases) 下载对应架构的安装包（arm64 / x86_64），解压后将 `GoGauge.app` 拖入「应用程序」。
+
+> 菜单栏快捷面板 / 开机自启 / 半自动更新 / Gatekeeper 放行等说明见 [docs/macos.md](docs/macos.md)。
+
+### Android
+
+从本仓库 [Releases](releases) 下载 `GoGauge-v2.0.0-android.apk`，在系统设置中允许「安装未知来源应用」后侧载安装。
+
+> Android 版为 Kotlin + Jetpack Compose 原生实现，功能与桌面版一致，
+> 构建 / 技术栈 / 与桌面版的差异详见 [android/README.md](android/README.md)。
 
 ### 源码运行
 
@@ -82,15 +110,7 @@ build.bat
 输出 `dist/GoGauge.app`（无终端窗口，含 `.icns` 图标与菜单栏托盘支持）。
 
 > 需要 macOS 11+（内置 WebKit，pywebview 使用 WKWebView）。关闭窗口会最小化到菜单栏。
->
-> **首次打开被 Gatekeeper 拦截？** 开源版未做 Apple 公证（$99/年开发者账号），
-> 在终端执行一次以下命令后正常双击打开：
->
-> ```bash
-> xattr -cr /Applications/GoGauge.app
-> ```
->
-> 当前构建为 **Apple Silicon (arm64)** 原生；Intel Mac 请用 Releases 中带 `-x86_64` 后缀的包。
+> 双架构 / 依赖锁定 / CI 自动构建等详见 [docs/macos.md](docs/macos.md)。
 
 ## 📊 数据说明
 

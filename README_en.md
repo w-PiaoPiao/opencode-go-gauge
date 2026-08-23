@@ -12,6 +12,18 @@
   <a href="./README.md">🇨🇳 中文</a>
 </p>
 
+> 🔀 This repository is a fork of [yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge),
+> adding **macOS** and **Android** support on top of the original Windows app.
+> macOS / Android packages are published in this repo's [Releases](releases); the Windows installer is published by the upstream repo.
+
+## 🗺 Platform Support
+
+| Platform | Status | Installer | Docs |
+|:---:|:---:|:---|:---|
+| **Windows** | ✅ Released | [Upstream Releases](https://github.com/yphyphyph/opencode-go-gauge/releases): `GoGauge.exe` (single file, no install) | — |
+| **macOS** | ✅ Released | [This repo's Releases](releases): arm64 / x86_64 packages (see the actual assets on the Releases page) | [docs/macos.md](docs/macos.md) |
+| **Android** | ✅ Released | [This repo's Releases](releases): `GoGauge-v2.0.0-android.apk` (APK sideload) | [android/README.md](android/README.md) |
+
 ---
 
 ## 📸 Screenshots
@@ -37,24 +49,40 @@
 - **Today's trend**: 24-hour input / output bar chart
 - **Usage stats**: token breakdown (input / output / reasoning / cache read / cache write / sessions), model usage donut + ranking, cost / requests / total tokens triple-line trend
 - **Session history**: per-session aggregation of requests / input / output / reasoning / total tokens / cost, paginated
-- **Usage records**: request-level detail with pagination and model filtering
+- **Usage records**: request-level detail with pagination and model filtering, incl. model / key-name columns
+- **Multi-account support**: user management (add / switch / rename / remove / re-login), usage isolated per account, key-name column on records & sessions
 - **Built-in WebView login**: independent login window opens the official auth page, auto-fills cookie & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)
-- **System tray**: closing the window minimizes to tray; brand logo icons
+- **System tray / menu bar**: closing the window minimizes to the system tray (Windows) or the menu bar (macOS); brand logo icons
+- **macOS extras**: menu-bar quick panel for today's usage (30s refresh), semi-automatic updates, launch-at-login — see [docs/macos.md](docs/macos.md)
 - **Local-first**: all data stays in local SQLite; credentials are only used to sync official APIs
 
 ## 🖥 Quick Start
 
-### Binary (Windows)
+### Windows
 
-Download `GoGauge.exe` from [Releases](../../releases) (single file, no install):
+Download `GoGauge.exe` (single file, no install) from the **upstream Releases** in the [platform table](#-platform-support):
 
 1. Double-click to run, click "Login Now" on the welcome page — an official auth window pops up
 2. After login, the dashboard loads and usage data syncs automatically
 3. Data is stored in the `data\` folder next to the exe
 
 > Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window minimizes to the system tray.
+> The Windows installer is maintained and published by the upstream repo.
+
+### macOS
+
+Download the package for your architecture (arm64 / x86_64) from [Releases](releases), unzip and drag `GoGauge.app` into "Applications".
+
+> See [docs/macos.md](docs/macos.md) for the menu-bar quick panel, launch-at-login, semi-automatic updates and the Gatekeeper workaround.
+
+### Android
+
+Download `GoGauge-v2.0.0-android.apk` from [Releases](releases) and allow "install unknown apps" to sideload it.
+
+> The Android app is a native Kotlin + Jetpack Compose implementation with the same features as the desktop version —
+> build, tech stack and platform differences are documented in [android/README.md](android/README.md).
 
 ### From Source
 
@@ -82,15 +110,7 @@ Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon and tray support incl
 Output: `dist/GoGauge.app` (no console window; `.icns` icon and menu-bar tray support included).
 
 > Requires macOS 11+ (built-in WebKit; pywebview uses WKWebView). Closing the window minimizes to the menu bar.
->
-> **Blocked by Gatekeeper on first launch?** The open-source build is not notarized (requires a $99/yr Apple Developer account).
-> Run this once in Terminal, then open the app normally:
->
-> ```bash
-> xattr -cr /Applications/GoGauge.app
-> ```
->
-> Current build is **Apple Silicon (arm64)** native; for Intel Macs use the `-x86_64` package from Releases.
+> Dual-arch builds, dependency locking and CI auto-build are detailed in [docs/macos.md](docs/macos.md).
 
 ## 📊 Data Notes
 
@@ -106,7 +126,7 @@ Output: `dist/GoGauge.app` (no console window; `.icns` icon and menu-bar tray su
 
 ## 🛠 Tech Stack
 
-Python · pywebview (WebView2) · SQLite · Chart.js · pystray
+Python · pywebview (WebView2 / WKWebView) · SQLite · Chart.js · pystray
 
 ## 📬 Contact
 
