@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.GoGauge" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">#F7F6F4</item>
+    </style>
+</resources>
