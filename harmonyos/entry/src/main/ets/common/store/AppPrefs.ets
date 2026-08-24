@@ -1,7 +1,7 @@
 /**
- * 本地偏好存储（preferences）—— 登录凭据/账号/设置的最小封装。
+ * 本地偏好存储（preferences）—— 登录凭据/工作区/外观设置的封装。
  * 对应: desktop 的登录凭据保存在本机; Android 的 SharedPreferences 角色。
- * 仅存 cookie 与工作区 hint, 绝不写日志、绝不上传。
+ * 仅存本地偏好, 绝不写日志、绝不上传。
  */
 import { preferences } from '@kit.ArkData'
 
@@ -12,6 +12,7 @@ export class AppPrefs {
   static readonly KEY_WORKSPACE_HINT: string = 'workspace_hint' // "wrk_xxx" | "Default"
   static readonly KEY_LANGUAGE: string = 'language'             // 'zh' | 'en'
   static readonly KEY_DARK_MODE: string = 'dark_mode'           // '0' | '1'
+  static readonly KEY_CURRENCY: string = 'currency'             // 'USD' | 'CNY'
 
   private static store: preferences.Preferences | null = null
 
@@ -72,6 +73,57 @@ export class AppPrefs {
     }
     try {
       AppPrefs.store.putSync(AppPrefs.KEY_AUTH_COOKIE, '')
+      AppPrefs.store.flush()
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 外观 / 语言 / 货币 (M4)
+  // ------------------------------------------------------------------
+
+  static getLanguage(): string {
+    if (AppPrefs.store === null) {
+      return 'zh'
+    }
+    const v = AppPrefs.store.getSync(AppPrefs.KEY_LANGUAGE, 'zh') as string
+    return v === 'en' ? 'en' : 'zh'
+  }
+
+  static setLanguage(value: string): void {
+    AppPrefs.put(AppPrefs.KEY_LANGUAGE, value === 'zh' ? 'zh' : 'en')
+  }
+
+  static isDarkMode(): boolean {
+    if (AppPrefs.store === null) {
+      return false
+    }
+    return (AppPrefs.store.getSync(AppPrefs.KEY_DARK_MODE, '0') as string) === '1'
+  }
+
+  static setDarkMode(dark: boolean): void {
+    AppPrefs.put(AppPrefs.KEY_DARK_MODE, dark ? '1' : '0')
+  }
+
+  static getCurrency(): string {
+    if (AppPrefs.store === null) {
+      return 'USD'
+    }
+    const v = AppPrefs.store.getSync(AppPrefs.KEY_CURRENCY, 'USD') as string
+    return v === 'CNY' ? 'CNY' : 'USD'
+  }
+
+  static setCurrency(value: string): void {
+    AppPrefs.put(AppPrefs.KEY_CURRENCY, value === 'CNY' ? 'CNY' : 'USD')
+  }
+
+  private static put(key: string, value: string): void {
+    if (AppPrefs.store === null) {
+      return
+    }
+    try {
+      AppPrefs.store.putSync(key, value)
       AppPrefs.store.flush()
     } catch (e) {
       // ignore
