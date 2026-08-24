@@ -5,6 +5,7 @@ import { Repo } from '../../data/repository/DashboardRepository'
 import { PageResult, SessionStat, UsageRecordRow } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
 import { ModelIcon, SectionCard } from '../components/Cards'
+import { I18n } from '../../common/i18n/I18n'
 
 const PAGE_SIZE = 20
 
@@ -56,13 +57,13 @@ export struct RecordsPage {
   build() {
     Column() {
       Row({ space: 10 }) {
-        this.tabPill('sessions', '会话')
-        this.tabPill('records', '使用记录')
+        this.tabPill('sessions', I18n.t('tab_sessions'))
+        this.tabPill('records', I18n.t('tab_records'))
         Blank()
         if (this.tab === 'records') {
           Select(this.modelOptions())
             .selected(this.selectedIndex())
-            .value(this.selModel.length === 0 ? '全部模型' : this.selModel)
+            .value(this.selModel.length === 0 ? I18n.t('all_models') : this.selModel)
             .onSelect((idx: number) => {
               const m = idx < 1 ? '' : this.models[idx - 1]
               this.selModel = m
@@ -127,7 +128,7 @@ export struct RecordsPage {
                 .fontWeight(FontWeight.Medium)
                 .fontColor('#222222')
                 .maxLines(1)
-              Text(`${Fmt.int(s.requestCount)} 请求 · ${Fmt.dateTimeShort(s.lastAt)}`)
+              Text(`${Fmt.int(s.requestCount)} ${I18n.t('req_unit')} · ${Fmt.dateTimeShort(s.lastAt)}`)
                 .fontSize(11)
                 .fontColor('#999999')
             }
@@ -183,14 +184,14 @@ export struct RecordsPage {
             }
             .width('100%')
             Row({ space: 14 }) {
-              Text(`入 ${Fmt.tokens(r.inputTokens)}`)
+              Text(`${I18n.t('in_label')} ${Fmt.tokens(r.inputTokens)}`)
                 .fontSize(11)
                 .fontColor('#888888')
-              Text(`出 ${Fmt.tokens(r.outputTokens)}`)
+              Text(`${I18n.t('out_label')} ${Fmt.tokens(r.outputTokens)}`)
                 .fontSize(11)
                 .fontColor('#888888')
               if (r.cacheReadTokens > 0) {
-                Text(`缓存 ${Fmt.tokens(r.cacheReadTokens)}`)
+                Text(`${I18n.t('cache_label')} ${Fmt.tokens(r.cacheReadTokens)}`)
                   .fontSize(11)
                   .fontColor('#888888')
               }
@@ -234,7 +235,7 @@ export struct RecordsPage {
         .enabled(page < this.totalPages(total))
         .onClick(() => { onPage(Math.min(this.totalPages(total), page + 1)) })
       Blank()
-      Text(`共 ${Fmt.int(total)} 条`)
+      Text(`${I18n.t('total_label')} ${Fmt.int(total)} ${I18n.t('items')}`)
         .fontSize(12)
         .fontColor('#999999')
     }
@@ -250,7 +251,7 @@ export struct RecordsPage {
     if (s.keyId !== null && s.keyId.length > 0) {
       return s.keyName !== null && s.keyName.length > 0 ? `Key: ${s.keyName}` : '未归属 (Key)'
     }
-    return '未归属'
+    return I18n.t('ungrouped')
   }
 
   private sessionLabel(s: SessionStat): string {

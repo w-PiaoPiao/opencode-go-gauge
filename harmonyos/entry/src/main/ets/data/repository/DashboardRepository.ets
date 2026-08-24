@@ -183,7 +183,7 @@ export class DashboardRepository {
     const parts = await Promise.all([
       this.usageDao.totals(range, aid),
       this.usageDao.totals('today', aid),
-      this.usageDao.dailyStats(60, aid),
+      this.usageDao.dailyStats(7, aid),
       this.usageDao.dailyStats(30, aid),
       this.usageDao.todayTrend(aid),
       this.usageDao.modelStats(range, aid),

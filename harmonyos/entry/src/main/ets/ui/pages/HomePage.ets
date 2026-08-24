@@ -2,6 +2,7 @@
  * 首页 —— 配额窗口 + 6 KPI + 今日 24h 趋势 (android HomeScreen / desktop home 移植)。
  */
 import { Repo } from '../../data/repository/DashboardRepository'
+import { I18n } from '../../common/i18n/I18n'
 import { DashboardData, QuotaWindow } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
 import { KpiCard, SectionCard } from '../components/Cards'
@@ -37,14 +38,14 @@ export struct HomePage {
     Scroll() {
       Column({ space: 12 }) {
         if (this.data === null) {
-          Text('数据加载中…')
+          Text(I18n.t('loading'))
             .fontSize(14)
             .fontColor('#999999')
             .padding(24)
         } else {
           this.quotaSection(this.data!.quota !== null ? this.data!.quota.windows : [])
           this.kpiSection()
-          SectionCard({ title: '今日趋势', subtitle: '24 小时' }) {
+          SectionCard({ title: I18n.t('today_trend'), subtitle: I18n.t('hours24') }) {
             BarChart24h({ hours: this.data!.todayTrend })
           }
         }
@@ -59,9 +60,9 @@ export struct HomePage {
 
   @Builder
   quotaSection(windows: QuotaWindow[]) {
-    SectionCard({ title: '配额窗口', subtitle: 'OpenCode Go' }) {
+    SectionCard({ title: I18n.t('quota_windows'), subtitle: 'OpenCode Go' }) {
       if (windows.length === 0) {
-        Text('暂无配额数据，登录后将自动同步')
+        Text(I18n.t('quota_empty'))
           .fontSize(12)
           .fontColor('#999999')
       } else {
@@ -83,12 +84,12 @@ export struct HomePage {
 
   private windowLabel(label: string): string {
     if (label.indexOf('Weekly') >= 0) {
-      return '每周'
+      return I18n.t('weekly')
     }
     if (label.indexOf('Monthly') >= 0) {
-      return '每月'
+      return I18n.t('monthly')
     }
-    return '滚动 5 小时'
+    return I18n.t('rolling5h')
   }
 
   private windowAccent(label: string): string {
@@ -102,30 +103,30 @@ export struct HomePage {
   }
 
   private resetCaption(sec: number): string {
-    return Fmt.dur(sec, '天', '时', '分', '即将重置')
+    return Fmt.dur(sec, I18n.t('d_unit'), I18n.t('h_unit'), I18n.t('m_unit'), I18n.t('soon'))
   }
 
   @Builder
   kpiSection() {
-    SectionCard({ title: '用量概览' }) {
+    SectionCard({ title: I18n.t('overview') }) {
       GridRow({ columns: { sm: 2, md: 3, lg: 6 }, gutter: 8 }) {
         GridCol() {
-          KpiCard({ label: '请求数', value: Fmt.int(this.data!.totals.requestCount) })
+          KpiCard({ label: I18n.t('requests'), value: Fmt.int(this.data!.totals.requestCount) })
         }
         GridCol() {
-          KpiCard({ label: '总 TOKEN', value: Fmt.tokens(this.data!.totals.totalTokens) })
+          KpiCard({ label: I18n.t('total_tokens'), value: Fmt.tokens(this.data!.totals.totalTokens) })
         }
         GridCol() {
-          KpiCard({ label: '输出', value: Fmt.tokens(this.data!.totals.totalOutputTokens) })
+          KpiCard({ label: I18n.t('output'), value: Fmt.tokens(this.data!.totals.totalOutputTokens) })
         }
         GridCol() {
-          KpiCard({ label: '缓存命中率', value: `${this.data!.totals.hitRate.toFixed(1)}%` })
+          KpiCard({ label: I18n.t('hit_rate'), value: `${this.data!.totals.hitRate.toFixed(1)}%` })
         }
         GridCol() {
-          KpiCard({ label: '费用', value: Fmt.money(this.data!.totals.totalCostUsd, this.currency, this.data!.usdCny) })
+          KpiCard({ label: I18n.t('cost'), value: Fmt.money(this.data!.totals.totalCostUsd, this.currency, this.data!.usdCny) })
         }
         GridCol() {
-          KpiCard({ label: '会话数', value: Fmt.int(this.data!.totals.sessionCount) })
+          KpiCard({ label: I18n.t('sessions'), value: Fmt.int(this.data!.totals.sessionCount) })
         }
       }
     }
