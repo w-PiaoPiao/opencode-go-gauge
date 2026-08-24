@@ -68,6 +68,14 @@ entry/src/main/ets/
 - [x] M5 PC/2in1 窗口策略 + 前台定时同步 + WorkScheduler 后台任务
 - [ ] M6 正式签名与上架（材料清单/CI 模板/单测已就绪; 证书签发与上架需用户 AGC 操作）
 
+## 运行验证指引 (DevEco 模拟器 / 真机, 需 GUI)
+
+- 启动 DevEco Studio 打开 `harmonyos/`, SDK Manager 下载系统镜像 (当前 `~/Library/Caches/Huawei/Emulator6.1` 为空, 需首次下载), 新建/启动 Huawei_Phone 或 2in1 模拟器
+- 运行入口: Run 'entry' → 欢迎页「立即登录」→ 授权页登录 (或先在设置页用「注入模拟数据 (调试)」按钮生成 360 条数据验证图表)
+- 截图 (上架材料): 首页/统计/记录/设置 × 亮暗主题
+- 真机: `hdc install entry/build/default/outputs/default/entry-default-signed.hap` (需签名, 见 docs/agc-release-checklist.md)
+- 单测: DevEco 运行 Test 或命令行 `./scripts/build.sh test`
+
 ## 验证记录
 
 - [x] `hvigorw assembleHap` 编译通过，产出 `entry-default-unsigned.hap`
