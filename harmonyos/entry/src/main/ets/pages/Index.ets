@@ -56,7 +56,11 @@ struct Index {
 
   private async init(): Promise<void> {
     if (!this.initialized) {
-      await AppDb.init(getContext(this))
+      const host = this.getUIContext().getHostContext()
+      if (host === undefined) {
+        return
+      }
+      await AppDb.init(host)
       this.initialized = true
       await this.refresh()
     }

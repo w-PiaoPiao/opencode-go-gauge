@@ -5,6 +5,7 @@ import { Repo } from '../../data/repository/DashboardRepository'
 import { DashboardData, ModelStat } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
 import { KpiCard, ModelIcon, SectionCard } from '../components/Cards'
+import { I18n } from '../../common/i18n/I18n'
 import { DonutChart, TrendLine, TrendPointSeries } from '../components/Charts'
 
 interface TrendAgg {
@@ -95,26 +96,26 @@ export struct StatsPage {
     Scroll() {
       Column({ space: 12 }) {
         if (this.data === null) {
-          Text('数据加载中…').fontSize(14).fontColor('#999999').padding(24)
+          Text(I18n.t('loading')).fontSize(14).fontColor('#999999').padding(24)
         } else {
-          SectionCard({ title: 'Token 构成', subtitle: '30 天' }) {
+          SectionCard({ title: I18n.t('token_composition'), subtitle: I18n.t('days30') }) {
             Row({ space: 12 }) {
               DonutChart({ percent: this.donutPercent(), centerLabel: `${Fmt.tokens(this.data!.totals.totalTokens)}` })
               Column({ space: 6 }) {
-                this.compositionRow('输入', this.data!.totals.totalInputTokens, '#3B82F6')
-                this.compositionRow('输出', this.data!.totals.totalOutputTokens, '#FFB74D')
-                this.compositionRow('推理', this.data!.totals.totalReasoningTokens, '#A78BFA')
-                this.compositionRow('缓存命中', this.data!.totals.cacheHitTokens, '#10B981')
+                this.compositionRow(I18n.t('input'), this.data!.totals.totalInputTokens, '#3B82F6')
+                this.compositionRow(I18n.t('output'), this.data!.totals.totalOutputTokens, '#FFB74D')
+                this.compositionRow(I18n.t('reasoning'), this.data!.totals.totalReasoningTokens, '#A78BFA')
+                this.compositionRow(I18n.t('cache_hit'), this.data!.totals.cacheHitTokens, '#10B981')
               }
             }
             .width('100%')
           }
 
-          SectionCard({ title: '模型用量排行', subtitle: this.sortLabel() }) {
+          SectionCard({ title: I18n.t('model_rank'), subtitle: this.sortLabel() }) {
             Row({ space: 8 }) {
-              this.sortPill('cost', '成本')
-              this.sortPill('tokens', 'TOKEN')
-              this.sortPill('output', '输出')
+              this.sortPill('cost', I18n.t('by_cost'))
+              this.sortPill('tokens', I18n.t('by_tokens'))
+              this.sortPill('output', I18n.t('by_output'))
               Blank()
             }
             .width('100%')
@@ -128,7 +129,7 @@ export struct StatsPage {
                       .fontSize(13)
                       .fontColor('#222222')
                       .maxLines(1)
-                    Text(`${Fmt.int(m.requestCount)} 请求 · 会话 ${Fmt.int(m.sessionCount)}`)
+                    Text(`${Fmt.int(m.requestCount)} ${I18n.t('req_unit')} · ${I18n.t('sessions')} ${Fmt.int(m.sessionCount)}`)
                       .fontSize(11)
                       .fontColor('#999999')
                   }
@@ -153,12 +154,12 @@ export struct StatsPage {
             }
           }
 
-          SectionCard({ title: '费用 / 请求 / TOKEN 趋势', subtitle: '30 天' }) {
+          SectionCard({ title: I18n.t('trend_title'), subtitle: I18n.t('days30') }) {
             TrendLine({ series: this.trendSeries(), chartHeight: 150 })
             Row({ space: 14 }) {
-              this.legend('#3B82F6', '费用')
-              this.legend('#10B981', '请求')
-              this.legend('#F59E0B', 'TOKEN')
+              this.legend('#3B82F6', I18n.t('cost'))
+              this.legend('#10B981', I18n.t('req_unit'))
+              this.legend('#F59E0B', I18n.t('by_tokens'))
             }
             .margin({ top: 6 })
           }
@@ -174,12 +175,12 @@ export struct StatsPage {
 
   private sortLabel(): string {
     if (this.sortBy === 'output') {
-      return '按输出'
+      return I18n.t('by_output')
     }
     if (this.sortBy === 'input') {
-      return '按输入'
+      return I18n.t('by_input')
     }
-    return '按成本'
+    return I18n.t('by_cost')
   }
 
   @Builder
