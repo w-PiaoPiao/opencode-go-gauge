@@ -185,6 +185,7 @@ export struct AppRoot {
       .padding({ left: 12, top: 10, bottom: 10 })
       .borderRadius(8)
       .backgroundColor(this.tab === key ? '#EFF4FF' : '#00000000')
+      .hoverEffect(HoverEffect.Highlight)
       .onClick(() => {
         this.selectTab(key)
       })

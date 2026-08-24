@@ -11,6 +11,10 @@
     {
       "name": "ability_desc",
       "value": "OpenCode Go 用量仪表盘"
+    },
+    {
+      "name": "sync_worker_desc",
+      "value": "后台用量同步"
     }
   ]
 }
