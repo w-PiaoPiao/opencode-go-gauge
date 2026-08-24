@@ -23,6 +23,7 @@
 | **Windows** | ✅ 正式版 | [上游 Releases](https://github.com/yphyphyph/opencode-go-gauge/releases)：`GoGauge.exe`（单文件，无需安装） | — |
 | **macOS** | ✅ 正式版 | [本仓库 Releases](releases)：arm64 / x86_64 分包（以 Releases 页实际产物为准） | [docs/macos.md](docs/macos.md) |
 | **Android** | ✅ 正式版 | [本仓库 Releases](releases)：`GoGauge-v2.0.0-android.apk`（APK 侧载） | [android/README.md](android/README.md) |
+| **HarmonyOS NEXT** | 🚧 开发中（M1 骨架与登录已提交） | HAP（构建/签名/上架见 [harmonyos/README.md](harmonyos/README.md)） | [harmonyos/README.md](harmonyos/README.md) |
 
 ---
 

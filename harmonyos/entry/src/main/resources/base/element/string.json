@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "GoGauge"
+    },
+    {
+      "name": "module_desc",
+      "value": "OpenCode Go 用量仪表盘"
+    },
+    {
+      "name": "ability_desc",
+      "value": "OpenCode Go 用量仪表盘"
+    }
+  ]
+}
