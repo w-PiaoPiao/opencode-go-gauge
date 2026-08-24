@@ -109,7 +109,10 @@ def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str) ->
 
 
 def _ensure_quota_async(account_id: Optional[int] = None) -> None:
-    """若该账号配额缓存过期, 在后台线程刷新 (不阻塞 dashboard 响应, 防重入)."""
+    """若该账号配额缓存过期, 在后台线程刷新 (不阻塞 dashboard 响应, 防重入).
+
+    支持任意账号 (非活跃账号凭证从 accounts 表直接读取, 供账户总览面板使用).
+    """
     aid = account_id or db.get_active_account_id()
     if not aid:
         return
@@ -119,10 +122,9 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
         return
     if aid in _quota_refreshing:
         return  # 该账号已有刷新线程在跑
-    token = db.get_token() if aid == db.get_active_account_id() else ""
+    token, workspace_hint = db.get_account_credentials(aid)
     if not token:
         return
-    workspace_hint = db.get_workspace_hint()
     _quota_refreshing.add(aid)
 
     def worker() -> None:
@@ -504,7 +506,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         return
 
     if route == "/api/logout" and method == "POST":
+        # 退出前记录账号 id, 退出后清理其配额缓存槽 (防止残留旧配额)
+        aid = db.get_active_account_id()
         db.clear_account()
+        if aid:
+            _quota_cache.pop(aid, None)
         _json_response(handler, {"ok": True})
         return
 
@@ -523,6 +529,45 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "ok": True,
                 "accounts": db.list_accounts(),
                 "active_id": db.get_active_account_id(),
+            },
+        )
+        return
+
+    if route == "/api/accounts/overview" and method == "GET":
+        # 账户总览面板: 仅返回已登录账号 (退出登录即移除本地数据, 未登录账号无展示意义)
+        active_id = db.get_active_account_id()
+        accounts: list[dict[str, Any]] = []
+        for acc in db.list_accounts():
+            if not acc["has_token"]:
+                continue
+            aid = acc["id"]
+            # 过期配额后台刷新 (不阻塞响应), 本次先返回缓存值
+            _ensure_quota_async(aid)
+            slot = _quota_cache.get(aid)
+            quota = slot.get("data") if slot else None
+            sync_state = db.get_sync_state(aid)
+            accounts.append(
+                {
+                    "id": aid,
+                    "name": acc["name"],
+                    "logged_in": True,
+                    "active": aid == active_id,
+                    "quota": quota,
+                    "today": db.totals("today", aid),
+                    "today_trend": db.today_trend(aid),
+                    "daily7": db.daily_stats(7, aid),
+                    "last_sync_at": sync_state.get("last_sync_at"),
+                    "last_sync_status": sync_state.get("last_sync_status"),
+                }
+            )
+        _json_response(
+            handler,
+            {
+                "ok": True,
+                "accounts": accounts,
+                "active_id": active_id,
+                "exchange_rate": {"usd_cny": _fetch_usd_cny(), "currency": "CNY"},
+                "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
         return

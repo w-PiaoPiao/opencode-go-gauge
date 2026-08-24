@@ -402,6 +402,18 @@ def get_workspace_hint() -> str:
     return row["resolved_workspace_id"] or row["workspace_id"] or "Default"
 
 
+def get_account_credentials(account_id: int) -> tuple[str, str]:
+    """读取任意账号的凭证 (token, 工作区提示); 账号不存在返回 ("", "Default")."""
+    row = get_db().execute(
+        "SELECT token, workspace_id, resolved_workspace_id FROM accounts WHERE id = ?",
+        (int(account_id),),
+    ).fetchone()
+    if row is None:
+        return "", "Default"
+    hint = row["resolved_workspace_id"] or row["workspace_id"] or "Default"
+    return (row["token"] or "").strip(), hint
+
+
 def add_account(token: str, workspace_hint: str = "", switch: bool = True) -> int:
     """添加新账号; 若已有完全相同的 token 则视为同一用户, 更新工作区提示后返回其 id."""
     conn = get_db()
@@ -614,6 +626,7 @@ _DEFAULT_SETTINGS = {
     "sync_interval_sec": 300,  # 自动增量同步间隔 (1/5/15/30 分钟)
     "window_days": 60,  # 同步范围: 30/60/90/180, None=所有
     "auto_sync": True,  # 自动增量同步开关
+    "show_accounts_panel": False,  # 账户总览面板开关 (侧边栏入口显隐)
 }
 
 
@@ -805,7 +818,7 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                         current[key] = max(1, min(int(val), 3650))
                     except (TypeError, ValueError):
                         pass
-            elif key == "auto_sync":
+            elif key in ("auto_sync", "show_accounts_panel"):
                 current[key] = bool(payload[key])
             else:
                 current[key] = payload[key]
