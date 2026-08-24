@@ -13,6 +13,7 @@ struct Index {
   @State private initialized: boolean = false
   @State private loggedIn: boolean = false
   @State private accountName: string = ''
+  private syncTimer: number = -1
 
   aboutToAppear(): void {
     this.init()
@@ -21,6 +22,35 @@ struct Index {
   onPageShow(): void {
     if (this.initialized) {
       this.refresh()
+      this.startForegroundSync()
+    }
+  }
+
+  onPageHide(): void {
+    this.stopForegroundSync()
+  }
+
+  /** 前台定时同步 (M5): 按设置间隔 (1/5/15/30 分钟) 增量同步; 退后台即停。 */
+  private async startForegroundSync(): Promise<void> {
+    this.stopForegroundSync()
+    if (!this.loggedIn) {
+      return
+    }
+    let intervalSec = 300
+    try {
+      intervalSec = (await Repo.get().settings()).syncIntervalSec
+    } catch (e) {
+      // 默认 5 分钟
+    }
+    this.syncTimer = setInterval(() => {
+      Repo.get().syncUsage('incremental')
+    }, intervalSec * 1000)
+  }
+
+  private stopForegroundSync(): void {
+    if (this.syncTimer >= 0) {
+      clearInterval(this.syncTimer)
+      this.syncTimer = -1
     }
   }
 

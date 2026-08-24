@@ -30,6 +30,15 @@
           }
         ]
       }
+    ],
+    "extensionAbilities": [
+      {
+        "name": "SyncWorkerAbility",
+        "srcEntry": "./ets/entryability/SyncWorkerAbility.ets",
+        "description": "$string:sync_worker_desc",
+        "type": "workScheduler",
+        "exported": false
+      }
     ]
   }
 }

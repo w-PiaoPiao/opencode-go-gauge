@@ -11,6 +11,10 @@
     {
       "name": "ability_desc",
       "value": "OpenCode Go Usage Dashboard"
+    },
+    {
+      "name": "sync_worker_desc",
+      "value": "Background usage sync"
     }
   ]
 }
