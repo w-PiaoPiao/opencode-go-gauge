@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "GoGauge"
+    },
+    {
+      "name": "module_desc",
+      "value": "OpenCode Go Usage Dashboard"
+    },
+    {
+      "name": "ability_desc",
+      "value": "OpenCode Go Usage Dashboard"
+    }
+  ]
+}

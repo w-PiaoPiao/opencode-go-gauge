@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# GoGauge HarmonyOS 工程构建入口（本机 DevEco 已安装时的快捷脚本）。
+# 可配置: HVIGOR 环境变量指向 hvigorw, 或修改下方 DEVECO_HOME。
+DEVECO_HOME="${DEVECO_HOME:-/Applications/DevEco-Studio.app}"
+HVIGOR="$DEVECO_HOME/Contents/tools/hvigor/bin/hvigorw"
+if [ -f "$HVIGOR" ]; then
+  exec "$HVIGOR" "$@"
+else
+  echo "Error: DevEco Studio not found at $DEVECO_HOME"
+  exit 1
+fi
