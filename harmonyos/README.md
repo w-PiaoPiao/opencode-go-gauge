@@ -66,8 +66,10 @@ entry/src/main/ets/
 - [x] M3 主界面（首页/统计/记录 + ArkUI 原生图表 + 一多自适应主壳）
 - [x] M4 设置/多账号/双主题/中英 i18n
 - [x] M5 PC/2in1 窗口策略 + 前台定时同步 + WorkScheduler 后台任务
-- [ ] M6 单测移植、签名与上架 CI（AppGallery 材料清单已先行产出: docs/agc-release-checklist.md）
+- [ ] M6 正式签名与上架（材料清单/CI 模板/单测已就绪; 证书签发与上架需用户 AGC 操作）
 
 ## 验证记录
 
-- [x] `hvigorw assembleHap` 编译通过，产出 `entry-default-unsigned.hap`（运行时验证需 DevEco 模拟器 / 真机）
+- [x] `hvigorw assembleHap` 编译通过，产出 `entry-default-unsigned.hap`
+- [x] `hvigorw test` 本地单元测试 **21/21 通过**（Quota/Usage 解析器、Fmt、活跃账号策略，对齐安卓用例）
+- [ ] 运行时全流程验证（DevEco 模拟器: 登录→同步→三页出数→截图，供上架材料）
