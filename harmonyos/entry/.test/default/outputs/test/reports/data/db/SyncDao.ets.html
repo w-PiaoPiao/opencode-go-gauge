@@ -1,0 +1,1129 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <!-- Import style -->
+  <link rel="stylesheet" href="../../index.css" />
+  <link rel="stylesheet" href="../../prettify.css" />
+  <!-- Import Vue 3 -->
+  <script src="../../vue.global.prod.js"></script>
+  <!-- Import component library -->
+  <script src="../../index.full.min.js"></script>
+  <script src="../../prettify.js"></script>
+  <meta charset="UTF-8">
+  <title>Coverage</title>
+</head>
+
+<body>
+  <div id="app" class="common-layout">
+    <el-container>
+      <el-header>
+        <el-row :gutter="10">
+          <el-col :span="5">
+            <el-space :size="size" spacer="">
+              <div><el-text class="mx-1 ">
+                  <el-link type="primary" :href="relativeHome">
+                    <h2>&lt;</h2>
+                  </el-link>
+                </el-text></div>
+              <div><el-text class="mx-1 "><h2>{{title}}</h2></el-text></div>
+              <div><el-text class="mx-1 "
+                  type="info"></el-text></div>
+            </el-space>
+          </el-col>
+          <el-col :span="3">
+            <el-space :size="size" spacer="">
+              <div><el-text class="mx-1 ">
+                  <h2>{{file.summary.functions.pct}}%</h2>
+                </el-text></div>
+              <div><el-text class="mx-1 ">Functions</el-text></div>
+              <div><el-text class="mx-1 "
+                  type="info">{{file.summary.functions.covered}}/{{file.summary.functions.total}}</el-text></div>
+            </el-space>
+          </el-col>
+          <el-col :span="3">
+            <el-space :size="size" spacer="">
+              <div><el-text class="mx-1 ">
+                  <h2>{{file.summary.branches.pct}}%</h2>
+                </el-text></div>
+              <div><el-text class="mx-1 ">Branches</el-text></div>
+              <div><el-text class="mx-1 "
+                  type="info">{{file.summary.branches.covered}}/{{file.summary.branches.total}}</el-text></div>
+            </el-space>
+          </el-col>
+          <el-col :span="3">
+            <el-space :size="size" spacer="">
+              <div><el-text class="mx-1 ">
+                  <h2>{{file.summary.lines.pct}}%</h2>
+                </el-text></div>
+              <div><el-text class="mx-1 ">Lines</el-text></div>
+              <div><el-text class="mx-1 "
+                  type="info">{{file.summary.lines.covered}}/{{file.summary.lines.total}}</el-text></div>
+            </el-space>
+          </el-col>
+        </el-row>
+        <el-divider />
+      </el-header>
+      <el-main>
+        <el-row>
+        </el-row>
+        <pre>
+          <table class="coverage">
+            <tr>
+              <td class="line-count quiet">
+                <pre class="prettyprint lang-js">
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+                </pre>
+        </td>
+        <td class="text">
+          <pre class="prettyprint linenums lang-js">
+/** 
+ * 账号 / 同步状态 / 活跃账号 DAO —— SyncDao.kt / ActiveAccountPolicy.kt 的 ArkTS 移植 
+ * (accounts 多行表 + usage_sync_state 按账号主键 + settings.payload.active_account_id)。 
+ */ 
+import { AppDb } from &#39;./AppDb&#39; 
+import { RowReader } from &#39;./RowReader&#39; 
+import { SettingsDao } from &#39;./SettingsDao&#39; 
+import { AccountInfo, SyncState, emptySyncState } from &#39;../../common/model/Models&#39; 
+ 
+export interface AccountRow { 
+  id: number 
+  name: string 
+  workspaceId: string 
+  resolvedWorkspaceId: string | null 
+  token: string 
+  createdAt: string 
+  updatedAt: string 
+} 
+ 
+export interface SyncStateRow { 
+  accountId: number 
+  lastSyncAt: string | null 
+  lastSyncStatus: string | null 
+  lastSyncError: string | null 
+  lastInsertedCount: number 
+  deepestPageFetched: number 
+  totalRecords: number 
+  oldestRecordAt: string | null 
+  newestRecordAt: string | null 
+} 
+ 
+function accountRowFromReader(r: RowReader): AccountRow { 
+  return { 
+    id: r.getLong(&#39;id&#39;), 
+    name: r.getStr(&#39;name&#39;), 
+    workspaceId: r.getStr(&#39;workspace_id&#39;), 
+    resolvedWorkspaceId: r.isNull(&#39;resolved_workspace_id&#39;) ? null : r.getStr(&#39;resolved_workspace_id&#39;), 
+    token: r.getStr(&#39;token&#39;), 
+    createdAt: r.getStr(&#39;created_at&#39;), 
+    updatedAt: r.getStr(&#39;updated_at&#39;), 
+  } 
+} 
+ 
+function toInfo(row: AccountRow): AccountInfo { 
+  return { 
+    id: row.id, 
+    name: row.name, 
+    workspaceId: row.workspaceId, 
+    resolvedWorkspaceId: row.resolvedWorkspaceId, 
+    hasToken: row.token.trim().length &gt; 0, 
+  } 
+} 
+ 
+export class SyncDao { 
+  private settings(): SettingsDao { 
+    return AppDb.settingsDao() 
+  } 
+ 
+  // ------------------------------------------------------------------ 
+  // 账号行 
+  // ------------------------------------------------------------------ 
+ 
+  async listAccountRows(): Promise&lt;AccountRow[]&gt; { 
+    const rs = await AppDb.store().querySql(&#39;SELECT * FROM accounts ORDER BY id ASC&#39;) 
+    const r = new RowReader(rs) 
+    const out: AccountRow[] = [] 
+    while (r.next()) { 
+      out.push(accountRowFromReader(r)) 
+    } 
+    r.close() 
+    return out 
+  } 
+ 
+  async accountRowById(id: number): Promise&lt;AccountRow | null&gt; { 
+    const rs = await AppDb.store().querySql(&#39;SELECT * FROM accounts WHERE id = ?&#39;, [id.toString()]) 
+    const r = new RowReader(rs) 
+    let out: AccountRow | null = null 
+    if (r.next()) { 
+      out = accountRowFromReader(r) 
+    } 
+    r.close() 
+    return out 
+  } 
+ 
+  private async scalarInt(sql: string, args: Array&lt;string&gt; = []): Promise&lt;number&gt; { 
+    const rs = await AppDb.store().querySql(sql, args) 
+    const r = new RowReader(rs) 
+    let v = 0 
+    if (r.next()) { 
+      v = r.getLongAt(0) 
+    } 
+    r.close() 
+    return v 
+  } 
+ 
+  async minLoggedInId(): Promise&lt;number&gt; { 
+    return (await this.scalarInt(&#39;SELECT MIN(id) FROM accounts WHERE TRIM(token) != \&#39;\&#39;&#39;)) 
+  } 
+ 
+  async minAnyId(): Promise&lt;number&gt; { 
+    return (await this.scalarInt(&#39;SELECT MIN(id) FROM accounts&#39;)) 
+  } 
+ 
+  async countAccounts(): Promise&lt;number&gt; { 
+    return this.scalarInt(&#39;SELECT COUNT(*) FROM accounts&#39;) 
+  } 
+ 
+  async countLoggedInAccounts(): Promise&lt;number&gt; { 
+    return this.scalarInt(&#39;SELECT COUNT(*) FROM accounts WHERE TRIM(token) != \&#39;\&#39;&#39;) 
+  } 
+ 
+  /** desktop add_account 显式取 MAX(id)+1 作主键 (保持 id 连续)。 */ 
+  async nextAccountId(): Promise&lt;number&gt; { 
+    return (await this.scalarInt(&#39;SELECT COALESCE(MAX(id), 0) + 1 FROM accounts&#39;)) 
+  } 
+ 
+  async insertAccountRow(row: AccountRow): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      `INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`, 
+      [row.id.toString(), row.name, row.workspaceId, row.resolvedWorkspaceId, row.token, row.createdAt, row.updatedAt], 
+    ) 
+  } 
+ 
+  async updateCredential(id: number, token: string, workspaceId: string, updatedAt: string): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      &#39;UPDATE accounts SET token = ?, workspace_id = ?, resolved_workspace_id = NULL, updated_at = ? WHERE id = ?&#39;, 
+      [token, workspaceId, updatedAt, id.toString()], 
+    ) 
+  } 
+ 
+  async updateWorkspaceHint(id: number, workspaceId: string, updatedAt: string): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      &#39;UPDATE accounts SET workspace_id = ?, updated_at = ? WHERE id = ?&#39;, 
+      [workspaceId, updatedAt, id.toString()], 
+    ) 
+  } 
+ 
+  async saveResolvedWorkspace(id: number, workspaceId: string, updatedAt: string): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      &#39;UPDATE accounts SET resolved_workspace_id = ?, updated_at = ? WHERE id = ?&#39;, 
+      [workspaceId, updatedAt, id.toString()], 
+    ) 
+  } 
+ 
+  async renameAccountRow(id: number, name: string, updatedAt: string): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      &#39;UPDATE accounts SET name = ?, updated_at = ? WHERE id = ?&#39;, 
+      [name, updatedAt, id.toString()], 
+    ) 
+  } 
+ 
+  async clearToken(id: number, updatedAt: string): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      &#39;UPDATE accounts SET token = \&#39;\&#39;, resolved_workspace_id = NULL, updated_at = ? WHERE id = ?&#39;, 
+      [updatedAt, id.toString()], 
+    ) 
+  } 
+ 
+  async deleteAccountRow(id: number): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql(&#39;DELETE FROM accounts WHERE id = ?&#39;, [id.toString()]) 
+  } 
+ 
+  // ------------------------------------------------------------------ 
+  // 活跃账号 (ActiveAccountPolicy 移植) 
+  // ------------------------------------------------------------------ 
+ 
+  private static resolveActive( 
+    storedActiveId: number | null, accounts: Array&lt;[number, boolean]&gt;, 
+  ): number { 
+    let loggedMin = 0 
+    for (const a of accounts) { 
+      if (a[1] &amp;&amp; (loggedMin === 0 || a[0] &lt; loggedMin)) { 
+        loggedMin = a[0] 
+      } 
+    } 
+    if (storedActiveId !== null &amp;&amp; storedActiveId &gt; 0) { 
+      let row: [number, boolean] | null = null 
+      for (const a of accounts) { 
+        if (a[0] === storedActiveId) { 
+          row = a 
+          break 
+        } 
+      } 
+      if (row !== null) { 
+        if (row[1]) { 
+          return storedActiveId 
+        } 
+        if (loggedMin !== 0) { 
+          return loggedMin // 活跃行未登录但有其他已登录账号 -&gt; 让位 
+        } 
+        return storedActiveId // 全部未登录: 维持原选择 
+      } 
+    } 
+    if (loggedMin !== 0) { 
+      return loggedMin 
+    } 
+    let fallback = 0 
+    for (const a of accounts) { 
+      if (fallback === 0 || a[0] &lt; fallback) { 
+        fallback = a[0] 
+      } 
+    } 
+    return fallback 
+  } 
+ 
+  async getActiveAccountId(): Promise&lt;number&gt; { 
+    const rows = await this.listAccountRows() 
+    const stored = await this.settings().readActiveAccountId() 
+    const resolved = SyncDao.resolveActive( 
+      stored, 
+      rows.map((row) =&gt; [row.id, row.token.trim().length &gt; 0] as [number, boolean]), 
+    ) 
+    if (rows.length &gt; 0 &amp;&amp; resolved !== (stored !== null ? stored : 0)) { 
+      if (resolved &gt; 0) { 
+        await this.settings().writeActiveAccountId(resolved) 
+      } else { 
+        await this.settings().removeActiveAccountId() 
+      } 
+    } 
+    return resolved 
+  } 
+ 
+  async setActiveAccount(accountId: number): Promise&lt;boolean&gt; { 
+    const row = await this.accountRowById(accountId) 
+    if (row === null) { 
+      return false 
+    } 
+    await this.settings().writeActiveAccountId(accountId) 
+    return true 
+  } 
+ 
+  // ------------------------------------------------------------------ 
+  // 账号摘要 / CRUD 
+  // ------------------------------------------------------------------ 
+ 
+  async getAccount(): Promise&lt;AccountInfo | null&gt; { 
+    const aid = await this.getActiveAccountId() 
+    if (aid === 0) { 
+      return null 
+    } 
+    const row = await this.accountRowById(aid) 
+    return row === null ? null : toInfo(row) 
+  } 
+ 
+  async listAccounts(): Promise&lt;AccountInfo[]&gt; { 
+    const rows = await this.listAccountRows() 
+    return rows.map((row) =&gt; toInfo(row)) 
+  } 
+ 
+  /** 添加新账号; 相同 token 视为同一用户, 更新工作区提示后返回其 id。 */ 
+  async addAccount(token: string, workspaceHint: string, switchNow: boolean = true): Promise&lt;number&gt; { 
+    const trimmed = token.trim() 
+    const hint = workspaceHint.trim() 
+    const now = new Date().toISOString() 
+    if (trimmed.length &gt; 0) { 
+      const rows = await this.listAccountRows() 
+      for (const existing of rows) { 
+        if (existing.token.trim() === trimmed) { 
+          if (hint.length &gt; 0) { 
+            await this.updateWorkspaceHint(existing.id, hint, now) 
+          } 
+          if (switchNow) { 
+            await this.settings().writeActiveAccountId(existing.id) 
+          } 
+          return existing.id 
+        } 
+      } 
+    } 
+    const newId = await this.nextAccountId() 
+    await this.insertAccountRow({ 
+      id: newId, 
+      name: hint.slice(0, 50).length &gt; 0 ? hint.slice(0, 50) : `User ${newId}`, 
+      workspaceId: hint.length &gt; 0 ? hint : &#39;Default&#39;, 
+      resolvedWorkspaceId: null, 
+      token: trimmed, 
+      createdAt: now, 
+      updatedAt: now, 
+    }) 
+    await this.ensureStateRow(newId) 
+    if (switchNow) { 
+      await this.settings().writeActiveAccountId(newId) 
+    } 
+    return newId 
+  } 
+ 
+  async renameAccount(accountId: number, name: string): Promise&lt;boolean&gt; { 
+    const cleaned = name.trim().slice(0, 50) 
+    if (cleaned.length === 0) { 
+      return false 
+    } 
+    await this.renameAccountRow(accountId, cleaned, new Date().toISOString()) 
+    return true 
+  } 
+ 
+  /** 删除账号及其本地全部数据 (级联), 返回剩余账号数。 */ 
+  async deleteAccount(accountId: number): Promise&lt;number&gt; { 
+    await AppDb.store().executeSql(&#39;DELETE FROM usage_records WHERE account_id = ?&#39;, [accountId.toString()]) 
+    await AppDb.store().executeSql(&#39;DELETE FROM usage_sync_state WHERE account_id = ?&#39;, [accountId.toString()]) 
+    await this.deleteAccountRow(accountId) 
+    const remaining = await this.countAccounts() 
+    const stored = await this.settings().readActiveAccountId() 
+    if (stored === accountId) { 
+      const nxt = await this.minAnyId() 
+      if (nxt !== 0) { 
+        await this.settings().writeActiveAccountId(nxt) 
+      } else { 
+        await this.settings().removeActiveAccountId() 
+      } 
+    } 
+    return remaining 
+  } 
+ 
+  /** 退出登录当前活跃账号: 清凭证与本地缓存数据 (保留账号行)。 */ 
+  async clearAccount(): Promise&lt;void&gt; { 
+    const aid = await this.getActiveAccountId() 
+    if (aid === 0) { 
+      return 
+    } 
+    await AppDb.store().executeSql(&#39;DELETE FROM usage_records WHERE account_id = ?&#39;, [aid.toString()]) 
+    await this.clearToken(aid, new Date().toISOString()) 
+    await this.ensureStateRow(aid) 
+    await this.resetSyncStateForAccount(aid) 
+  } 
+ 
+  /** 重新登录语义: 更新活跃账号凭证并重置其增量游标。 */ 
+  async saveToken(token: string, workspaceId: string): Promise&lt;void&gt; { 
+    const aid = await this.getActiveAccountId() 
+    if (aid === 0) { 
+      return 
+    } 
+    await this.updateCredential(aid, token.trim(), workspaceId.trim().length &gt; 0 ? workspaceId.trim() : &#39;Default&#39;, 
+      new Date().toISOString()) 
+    await this.ensureStateRow(aid) 
+    await this.resetCursorForAccount(aid) 
+  } 
+ 
+  // ------------------------------------------------------------------ 
+  // 同步状态 
+  // ------------------------------------------------------------------ 
+ 
+  async ensureStateRow(accountId: number): Promise&lt;void&gt; { 
+    const rs = await AppDb.store().querySql( 
+      &#39;SELECT account_id FROM usage_sync_state WHERE account_id = ?&#39;, [accountId.toString()], 
+    ) 
+    const r = new RowReader(rs) 
+    const exists = r.next() 
+    r.close() 
+    if (!exists) { 
+      await AppDb.store().executeSql( 
+        &#39;INSERT INTO usage_sync_state (account_id, deepest_page_fetched) VALUES (?, -1)&#39;, [accountId.toString()], 
+      ) 
+    } 
+  } 
+ 
+  async bumpSyncState(accountId: number, status: string, error: string | null, inserted: number, at: string): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      `UPDATE usage_sync_state 
+       SET last_sync_at = ?, last_sync_status = ?, last_sync_error = ?, last_inserted_count = last_inserted_count + ? 
+       WHERE account_id = ?`, 
+      [at, status, error, inserted.toString(), accountId.toString()], 
+    ) 
+  } 
+ 
+  async resetSyncStateForAccount(accountId: number): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      `UPDATE usage_sync_state 
+       SET last_sync_status = NULL, last_sync_error = NULL, last_inserted_count = 0, 
+           deepest_page_fetched = -1, total_records = 0, oldest_record_at = NULL, newest_record_at = NULL 
+       WHERE account_id = ?`, 
+      [accountId.toString()], 
+    ) 
+  } 
+ 
+  async resetCursorForAccount(accountId: number): Promise&lt;void&gt; { 
+    await AppDb.store().executeSql( 
+      &#39;UPDATE usage_sync_state SET deepest_page_fetched = -1 WHERE account_id = ?&#39;, [accountId.toString()], 
+    ) 
+  } 
+ 
+  private async recordBounds(accountId: number): Promise&lt;[number, string | null, string | null]&gt; { 
+    const rs = await AppDb.store().querySql( 
+      `SELECT COUNT(*) AS count, MIN(created_at) AS oldest, MAX(created_at) AS newest 
+       FROM usage_records WHERE account_id = ?`, [accountId.toString()], 
+    ) 
+    const r = new RowReader(rs) 
+    let out: [number, string | null, string | null] = [0, null, null] 
+    if (r.next()) { 
+      out = [ 
+        r.getLong(&#39;count&#39;), 
+        r.isNull(&#39;oldest&#39;) ? null : r.getStr(&#39;oldest&#39;), 
+        r.isNull(&#39;newest&#39;) ? null : r.getStr(&#39;newest&#39;), 
+      ] 
+    } 
+    r.close() 
+    return out 
+  } 
+ 
+  /** 持久化同步结果并刷新 totals —— db.update_sync_state + _refresh_sync_totals。 */ 
+  async updateSyncStateAndTotals(accountId: number, status: string, error: string | null, inserted: number): Promise&lt;void&gt; { 
+    await this.ensureStateRow(accountId) 
+    await this.bumpSyncState(accountId, status, error, inserted, new Date().toISOString()) 
+    const b = await this.recordBounds(accountId) 
+    await AppDb.store().executeSql( 
+      &#39;UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?, newest_record_at = ? WHERE account_id = ?&#39;, 
+      [b[0].toString(), b[1], b[2], accountId.toString()], 
+    ) 
+  } 
+ 
+  async getSyncStateFor(accountId: number): Promise&lt;SyncState&gt; { 
+    const rs = await AppDb.store().querySql( 
+      &#39;SELECT * FROM usage_sync_state WHERE account_id = ?&#39;, [accountId.toString()], 
+    ) 
+    const r = new RowReader(rs) 
+    let out: SyncState = emptySyncState() 
+    if (r.next()) { 
+      out = { 
+        lastSyncAt: r.isNull(&#39;last_sync_at&#39;) ? null : r.getStr(&#39;last_sync_at&#39;), 
+        lastSyncStatus: r.isNull(&#39;last_sync_status&#39;) ? null : r.getStr(&#39;last_sync_status&#39;), 
+        lastSyncError: r.isNull(&#39;last_sync_error&#39;) ? null : r.getStr(&#39;last_sync_error&#39;), 
+        lastInsertedCount: r.getLong(&#39;last_inserted_count&#39;), 
+        deepestPageFetched: r.getLong(&#39;deepest_page_fetched&#39;), 
+        totalRecords: r.getLong(&#39;total_records&#39;), 
+        oldestRecordAt: r.isNull(&#39;oldest_record_at&#39;) ? null : r.getStr(&#39;oldest_record_at&#39;), 
+        newestRecordAt: r.isNull(&#39;newest_record_at&#39;) ? null : r.getStr(&#39;newest_record_at&#39;), 
+      } 
+    } 
+    r.close() 
+    return out 
+  } 
+ 
+  async getSyncState(): Promise&lt;SyncState&gt; { 
+    return this.getSyncStateFor(await this.getActiveAccountId()) 
+  } 
+ 
+  async getTokenFor(accountId: number): Promise&lt;string&gt; { 
+    const row = await this.accountRowById(accountId) 
+    return row === null ? &#39;&#39; : row.token.trim() 
+  } 
+ 
+  async getWorkspaceHintFor(accountId: number): Promise&lt;string&gt; { 
+    const row = await this.accountRowById(accountId) 
+    if (row === null) { 
+      return &#39;Default&#39; 
+    } 
+    if (row.resolvedWorkspaceId !== null &amp;&amp; row.resolvedWorkspaceId.length &gt; 0) { 
+      return row.resolvedWorkspaceId 
+    } 
+    return row.workspaceId.length &gt; 0 ? row.workspaceId : &#39;Default&#39; 
+  } 
+}
+              </pre>
+        </td>
+        </tr>
+        </table>
+        </pre>
+      </el-main>
+      <el-footer align="middle" class="footer">
+        Code coverage generated by <el-link href="https://github.com/SMAT-Lab/bjc" type="primary"
+          target="_blank">bjc</el-link> at {{date}}
+      </el-footer>
+    </el-container>
+  </div>
+</body>
+
+<script>
+  const App = {
+    data() {
+      return {"date":"Mon Aug 24 2026 23:12:08 GMT+0800 (中国标准时间)","file":{"version":"bjc v1.0.0","versionCode":10000,"path":"/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/entry/src/main/ets/data/db/SyncDao.ets","hash":"89a9013483693df93ac5f4ab029902da9bcc7971f6ae88e8940d078f39bcd2ba","lineCnt":451,"count":0,"projectPath":"/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos","functions":[{"name":"accountRowFromReader","count":0,"regions":[{"startLoc":{"line":32,"col":1},"endLoc":{"line":42,"col":2},"count":0,"ignored":0},{"startLoc":{"line":33,"col":3},"endLoc":{"line":42,"col":2},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":37,"col":26},"endLoc":{"line":37,"col":102},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":0},{"name":"toInfo","count":0,"regions":[{"startLoc":{"line":44,"col":1},"endLoc":{"line":52,"col":2},"count":0,"ignored":0},{"startLoc":{"line":45,"col":3},"endLoc":{"line":52,"col":2},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":1},{"name":"SyncDao.settings","count":0,"regions":[{"startLoc":{"line":55,"col":3},"endLoc":{"line":57,"col":4},"count":0,"ignored":0},{"startLoc":{"line":56,"col":5},"endLoc":{"line":57,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":2},{"name":"SyncDao.listAccountRows","count":0,"regions":[{"startLoc":{"line":63,"col":3},"endLoc":{"line":72,"col":4},"count":0,"ignored":0},{"startLoc":{"line":67,"col":5},"endLoc":{"line":69,"col":6},"count":0,"ignored":0},{"startLoc":{"line":70,"col":5},"endLoc":{"line":72,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":3},{"name":"SyncDao.accountRowById","count":0,"regions":[{"startLoc":{"line":74,"col":3},"endLoc":{"line":83,"col":4},"count":0,"ignored":0},{"startLoc":{"line":78,"col":19},"endLoc":{"line":80,"col":6},"count":0,"ignored":0},{"startLoc":{"line":81,"col":5},"endLoc":{"line":83,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":78,"col":9},"endLoc":{"line":78,"col":17},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":4},{"name":"SyncDao.scalarInt","count":0,"regions":[{"startLoc":{"line":85,"col":3},"endLoc":{"line":94,"col":4},"count":0,"ignored":0},{"startLoc":{"line":89,"col":19},"endLoc":{"line":91,"col":6},"count":0,"ignored":0},{"startLoc":{"line":92,"col":5},"endLoc":{"line":94,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":89,"col":9},"endLoc":{"line":89,"col":17},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":5},{"name":"SyncDao.minLoggedInId","count":0,"regions":[{"startLoc":{"line":96,"col":3},"endLoc":{"line":98,"col":4},"count":0,"ignored":0},{"startLoc":{"line":97,"col":5},"endLoc":{"line":98,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":6},{"name":"SyncDao.minAnyId","count":0,"regions":[{"startLoc":{"line":100,"col":3},"endLoc":{"line":102,"col":4},"count":0,"ignored":0},{"startLoc":{"line":101,"col":5},"endLoc":{"line":102,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":7},{"name":"SyncDao.countAccounts","count":0,"regions":[{"startLoc":{"line":104,"col":3},"endLoc":{"line":106,"col":4},"count":0,"ignored":0},{"startLoc":{"line":105,"col":5},"endLoc":{"line":106,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":8},{"name":"SyncDao.countLoggedInAccounts","count":0,"regions":[{"startLoc":{"line":108,"col":3},"endLoc":{"line":110,"col":4},"count":0,"ignored":0},{"startLoc":{"line":109,"col":5},"endLoc":{"line":110,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":9},{"name":"SyncDao.nextAccountId","count":0,"regions":[{"startLoc":{"line":113,"col":3},"endLoc":{"line":115,"col":4},"count":0,"ignored":0},{"startLoc":{"line":114,"col":5},"endLoc":{"line":115,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":10},{"name":"SyncDao.insertAccountRow","count":0,"regions":[{"startLoc":{"line":117,"col":3},"endLoc":{"line":123,"col":4},"count":0,"ignored":0},{"startLoc":{"line":118,"col":5},"endLoc":{"line":123,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":11},{"name":"SyncDao.updateCredential","count":0,"regions":[{"startLoc":{"line":125,"col":3},"endLoc":{"line":130,"col":4},"count":0,"ignored":0},{"startLoc":{"line":126,"col":5},"endLoc":{"line":130,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":12},{"name":"SyncDao.updateWorkspaceHint","count":0,"regions":[{"startLoc":{"line":132,"col":3},"endLoc":{"line":137,"col":4},"count":0,"ignored":0},{"startLoc":{"line":133,"col":5},"endLoc":{"line":137,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":13},{"name":"SyncDao.saveResolvedWorkspace","count":0,"regions":[{"startLoc":{"line":139,"col":3},"endLoc":{"line":144,"col":4},"count":0,"ignored":0},{"startLoc":{"line":140,"col":5},"endLoc":{"line":144,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":14},{"name":"SyncDao.renameAccountRow","count":0,"regions":[{"startLoc":{"line":146,"col":3},"endLoc":{"line":151,"col":4},"count":0,"ignored":0},{"startLoc":{"line":147,"col":5},"endLoc":{"line":151,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":15},{"name":"SyncDao.clearToken","count":0,"regions":[{"startLoc":{"line":153,"col":3},"endLoc":{"line":158,"col":4},"count":0,"ignored":0},{"startLoc":{"line":154,"col":5},"endLoc":{"line":158,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":16},{"name":"SyncDao.deleteAccountRow","count":0,"regions":[{"startLoc":{"line":160,"col":3},"endLoc":{"line":162,"col":4},"count":0,"ignored":0},{"startLoc":{"line":161,"col":5},"endLoc":{"line":162,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":17},{"name":"SyncDao.resolveActive","count":0,"regions":[{"startLoc":{"line":168,"col":3},"endLoc":{"line":205,"col":4},"count":0,"ignored":0},{"startLoc":{"line":177,"col":56},"endLoc":{"line":194,"col":6},"count":0,"ignored":0},{"startLoc":{"line":185,"col":25},"endLoc":{"line":193,"col":8},"count":0,"ignored":0},{"startLoc":{"line":179,"col":7},"endLoc":{"line":184,"col":8},"count":0,"ignored":0},{"startLoc":{"line":172,"col":5},"endLoc":{"line":176,"col":6},"count":0,"ignored":0},{"startLoc":{"line":199,"col":5},"endLoc":{"line":203,"col":6},"count":0,"ignored":0},{"startLoc":{"line":180,"col":38},"endLoc":{"line":183,"col":10},"count":0,"ignored":0},{"startLoc":{"line":173,"col":58},"endLoc":{"line":175,"col":8},"count":0,"ignored":0},{"startLoc":{"line":186,"col":21},"endLoc":{"line":188,"col":10},"count":0,"ignored":0},{"startLoc":{"line":189,"col":30},"endLoc":{"line":191,"col":10},"count":0,"ignored":0},{"startLoc":{"line":195,"col":26},"endLoc":{"line":197,"col":6},"count":0,"ignored":0},{"startLoc":{"line":200,"col":46},"endLoc":{"line":202,"col":8},"count":0,"ignored":0},{"startLoc":{"line":204,"col":5},"endLoc":{"line":205,"col":4},"count":0,"ignored":0},{"startLoc":{"line":192,"col":9},"endLoc":{"line":193,"col":8},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":173,"col":11},"endLoc":{"line":173,"col":56},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":177,"col":9},"endLoc":{"line":177,"col":54},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":180,"col":13},"endLoc":{"line":180,"col":36},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":185,"col":11},"endLoc":{"line":185,"col":23},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":186,"col":13},"endLoc":{"line":186,"col":19},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":189,"col":13},"endLoc":{"line":189,"col":28},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":195,"col":9},"endLoc":{"line":195,"col":24},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":200,"col":11},"endLoc":{"line":200,"col":44},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":18},{"name":"SyncDao.getActiveAccountId","count":0,"regions":[{"startLoc":{"line":207,"col":3},"endLoc":{"line":222,"col":4},"count":0,"ignored":0},{"startLoc":{"line":214,"col":73},"endLoc":{"line":220,"col":6},"count":0,"ignored":0},{"startLoc":{"line":215,"col":25},"endLoc":{"line":217,"col":8},"count":0,"ignored":0},{"startLoc":{"line":217,"col":14},"endLoc":{"line":219,"col":8},"count":0,"ignored":0},{"startLoc":{"line":221,"col":5},"endLoc":{"line":222,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":214,"col":9},"endLoc":{"line":214,"col":71},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":214,"col":42},"endLoc":{"line":214,"col":70},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":215,"col":11},"endLoc":{"line":215,"col":23},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":19},{"name":"anonymous_0","count":0,"regions":[{"startLoc":{"line":212,"col":16},"endLoc":{"line":212,"col":83},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":20},{"name":"SyncDao.setActiveAccount","count":0,"regions":[{"startLoc":{"line":224,"col":3},"endLoc":{"line":231,"col":4},"count":0,"ignored":0},{"startLoc":{"line":226,"col":23},"endLoc":{"line":228,"col":6},"count":0,"ignored":0},{"startLoc":{"line":229,"col":5},"endLoc":{"line":231,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":226,"col":9},"endLoc":{"line":226,"col":21},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":21},{"name":"SyncDao.getAccount","count":0,"regions":[{"startLoc":{"line":237,"col":3},"endLoc":{"line":244,"col":4},"count":0,"ignored":0},{"startLoc":{"line":239,"col":20},"endLoc":{"line":241,"col":6},"count":0,"ignored":0},{"startLoc":{"line":242,"col":5},"endLoc":{"line":244,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":239,"col":9},"endLoc":{"line":239,"col":18},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":243,"col":12},"endLoc":{"line":243,"col":45},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":22},{"name":"SyncDao.listAccounts","count":0,"regions":[{"startLoc":{"line":246,"col":3},"endLoc":{"line":249,"col":4},"count":0,"ignored":0},{"startLoc":{"line":247,"col":5},"endLoc":{"line":249,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":23},{"name":"anonymous_1","count":0,"regions":[{"startLoc":{"line":248,"col":21},"endLoc":{"line":248,"col":41},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":24},{"name":"SyncDao.addAccount","count":0,"regions":[{"startLoc":{"line":252,"col":3},"endLoc":{"line":285,"col":4},"count":0,"ignored":0},{"startLoc":{"line":256,"col":29},"endLoc":{"line":269,"col":6},"count":0,"ignored":0},{"startLoc":{"line":258,"col":7},"endLoc":{"line":268,"col":8},"count":0,"ignored":0},{"startLoc":{"line":259,"col":48},"endLoc":{"line":267,"col":10},"count":0,"ignored":0},{"startLoc":{"line":260,"col":32},"endLoc":{"line":262,"col":12},"count":0,"ignored":0},{"startLoc":{"line":263,"col":26},"endLoc":{"line":265,"col":12},"count":0,"ignored":0},{"startLoc":{"line":281,"col":20},"endLoc":{"line":283,"col":6},"count":0,"ignored":0},{"startLoc":{"line":284,"col":5},"endLoc":{"line":285,"col":4},"count":0,"ignored":0},{"startLoc":{"line":266,"col":11},"endLoc":{"line":267,"col":10},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":256,"col":9},"endLoc":{"line":256,"col":27},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":259,"col":13},"endLoc":{"line":259,"col":46},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":260,"col":15},"endLoc":{"line":260,"col":30},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":263,"col":15},"endLoc":{"line":263,"col":24},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":273,"col":13},"endLoc":{"line":273,"col":79},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":274,"col":20},"endLoc":{"line":274,"col":54},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":281,"col":9},"endLoc":{"line":281,"col":18},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":25},{"name":"SyncDao.renameAccount","count":0,"regions":[{"startLoc":{"line":287,"col":3},"endLoc":{"line":294,"col":4},"count":0,"ignored":0},{"startLoc":{"line":289,"col":31},"endLoc":{"line":291,"col":6},"count":0,"ignored":0},{"startLoc":{"line":292,"col":5},"endLoc":{"line":294,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":289,"col":9},"endLoc":{"line":289,"col":29},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":26},{"name":"SyncDao.deleteAccount","count":0,"regions":[{"startLoc":{"line":297,"col":3},"endLoc":{"line":312,"col":4},"count":0,"ignored":0},{"startLoc":{"line":303,"col":31},"endLoc":{"line":310,"col":6},"count":0,"ignored":0},{"startLoc":{"line":305,"col":22},"endLoc":{"line":307,"col":8},"count":0,"ignored":0},{"startLoc":{"line":307,"col":14},"endLoc":{"line":309,"col":8},"count":0,"ignored":0},{"startLoc":{"line":311,"col":5},"endLoc":{"line":312,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":303,"col":9},"endLoc":{"line":303,"col":29},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":305,"col":11},"endLoc":{"line":305,"col":20},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":27},{"name":"SyncDao.clearAccount","count":0,"regions":[{"startLoc":{"line":315,"col":3},"endLoc":{"line":324,"col":4},"count":0,"ignored":0},{"startLoc":{"line":320,"col":5},"endLoc":{"line":324,"col":4},"count":0,"ignored":0},{"startLoc":{"line":317,"col":20},"endLoc":{"line":319,"col":6},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":317,"col":9},"endLoc":{"line":317,"col":18},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":28},{"name":"SyncDao.saveToken","count":0,"regions":[{"startLoc":{"line":327,"col":3},"endLoc":{"line":336,"col":4},"count":0,"ignored":0},{"startLoc":{"line":332,"col":5},"endLoc":{"line":336,"col":4},"count":0,"ignored":0},{"startLoc":{"line":329,"col":20},"endLoc":{"line":331,"col":6},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":329,"col":9},"endLoc":{"line":329,"col":18},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":332,"col":52},"endLoc":{"line":332,"col":114},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":29},{"name":"SyncDao.ensureStateRow","count":0,"regions":[{"startLoc":{"line":342,"col":3},"endLoc":{"line":354,"col":4},"count":0,"ignored":0},{"startLoc":{"line":349,"col":18},"endLoc":{"line":353,"col":6},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":349,"col":9},"endLoc":{"line":349,"col":16},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":30},{"name":"SyncDao.bumpSyncState","count":0,"regions":[{"startLoc":{"line":356,"col":3},"endLoc":{"line":363,"col":4},"count":0,"ignored":0},{"startLoc":{"line":357,"col":5},"endLoc":{"line":363,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":31},{"name":"SyncDao.resetSyncStateForAccount","count":0,"regions":[{"startLoc":{"line":365,"col":3},"endLoc":{"line":373,"col":4},"count":0,"ignored":0},{"startLoc":{"line":366,"col":5},"endLoc":{"line":373,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":32},{"name":"SyncDao.resetCursorForAccount","count":0,"regions":[{"startLoc":{"line":375,"col":3},"endLoc":{"line":379,"col":4},"count":0,"ignored":0},{"startLoc":{"line":376,"col":5},"endLoc":{"line":379,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":33},{"name":"SyncDao.recordBounds","count":0,"regions":[{"startLoc":{"line":381,"col":3},"endLoc":{"line":397,"col":4},"count":0,"ignored":0},{"startLoc":{"line":388,"col":19},"endLoc":{"line":394,"col":6},"count":0,"ignored":0},{"startLoc":{"line":395,"col":5},"endLoc":{"line":397,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":388,"col":9},"endLoc":{"line":388,"col":17},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":391,"col":9},"endLoc":{"line":391,"col":55},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":392,"col":9},"endLoc":{"line":392,"col":55},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":34},{"name":"SyncDao.updateSyncStateAndTotals","count":0,"regions":[{"startLoc":{"line":400,"col":3},"endLoc":{"line":408,"col":4},"count":0,"ignored":0},{"startLoc":{"line":401,"col":5},"endLoc":{"line":408,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":35},{"name":"SyncDao.getSyncStateFor","count":0,"regions":[{"startLoc":{"line":410,"col":3},"endLoc":{"line":430,"col":4},"count":0,"ignored":0},{"startLoc":{"line":416,"col":19},"endLoc":{"line":427,"col":6},"count":0,"ignored":0},{"startLoc":{"line":428,"col":5},"endLoc":{"line":430,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":416,"col":9},"endLoc":{"line":416,"col":17},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":418,"col":21},"endLoc":{"line":418,"col":79},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":419,"col":25},"endLoc":{"line":419,"col":91},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":420,"col":24},"endLoc":{"line":420,"col":88},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":424,"col":25},"endLoc":{"line":424,"col":91},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":425,"col":25},"endLoc":{"line":425,"col":91},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":36},{"name":"SyncDao.getSyncState","count":0,"regions":[{"startLoc":{"line":432,"col":3},"endLoc":{"line":434,"col":4},"count":0,"ignored":0},{"startLoc":{"line":433,"col":5},"endLoc":{"line":434,"col":4},"count":0,"ignored":0}],"branches":[],"ignored":0,"index":37},{"name":"SyncDao.getTokenFor","count":0,"regions":[{"startLoc":{"line":436,"col":3},"endLoc":{"line":439,"col":4},"count":0,"ignored":0},{"startLoc":{"line":437,"col":5},"endLoc":{"line":439,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":438,"col":12},"endLoc":{"line":438,"col":48},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":38},{"name":"SyncDao.getWorkspaceHintFor","count":0,"regions":[{"startLoc":{"line":441,"col":3},"endLoc":{"line":450,"col":4},"count":0,"ignored":0},{"startLoc":{"line":443,"col":23},"endLoc":{"line":445,"col":6},"count":0,"ignored":0},{"startLoc":{"line":446,"col":81},"endLoc":{"line":448,"col":6},"count":0,"ignored":0},{"startLoc":{"line":449,"col":5},"endLoc":{"line":450,"col":4},"count":0,"ignored":0}],"branches":[{"startLoc":{"line":443,"col":9},"endLoc":{"line":443,"col":21},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":446,"col":9},"endLoc":{"line":446,"col":79},"trueCount":0,"falseCount":0,"group":[],"ignored":0},{"startLoc":{"line":449,"col":12},"endLoc":{"line":449,"col":68},"trueCount":0,"falseCount":0,"group":[],"ignored":0}],"ignored":0,"index":39}],"exeLine":{"0":5,"1":6,"2":7,"3":8,"4":10,"5":11,"6":12,"7":13,"8":14,"9":15,"10":16,"11":17,"12":20,"13":21,"14":22,"15":23,"16":24,"17":25,"18":26,"19":27,"20":28,"21":29,"22":32,"23":33,"24":34,"25":35,"26":36,"27":37,"28":38,"29":39,"30":40,"31":44,"32":45,"33":46,"34":47,"35":48,"36":49,"37":50,"38":54,"39":55,"40":56,"41":63,"42":64,"43":65,"44":66,"45":67,"46":68,"47":70,"48":71,"49":74,"50":75,"51":76,"52":77,"53":78,"54":79,"55":81,"56":82,"57":85,"58":86,"59":87,"60":88,"61":89,"62":90,"63":92,"64":93,"65":96,"66":97,"67":100,"68":101,"69":104,"70":105,"71":108,"72":109,"73":113,"74":114,"75":117,"76":118,"77":119,"78":121,"79":125,"80":126,"81":127,"82":128,"83":132,"84":133,"85":134,"86":135,"87":139,"88":140,"89":141,"90":142,"91":146,"92":147,"93":148,"94":149,"95":153,"96":154,"97":155,"98":156,"99":160,"100":161,"101":168,"102":169,"103":170,"104":171,"105":172,"106":173,"107":174,"108":177,"109":178,"110":179,"111":180,"112":181,"113":182,"114":185,"115":186,"116":187,"117":189,"118":190,"119":192,"120":195,"121":196,"122":198,"123":199,"124":200,"125":201,"126":204,"127":207,"128":208,"129":209,"130":210,"131":211,"132":212,"133":214,"134":215,"135":216,"136":217,"137":218,"138":221,"139":224,"140":225,"141":226,"142":227,"143":229,"144":230,"145":237,"146":238,"147":239,"148":240,"149":242,"150":243,"151":246,"152":247,"153":248,"154":252,"155":253,"156":254,"157":255,"158":256,"159":257,"160":258,"161":259,"162":260,"163":261,"164":263,"165":264,"166":266,"167":270,"168":271,"169":272,"170":273,"171":274,"172":275,"173":276,"174":277,"175":278,"176":280,"177":281,"178":282,"179":284,"180":287,"181":288,"182":289,"183":290,"184":292,"185":293,"186":297,"187":298,"188":299,"189":300,"190":301,"191":302,"192":303,"193":304,"194":305,"195":306,"196":307,"197":308,"198":311,"199":315,"200":316,"201":317,"202":318,"203":320,"204":321,"205":322,"206":323,"207":327,"208":328,"209":329,"210":330,"211":332,"212":333,"213":334,"214":335,"215":342,"216":343,"217":344,"218":346,"219":347,"220":348,"221":349,"222":350,"223":351,"224":356,"225":357,"226":358,"227":361,"228":365,"229":366,"230":367,"231":371,"232":375,"233":376,"234":377,"235":381,"236":382,"237":383,"238":384,"239":386,"240":387,"241":388,"242":389,"243":390,"244":391,"245":392,"246":395,"247":396,"248":400,"249":401,"250":402,"251":403,"252":404,"253":405,"254":406,"255":410,"256":411,"257":412,"258":414,"259":415,"260":416,"261":417,"262":418,"263":419,"264":420,"265":421,"266":422,"267":423,"268":424,"269":425,"270":428,"271":429,"272":432,"273":433,"274":436,"275":437,"276":438,"277":441,"278":442,"279":443,"280":444,"281":446,"282":447,"283":449},"summary":{"lines":{"total":261,"covered":0,"pct":0,"executedLineCount":[-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,0,0,0,-1,-1,-1,0,0,0,0,0,0,0,-1,-1,-1,-1,0,0,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,-1,0,0,-1,-1,0,0,0,0,0,0,-1,0,0,-1,-1,0,0,0,0,0,0,-1,0,0,-1,-1,0,0,-1,-1,0,0,-1,-1,0,0,-1,-1,0,0,-1,-1,-1,0,0,-1,-1,0,0,0,-1,0,-1,-1,-1,0,0,0,0,-1,-1,-1,0,0,0,0,-1,-1,-1,0,0,0,0,-1,-1,-1,0,0,0,0,-1,-1,-1,0,0,0,0,-1,-1,-1,0,0,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,0,-1,-1,0,0,0,0,0,0,-1,-1,0,0,0,-1,0,0,-1,0,-1,-1,0,0,-1,0,0,0,0,-1,-1,0,-1,-1,0,0,0,0,0,0,-1,0,0,0,0,0,-1,-1,0,-1,-1,0,0,0,0,-1,0,0,-1,-1,-1,-1,-1,-1,0,0,0,0,-1,0,0,-1,-1,0,0,0,-1,-1,-1,0,0,0,0,0,0,0,0,0,0,-1,0,0,-1,0,-1,-1,-1,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0,-1,-1,0,0,0,0,-1,0,0,-1,-1,-1,0,0,0,0,0,0,0,0,0,0,0,0,-1,-1,0,-1,-1,-1,0,0,0,0,-1,0,0,0,0,-1,-1,-1,0,0,0,0,-1,0,0,0,0,-1,-1,-1,-1,-1,-1,0,0,0,-1,0,0,0,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,0,-1,-1,-1,0,0,0,-1,-1,-1,0,-1,-1,-1,0,0,0,-1,-1,-1,0,0,0,0,-1,0,0,0,0,0,0,0,-1,-1,0,0,-1,-1,-1,0,0,0,0,0,0,0,-1,-1,-1,0,0,0,-1,0,0,0,0,0,0,0,0,0,0,0,0,-1,-1,0,0,-1,-1,0,0,-1,-1,0,0,0,-1,-1,0,0,0,0,-1,0,0,-1,0,-1,-1]},"functions":{"total":40,"covered":0,"pct":0},"branches":{"total":88,"covered":0,"pct":0}}},"title":"SyncDao.ets.html","relativeHome":"../../index.html"};
+    }
+  };
+
+  const app = Vue.createApp(App);
+  app.use(ElementPlus);
+  app.mount("#app");
+
+  window.onload = function () {
+    prettyPrint();
+  }
+</script>
+
+<style scoped>
+  table.coverage {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0 0 0;
+    padding: 0;
+  }
+
+  table.coverage td {
+    margin: 0;
+    padding: 0;
+    vertical-align: top;
+  }
+
+  table.coverage td.line-count {
+    width: 12%;
+    text-align: right;
+    padding: 0 5px 0 20px;
+  }
+
+  table.coverage td.line-coverage {
+    text-align: right;
+    padding-right: 10px;
+    min-width: 20px;
+  }
+
+  table.coverage td span.cline-any {
+    display: inline-block;
+    padding: 0 5px;
+    width: 100%;
+    height: 18px;
+  }
+
+  .low,
+  .cline-no {
+    background: #FCE1E5
+  }
+
+  .high,
+  .cline-yes {
+    background: rgb(230, 245, 208)
+  }
+
+  span.cline-neutral {
+    background: #eaeaea;
+  }
+
+  pre.prettyprint {
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .el-main {
+    box-sizing: border-box;
+    display: block;
+    flex: 1;
+    flex-basis: auto;
+    overflow: auto;
+    padding: var(--el-main-padding)
+  }
+
+  .el-container {
+    min-height: 100vh;
+    height: 100%;
+  }
+
+  .footer {
+    font-size: small;
+  }
+
+  .el-row {
+    margin-bottom: 20px;
+  }
+
+  .el-row:last-child {
+    margin-bottom: 0;
+  }
+
+  .el-col {
+    border-radius: 4px;
+  }
+
+  .green {
+    color: var(--el-color-success);
+  }
+
+  .red {
+    color: var(--el-color-error);
+  }
+
+  .linenums li {
+    height: 18px;
+    line-height: 18px;
+  }
+
+  li.L0,
+  li.L1,
+  li.L2,
+  li.L3,
+  li.L5,
+  li.L6,
+  li.L7,
+  li.L8 {
+    list-style-type: decimal
+  }
+
+  .el-col-5 {
+    max-width: 100%;
+  }
+
+  .el-col-3 {
+    max-width: 100%;
+  }
+
+</style>
+
+</html>

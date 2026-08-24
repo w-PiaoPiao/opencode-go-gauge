@@ -1,0 +1,514 @@
+‘r@ü™assertions§code¥customTransformCache¨dependencies¢id§meta±moduleSideEffects¨originalCode±originalSourcemap´resolvedIdsÆsourcemapChainµsyntheticNamedExportsµtransformDependenciesÆtransformFiles®cacheAst‘rAê⁄√/*
+ * Copyright (c) 2022-2023 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import {TAG} from '../../Constant';
+import Core from '../../core.js';
+
+export default class SysTestKit {
+
+  static delegator = null;
+  static systemTime = null;
+
+  constructor() {
+    this.id = 'sysTestKit';
+    this.index = 0;
+  }
+
+  static getDescribeName() {
+    return Core.getInstance().getDefaultService('suite').getCurrentRunningSuite().description;
+  }
+
+  static getItName() {
+    return Core.getInstance().getDefaultService('spec').getCurrentRunningSpec().description;
+  }
+
+  static getItAttribute() {
+    return Core.getInstance().getDefaultService('spec').getCurrentRunningSpec().fi;
+  }
+
+  static actionStart(tag) {
+    console.info(`${TAG}${JSON.stringify(tag)}`);
+    var message = '\n' + 'OHOS_REPORT_ACTIONSTART: ' + JSON.stringify(tag) + '\n';
+    SysTestKit.print(message);
+    console.info(`${TAG}${JSON.stringify(tag)} actionStart print success`);
+  }
+
+  static actionEnd(tag) {
+    console.info(`${TAG}${JSON.stringify(tag)}`);
+    var message = '\n' + 'OHOS_REPORT_ACTIONEND: ' + JSON.stringify(tag) + '\n';
+    SysTestKit.print(message);
+    console.info(`${TAG}${JSON.stringify(tag)}  actionEnd print success`);
+  }
+
+  static async existKeyword(keyword, timeout) {
+    let reg = new RegExp(/^[a-zA-Z0-9]{1,}$/);
+    if (!reg.test(keyword)) {
+      throw new Error('keyword must contain more than one string, and only letters and numbers are supported.');
+    }
+    timeout = timeout || 4;
+
+    let searchResult = false;
+    let cmd = 'hilog -x | grep -i \'' + keyword + '\' | wc -l';
+    await executePromise(cmd, timeout).then((data) => {
+      searchResult = data;
+    });
+    return searchResult;
+  }
+  static async print(message) {
+    if ('printSync' in SysTestKit.delegator) {
+      console.debug(`${TAG}printSync called ...`);
+      SysTestKit.delegator.printSync(message);
+    } else {
+      await SysTestKit.delegator.print(message);
+    }
+  }
+
+  static async getRealTime() {
+    let currentTime = new Date().getTime();
+    if (SysTestKit.systemTime !== null && SysTestKit.systemTime !== undefined) {
+      await SysTestKit.systemTime.getRealTime().then((time) => {
+        console.info(`${TAG}systemTime.getRealTime success data: ${JSON.stringify(time)}`);
+        currentTime = time;
+      }).catch((error) => {
+        console.error(`${TAG}failed to systemTime.getRealTime because ${JSON.stringify(error)}`);
+      });
+    }
+    return currentTime;
+  }
+}
+
+function executePromise(cmd, timeout) {
+  return new Promise((resolve, reject) => {
+    SysTestKit.delegator.executeShellCommand(cmd, timeout,
+      (error, data) => {
+        console.info(`${TAG}existKeyword CallBack: err : ${JSON.stringify(error)}`);
+        console.info(`${TAG}existKeyword CallBack: data : ${JSON.stringify(data)}`);
+        resolve(parseInt(data.stdResult) > 3 ? true : false);
+      });
+  });
+}¬íŸó/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/oh_modules/.ohpm/@ohos+hypium@1.0.18/oh_modules/@ohos/hypium/src/main/Constant.jsŸì/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/oh_modules/.ohpm/@ohos+hypium@1.0.18/oh_modules/@ohos/hypium/src/main/core.jsŸ§/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/oh_modules/.ohpm/@ohos+hypium@1.0.18/oh_modules/@ohos/hypium/src/main/module/kit/SysTestKit.js‘rBò±isLocalDependencyØisNodeEntryFileßpkgPathßpkgName™pkgVersion±belongProjectPath±dependencyPkgInfo®commonjs¬¬ŸÇ/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/oh_modules/.ohpm/@ohos+hypium@1.0.18/oh_modules/@ohos/hypium¨@ohos/hypium¶1.0.18ŸE/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos‘rCíßpkgName™pkgVersion¨@ohos/hypium¶1.0.18‘rDí∞hasDefaultExport™isCommonJS√¬√⁄√/*
+ * Copyright (c) 2022-2023 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import {TAG} from '../../Constant';
+import Core from '../../core.js';
+
+export default class SysTestKit {
+
+  static delegator = null;
+  static systemTime = null;
+
+  constructor() {
+    this.id = 'sysTestKit';
+    this.index = 0;
+  }
+
+  static getDescribeName() {
+    return Core.getInstance().getDefaultService('suite').getCurrentRunningSuite().description;
+  }
+
+  static getItName() {
+    return Core.getInstance().getDefaultService('spec').getCurrentRunningSpec().description;
+  }
+
+  static getItAttribute() {
+    return Core.getInstance().getDefaultService('spec').getCurrentRunningSpec().fi;
+  }
+
+  static actionStart(tag) {
+    console.info(`${TAG}${JSON.stringify(tag)}`);
+    var message = '\n' + 'OHOS_REPORT_ACTIONSTART: ' + JSON.stringify(tag) + '\n';
+    SysTestKit.print(message);
+    console.info(`${TAG}${JSON.stringify(tag)} actionStart print success`);
+  }
+
+  static actionEnd(tag) {
+    console.info(`${TAG}${JSON.stringify(tag)}`);
+    var message = '\n' + 'OHOS_REPORT_ACTIONEND: ' + JSON.stringify(tag) + '\n';
+    SysTestKit.print(message);
+    console.info(`${TAG}${JSON.stringify(tag)}  actionEnd print success`);
+  }
+
+  static async existKeyword(keyword, timeout) {
+    let reg = new RegExp(/^[a-zA-Z0-9]{1,}$/);
+    if (!reg.test(keyword)) {
+      throw new Error('keyword must contain more than one string, and only letters and numbers are supported.');
+    }
+    timeout = timeout || 4;
+
+    let searchResult = false;
+    let cmd = 'hilog -x | grep -i \'' + keyword + '\' | wc -l';
+    await executePromise(cmd, timeout).then((data) => {
+      searchResult = data;
+    });
+    return searchResult;
+  }
+  static async print(message) {
+    if ('printSync' in SysTestKit.delegator) {
+      console.debug(`${TAG}printSync called ...`);
+      SysTestKit.delegator.printSync(message);
+    } else {
+      await SysTestKit.delegator.print(message);
+    }
+  }
+
+  static async getRealTime() {
+    let currentTime = new Date().getTime();
+    if (SysTestKit.systemTime !== null && SysTestKit.systemTime !== undefined) {
+      await SysTestKit.systemTime.getRealTime().then((time) => {
+        console.info(`${TAG}systemTime.getRealTime success data: ${JSON.stringify(time)}`);
+        currentTime = time;
+      }).catch((error) => {
+        console.error(`${TAG}failed to systemTime.getRealTime because ${JSON.stringify(error)}`);
+      });
+    }
+    return currentTime;
+  }
+}
+
+function executePromise(cmd, timeout) {
+  return new Promise((resolve, reject) => {
+    SysTestKit.delegator.executeShellCommand(cmd, timeout,
+      (error, data) => {
+        console.info(`${TAG}existKeyword CallBack: err : ${JSON.stringify(error)}`);
+        console.info(`${TAG}existKeyword CallBack: data : ${JSON.stringify(data)}`);
+        resolve(parseInt(data.stdResult) > 3 ? true : false);
+      });
+  });
+}‘rEïßversion®mappings•namesßsourcesÆsourcesContent‹ eîî    î  î  î  ‹ 4î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +î, ,î- -î. .î/ /î0 0î1 1î2 2î3 3‹ Dî   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +î, ,î- -î. .î/ /î0 0î1 1î2 2î3 3î4 4î5 5î6 6î7 7î8 8î9 9î: :î; ;î< <î= =î> >î? ?îÃ@ Ã@îÃA ÃAîÃB ÃBîÃC ÃC‹ Eî   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +î, ,î- -î. .î/ /î0 0î1 1î2 2î3 3î4 4î5 5î6 6î7 7î8 8î9 9î: :î; ;î< <î= =î> >î? ?îÃ@ Ã@îÃA ÃAîÃB ÃBîÃC ÃCîÃD ÃD‹ ,î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +îî   î î î ‹ 3î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +î, ,î- -î. .î/ /î0 0î1 1î2 2îî   î î î ‹ Hî   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +î, ,î- -î. .î/ /î0 0î1 1î2 2î3 3î4 4î5 5î6 6î7 7î8 8î9 9î: :î; ;î< <î= =î> >î? ?îÃ@ Ã@îÃA ÃAîÃB ÃBîÃC ÃCîÃD ÃDîÃE ÃEîÃF ÃFîÃG ÃG‹ Fî  	 î 	î 	î 	î 	î 	î 	î 	î 	î	 		î
+ 	
+î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î 	î  	 î! 	!î" 	"î# 	#î$ 	$î% 	%î& 	&î' 	'î( 	(î) 	)î* 	*î+ 	+î, 	,î- 	-î. 	.î/ 	/î0 	0î1 	1î2 	2î3 	3î4 	4î5 	5î6 	6î7 	7î8 	8î9 	9î: 	:î; 	;î< 	<î= 	=î> 	>î? 	?îÃ@ 	Ã@îÃA 	ÃAîÃB 	ÃBîÃC 	ÃCîÃD 	ÃDîÃE 	ÃE‹ Mî  
+ î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î	 
+	î
+ 
+
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î 
+î  
+ î! 
+!î" 
+"î# 
+#î$ 
+$î% 
+%î& 
+&î' 
+'î( 
+(î) 
+)î* 
+*î+ 
++î, 
+,î- 
+-î. 
+.î/ 
+/î0 
+0î1 
+1î2 
+2î3 
+3î4 
+4î5 
+5î6 
+6î7 
+7î8 
+8î9 
+9î: 
+:î; 
+;î< 
+<î= 
+=î> 
+>î? 
+?îÃ@ 
+Ã@îÃA 
+ÃAîÃB 
+ÃBîÃC 
+ÃCîÃD 
+ÃDîÃE 
+ÃEîÃF 
+ÃFîÃG 
+ÃGîÃH 
+ÃHîÃI 
+ÃIîÃJ 
+ÃJîÃK 
+ÃKîÃL 
+ÃL‹ Hî   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +î, ,î- -î. .î/ /î0 0î1 1î2 2î3 3î4 4î5 5î6 6î7 7î8 8î9 9î: :î; ;î< <î= =î> >î? ?îÃ@ Ã@îÃA ÃAîÃB ÃBîÃC ÃCîÃD ÃDîÃE ÃEîÃF ÃFîÃG ÃG‹ #î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "ïî   î î î î íî   î ‹ %î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $‹ #î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "íî   î ‹ #î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "íî   î ‹ î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î ‹ î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î íî   î ‹ î   î î î î î î î î î	 	î
+ 
+î î î î î î î î ‹ î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î ‹ î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î ïî   î î î î íî   î ‹ î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î ‹ `î   î î î î î î î î î	 	î
+ 
+î î î î î î î î î î î î î î î î î î î î î î   î! !î" "î# #î$ $î% %î& &î' 'î( (î) )î* *î+ +î, ,î- -î. .î/ /î0 0î1 1î2 2î3 3î4 4î5 5î6 6î7 7î8 8î9 9î: :î; ;î< <î= =î> >î? ?îÃ@ Ã@îÃA ÃAîÃB ÃBîÃC ÃCîÃD ÃDîÃE ÃEîÃF ÃFîÃG ÃGîÃH ÃHîÃI ÃIîÃJ ÃJîÃK ÃKîÃL ÃLîÃM ÃMîÃN ÃNîÃO ÃOîÃP ÃPîÃQ ÃQîÃR ÃRîÃS ÃSîÃT ÃTîÃU ÃUîÃV ÃVîÃW ÃWîÃX ÃXîÃY ÃYîÃZ ÃZîÃ[ Ã[îÃ\ Ã\îÃ] Ã]îÃ^ Ã^îÃ_ Ã_ïî   î î î î íî   î ‹ î    î  î  î  î  î  î  î  î  î	  	î
+  
+î  î  î  î  î  î  î  î  î  î  î  î  î  ‹ ^î  ! î !î !î !î !î !î !î !î !î	 !	î
+ !
+î !î !î !î !î !î !î !î !î !î !î !î !î !î !î !î !î !î !î !î !î !î  ! î! !!î" !"î# !#î$ !$î% !%î& !&î' !'î( !(î) !)î* !*î+ !+î, !,î- !-î. !.î/ !/î0 !0î1 !1î2 !2î3 !3î4 !4î5 !5î6 !6î7 !7î8 !8î9 !9î: !:î; !;î< !<î= !=î> !>î? !?îÃ@ !Ã@îÃA !ÃAîÃB !ÃBîÃC !ÃCîÃD !ÃDîÃE !ÃEîÃF !ÃFîÃG !ÃGîÃH !ÃHîÃI !ÃIîÃJ !ÃJîÃK !ÃKîÃL !ÃLîÃM !ÃMîÃN !ÃNîÃO !ÃOîÃP !ÃPîÃQ !ÃQîÃR !ÃRîÃS !ÃSîÃT !ÃTîÃU !ÃUîÃV !ÃVîÃW !ÃWîÃX !ÃXîÃY !ÃYîÃZ !ÃZîÃ[ !Ã[îÃ\ !Ã\îÃ] !Ã]ïî  " î "î "î "î "íî  # î #‹ î  $ î $î $î $î $î $î $î $î $î	 $	î
+ $
+î $î $î $î $î $î $î $î $î $î $î $î $î $î $î $î $î $î $‹ Uî  % î %î %î %î %î %î %î %î %î	 %	î
+ %
+î %î %î %î %î %î %î %î %î %î %î %î %î %î %î %î %î %î %î %î %î %î  % î! %!î" %"î# %#î$ %$î% %%î& %&î' %'î( %(î) %)î* %*î+ %+î, %,î- %-î. %.î/ %/î0 %0î1 %1î2 %2î3 %3î4 %4î5 %5î6 %6î7 %7î8 %8î9 %9î: %:î; %;î< %<î= %=î> %>î? %?îÃ@ %Ã@îÃA %ÃAîÃB %ÃBîÃC %ÃCîÃD %ÃDîÃE %ÃEîÃF %ÃFîÃG %ÃGîÃH %ÃHîÃI %ÃIîÃJ %ÃJîÃK %ÃKîÃL %ÃLîÃM %ÃMîÃN %ÃNîÃO %ÃOîÃP %ÃPîÃQ %ÃQîÃR %ÃRîÃS %ÃSîÃT %ÃTïî  & î &î &î &î &íî  ' î '‹ î  ( î (î (î (î (î (î (î (î (î	 (	î
+ (
+î (î (î (î (î (î (î (î (î (î (î (î (î (î (î (î (î (î (‹ 3î  ) î )î )î )î )î )î )î )î )î	 )	î
+ )
+î )î )î )î )î )î )î )î )î )î )î )î )î )î )î )î )î )î )î )î )î )î  ) î! )!î" )"î# )#î$ )$î% )%î& )&î' )'î( )(î) ))î* )*î+ )+î, ),î- )-î. ).î/ )/î0 )0î1 )1î2 )2‹ Tî  * î *î *î *î *î *î *î *î *î	 *	î
+ *
+î *î *î *î *î *î *î *î *î *î *î *î *î *î *î *î *î *î *î *î *î *î  * î! *!î" *"î# *#î$ *$î% *%î& *&î' *'î( *(î) *)î* **î+ *+î, *,î- *-î. *.î/ */î0 *0î1 *1î2 *2î3 *3î4 *4î5 *5î6 *6î7 *7î8 *8î9 *9î: *:î; *;î< *<î= *=î> *>î? *?îÃ@ *Ã@îÃA *ÃAîÃB *ÃBîÃC *ÃCîÃD *ÃDîÃE *ÃEîÃF *ÃFîÃG *ÃGîÃH *ÃHîÃI *ÃIîÃJ *ÃJîÃK *ÃKîÃL *ÃLîÃM *ÃMîÃN *ÃNîÃO *ÃOîÃP *ÃPîÃQ *ÃQîÃR *ÃRîÃS *ÃS‹  î  + î +î +î +î +î +î +î +î +î	 +	î
+ +
+î +î +î +î +î +î +î +î +î +î +î +î +î +î +î +î +î +î +î +î +î +‹ Mî  , î ,î ,î ,î ,î ,î ,î ,î ,î	 ,	î
+ ,
+î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î ,î  , î! ,!î" ,"î# ,#î$ ,$î% ,%î& ,&î' ,'î( ,(î) ,)î* ,*î+ ,+î, ,,î- ,-î. ,.î/ ,/î0 ,0î1 ,1î2 ,2î3 ,3î4 ,4î5 ,5î6 ,6î7 ,7î8 ,8î9 ,9î: ,:î; ,;î< ,<î= ,=î> ,>î? ,?îÃ@ ,Ã@îÃA ,ÃAîÃB ,ÃBîÃC ,ÃCîÃD ,ÃDîÃE ,ÃEîÃF ,ÃFîÃG ,ÃGîÃH ,ÃHîÃI ,ÃIîÃJ ,ÃJîÃK ,ÃKîÃL ,ÃLïî  - î -î -î -î -íî  . î .‹ î  / î /î /î /î /î /î /î /î /î	 /	î
+ /
+î /î /î /î /î /î /î /î /î /î /î /î /î /î /î /î /‹ 3î  0 î 0î 0î 0î 0î 0î 0î 0î 0î	 0	î
+ 0
+î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î 0î  0 î! 0!î" 0"î# 0#î$ 0$î% 0%î& 0&î' 0'î( 0(î) 0)î* 0*î+ 0+î, 0,î- 0-î. 0.î/ 0/î0 00î1 01î2 02‹ Rî  1 î 1î 1î 1î 1î 1î 1î 1î 1î	 1	î
+ 1
+î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î 1î  1 î! 1!î" 1"î# 1#î$ 1$î% 1%î& 1&î' 1'î( 1(î) 1)î* 1*î+ 1+î, 1,î- 1-î. 1.î/ 1/î0 10î1 11î2 12î3 13î4 14î5 15î6 16î7 17î8 18î9 19î: 1:î; 1;î< 1<î= 1=î> 1>î? 1?îÃ@ 1Ã@îÃA 1ÃAîÃB 1ÃBîÃC 1ÃCîÃD 1ÃDîÃE 1ÃEîÃF 1ÃFîÃG 1ÃGîÃH 1ÃHîÃI 1ÃIîÃJ 1ÃJîÃK 1ÃKîÃL 1ÃLîÃM 1ÃMîÃN 1ÃNîÃO 1ÃOîÃP 1ÃPîÃQ 1ÃQ‹  î  2 î 2î 2î 2î 2î 2î 2î 2î 2î	 2	î
+ 2
+î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2î 2‹ Lî  3 î 3î 3î 3î 3î 3î 3î 3î 3î	 3	î
+ 3
+î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î 3î  3 î! 3!î" 3"î# 3#î$ 3$î% 3%î& 3&î' 3'î( 3(î) 3)î* 3*î+ 3+î, 3,î- 3-î. 3.î/ 3/î0 30î1 31î2 32î3 33î4 34î5 35î6 36î7 37î8 38î9 39î: 3:î; 3;î< 3<î= 3=î> 3>î? 3?îÃ@ 3Ã@îÃA 3ÃAîÃB 3ÃBîÃC 3ÃCîÃD 3ÃDîÃE 3ÃEîÃF 3ÃFîÃG 3ÃGîÃH 3ÃHîÃI 3ÃIîÃJ 3ÃJîÃK 3ÃKïî  4 î 4î 4î 4î 4íî  5 î 5‹ 1î  6 î 6î 6î 6î 6î 6î 6î 6î 6î	 6	î
+ 6
+î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î 6î  6 î! 6!î" 6"î# 6#î$ 6$î% 6%î& 6&î' 6'î( 6(î) 6)î* 6*î+ 6+î, 6,î- 6-î. 6.î/ 6/î0 60‹ 0î  7 î 7î 7î 7î 7î 7î 7î 7î 7î	 7	î
+ 7
+î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î 7î  7 î! 7!î" 7"î# 7#î$ 7$î% 7%î& 7&î' 7'î( 7(î) 7)î* 7*î+ 7+î, 7,î- 7-î. 7.î/ 7/‹ î  8 î 8î 8î 8î 8î 8î 8î 8î 8î	 8	î
+ 8
+î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8î 8‹ rî  9 î 9î 9î 9î 9î 9î 9î 9î 9î	 9	î
+ 9
+î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î 9î  9 î! 9!î" 9"î# 9#î$ 9$î% 9%î& 9&î' 9'î( 9(î) 9)î* 9*î+ 9+î, 9,î- 9-î. 9.î/ 9/î0 90î1 91î2 92î3 93î4 94î5 95î6 96î7 97î8 98î9 99î: 9:î; 9;î< 9<î= 9=î> 9>î? 9?îÃ@ 9Ã@îÃA 9ÃAîÃB 9ÃBîÃC 9ÃCîÃD 9ÃDîÃE 9ÃEîÃF 9ÃFîÃG 9ÃGîÃH 9ÃHîÃI 9ÃIîÃJ 9ÃJîÃK 9ÃKîÃL 9ÃLîÃM 9ÃMîÃN 9ÃNîÃO 9ÃOîÃP 9ÃPîÃQ 9ÃQîÃR 9ÃRîÃS 9ÃSîÃT 9ÃTîÃU 9ÃUîÃV 9ÃVîÃW 9ÃWîÃX 9ÃXîÃY 9ÃYîÃZ 9ÃZîÃ[ 9Ã[îÃ\ 9Ã\îÃ] 9Ã]îÃ^ 9Ã^îÃ_ 9Ã_îÃ` 9Ã`îÃa 9ÃaîÃb 9ÃbîÃc 9ÃcîÃd 9ÃdîÃe 9ÃeîÃf 9ÃfîÃg 9ÃgîÃh 9ÃhîÃi 9ÃiîÃj 9ÃjîÃk 9ÃkîÃl 9ÃlîÃm 9ÃmîÃn 9ÃnîÃo 9ÃoîÃp 9ÃpîÃq 9Ãqóî  : î :î :î :î :î :î :‹ î  ; î ;î ;î ;î ;î ;î ;î ;î ;î	 ;	î
+ ;
+î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;î ;íî  < î <‹ î  = î =î =î =î =î =î =î =î =î	 =	î
+ =
+î =î =î =î =î =î =î =î =î =î =î =î =î =î =î =î =î =î =î =î =‹ Aî  > î >î >î >î >î >î >î >î >î	 >	î
+ >
+î >î >î >î >î >î >î >î >î >î >î >î >î >î >î >î >î >î >î >î >î >î  > î! >!î" >"î# >#î$ >$î% >%î& >&î' >'î( >(î) >)î* >*î+ >+î, >,î- >-î. >.î/ >/î0 >0î1 >1î2 >2î3 >3î4 >4î5 >5î6 >6î7 >7î8 >8î9 >9î: >:î; >;î< ><î= >=î> >>î? >?îÃ@ >Ã@‹ 9î  ? î ?î ?î ?î ?î ?î ?î ?î ?î	 ?	î
+ ?
+î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î ?î  ? î! ?!î" ?"î# ?#î$ ?$î% ?%î& ?&î' ?'î( ?(î) ?)î* ?*î+ ?+î, ?,î- ?-î. ?.î/ ?/î0 ?0î1 ?1î2 ?2î3 ?3î4 ?4î5 ?5î6 ?6î7 ?7î8 ?8‹ î  Ã@ î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î	 Ã@	î
+ Ã@
+î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@î Ã@ôî  ÃA î ÃAî ÃAî ÃAî ÃAî ÃAî ÃAî ÃAî ÃA‹ î  ÃB î ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî	 ÃB	î
+ ÃB
+î ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBî ÃBïî  ÃC î ÃCî ÃCî ÃCî ÃC‹ !î  ÃD î ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî	 ÃD	î
+ ÃD
+î ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî ÃDî  ÃD ‹ 0î  ÃE î ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî	 ÃE	î
+ ÃE
+î ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî ÃEî  ÃE î! ÃE!î" ÃE"î# ÃE#î$ ÃE$î% ÃE%î& ÃE&î' ÃE'î( ÃE(î) ÃE)î* ÃE*î+ ÃE+î, ÃE,î- ÃE-î. ÃE.î/ ÃE/‹ 4î  ÃF î ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî	 ÃF	î
+ ÃF
+î ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî ÃFî  ÃF î! ÃF!î" ÃF"î# ÃF#î$ ÃF$î% ÃF%î& ÃF&î' ÃF'î( ÃF(î) ÃF)î* ÃF*î+ ÃF+î, ÃF,î- ÃF-î. ÃF.î/ ÃF/î0 ÃF0î1 ÃF1î2 ÃF2î3 ÃF3‹ 0î  ÃG î ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî	 ÃG	î
+ ÃG
+î ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî ÃGî  ÃG î! ÃG!î" ÃG"î# ÃG#î$ ÃG$î% ÃG%î& ÃG&î' ÃG'î( ÃG(î) ÃG)î* ÃG*î+ ÃG+î, ÃG,î- ÃG-î. ÃG.î/ ÃG/ûî  ÃH î ÃHî ÃHî ÃHî ÃHî ÃHî ÃHî ÃHî ÃHî	 ÃH	î
+ ÃH
+î ÃHî ÃHî ÃH‹ 2î  ÃI î ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî	 ÃI	î
+ ÃI
+î ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî ÃIî  ÃI î! ÃI!î" ÃI"î# ÃI#î$ ÃI$î% ÃI%î& ÃI&î' ÃI'î( ÃI(î) ÃI)î* ÃI*î+ ÃI+î, ÃI,î- ÃI-î. ÃI.î/ ÃI/î0 ÃI0î1 ÃI1óî  ÃJ î ÃJî ÃJî ÃJî ÃJî ÃJî ÃJïî  ÃK î ÃKî ÃKî ÃKî ÃKíî  ÃL î ÃL‹  î  ÃM î ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî	 ÃM	î
+ ÃM
+î ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃMî ÃM‹ -î  ÃN î ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî	 ÃN	î
+ ÃN
+î ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî ÃNî  ÃN î! ÃN!î" ÃN"î# ÃN#î$ ÃN$î% ÃN%î& ÃN&î' ÃN'î( ÃN(î) ÃN)î* ÃN*î+ ÃN+î, ÃN,‹ Rî  ÃO î ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî	 ÃO	î
+ ÃO
+î ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî ÃOî  ÃO î! ÃO!î" ÃO"î# ÃO#î$ ÃO$î% ÃO%î& ÃO&î' ÃO'î( ÃO(î) ÃO)î* ÃO*î+ ÃO+î, ÃO,î- ÃO-î. ÃO.î/ ÃO/î0 ÃO0î1 ÃO1î2 ÃO2î3 ÃO3î4 ÃO4î5 ÃO5î6 ÃO6î7 ÃO7î8 ÃO8î9 ÃO9î: ÃO:î; ÃO;î< ÃO<î= ÃO=î> ÃO>î? ÃO?îÃ@ ÃOÃ@îÃA ÃOÃAîÃB ÃOÃBîÃC ÃOÃCîÃD ÃOÃDîÃE ÃOÃEîÃF ÃOÃFîÃG ÃOÃGîÃH ÃOÃHîÃI ÃOÃIîÃJ ÃOÃJîÃK ÃOÃKîÃL ÃOÃLîÃM ÃOÃMîÃN ÃOÃNîÃO ÃOÃOîÃP ÃOÃPîÃQ ÃOÃQ‹ Bî  ÃP î ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî	 ÃP	î
+ ÃP
+î ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî ÃPî  ÃP î! ÃP!î" ÃP"î# ÃP#î$ ÃP$î% ÃP%î& ÃP&î' ÃP'î( ÃP(î) ÃP)î* ÃP*î+ ÃP+î, ÃP,î- ÃP-î. ÃP.î/ ÃP/î0 ÃP0î1 ÃP1î2 ÃP2î3 ÃP3î4 ÃP4î5 ÃP5î6 ÃP6î7 ÃP7î8 ÃP8î9 ÃP9î: ÃP:î; ÃP;î< ÃP<î= ÃP=î> ÃP>î? ÃP?îÃ@ ÃPÃ@îÃA ÃPÃA‹ ]î  ÃQ î ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî	 ÃQ	î
+ ÃQ
+î ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî ÃQî  ÃQ î! ÃQ!î" ÃQ"î# ÃQ#î$ ÃQ$î% ÃQ%î& ÃQ&î' ÃQ'î( ÃQ(î) ÃQ)î* ÃQ*î+ ÃQ+î, ÃQ,î- ÃQ-î. ÃQ.î/ ÃQ/î0 ÃQ0î1 ÃQ1î2 ÃQ2î3 ÃQ3î4 ÃQ4î5 ÃQ5î6 ÃQ6î7 ÃQ7î8 ÃQ8î9 ÃQ9î: ÃQ:î; ÃQ;î< ÃQ<î= ÃQ=î> ÃQ>î? ÃQ?îÃ@ ÃQÃ@îÃA ÃQÃAîÃB ÃQÃBîÃC ÃQÃCîÃD ÃQÃDîÃE ÃQÃEîÃF ÃQÃFîÃG ÃQÃGîÃH ÃQÃHîÃI ÃQÃIîÃJ ÃQÃJîÃK ÃQÃKîÃL ÃQÃLîÃM ÃQÃMîÃN ÃQÃNîÃO ÃQÃOîÃP ÃQÃPîÃQ ÃQÃQîÃR ÃQÃRîÃS ÃQÃSîÃT ÃQÃTîÃU ÃQÃUîÃV ÃQÃVîÃW ÃQÃWîÃX ÃQÃXîÃY ÃQÃYîÃZ ÃQÃZîÃ[ ÃQÃ[îÃ\ ÃQÃ\‹ î  ÃR î ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî	 ÃR	î
+ ÃR
+î ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃRî ÃR‹ î  ÃS î ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî	 ÃS	î
+ ÃS
+î ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃSî ÃS‹ cî  ÃT î ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî	 ÃT	î
+ ÃT
+î ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî ÃTî  ÃT î! ÃT!î" ÃT"î# ÃT#î$ ÃT$î% ÃT%î& ÃT&î' ÃT'î( ÃT(î) ÃT)î* ÃT*î+ ÃT+î, ÃT,î- ÃT-î. ÃT.î/ ÃT/î0 ÃT0î1 ÃT1î2 ÃT2î3 ÃT3î4 ÃT4î5 ÃT5î6 ÃT6î7 ÃT7î8 ÃT8î9 ÃT9î: ÃT:î; ÃT;î< ÃT<î= ÃT=î> ÃT>î? ÃT?îÃ@ ÃTÃ@îÃA ÃTÃAîÃB ÃTÃBîÃC ÃTÃCîÃD ÃTÃDîÃE ÃTÃEîÃF ÃTÃFîÃG ÃTÃGîÃH ÃTÃHîÃI ÃTÃIîÃJ ÃTÃJîÃK ÃTÃKîÃL ÃTÃLîÃM ÃTÃMîÃN ÃTÃNîÃO ÃTÃOîÃP ÃTÃPîÃQ ÃTÃQîÃR ÃTÃRîÃS ÃTÃSîÃT ÃTÃTîÃU ÃTÃUîÃV ÃTÃVîÃW ÃTÃWîÃX ÃTÃXîÃY ÃTÃYîÃZ ÃTÃZîÃ[ ÃTÃ[îÃ\ ÃTÃ\îÃ] ÃTÃ]îÃ^ ÃTÃ^îÃ_ ÃTÃ_îÃ` ÃTÃ`îÃa ÃTÃaîÃb ÃTÃbõî  ÃU î ÃUî ÃUî ÃUî ÃUî ÃUî ÃUî ÃUî ÃUî	 ÃU	î
+ ÃU
+óî  ÃV î ÃVî ÃVî ÃVî ÃVî ÃVî ÃV‹ î  ÃW î ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî	 ÃW	î
+ ÃW
+î ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWî ÃWïî  ÃX î ÃXî ÃXî ÃXî ÃXìî  ÃY î ÃYî ÃYíî  ÃZ î ÃZ‹ )î  Ã[ î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î	 Ã[	î
+ Ã[
+î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î Ã[î  Ã[ î! Ã[!î" Ã["î# Ã[#î$ Ã[$î% Ã[%î& Ã[&î' Ã['î( Ã[(‹ -î  Ã\ î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î	 Ã\	î
+ Ã\
+î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î Ã\î  Ã\ î! Ã\!î" Ã\"î# Ã\#î$ Ã\$î% Ã\%î& Ã\&î' Ã\'î( Ã\(î) Ã\)î* Ã\*î+ Ã\+î, Ã\,‹ <î  Ã] î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î	 Ã]	î
+ Ã]
+î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î Ã]î  Ã] î! Ã]!î" Ã]"î# Ã]#î$ Ã]$î% Ã]%î& Ã]&î' Ã]'î( Ã](î) Ã])î* Ã]*î+ Ã]+î, Ã],î- Ã]-î. Ã].î/ Ã]/î0 Ã]0î1 Ã]1î2 Ã]2î3 Ã]3î4 Ã]4î5 Ã]5î6 Ã]6î7 Ã]7î8 Ã]8î9 Ã]9î: Ã]:î; Ã];‹ î  Ã^ î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î	 Ã^	î
+ Ã^
+î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^î Ã^‹ Vî  Ã_ î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î	 Ã_	î
+ Ã_
+î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î Ã_î  Ã_ î! Ã_!î" Ã_"î# Ã_#î$ Ã_$î% Ã_%î& Ã_&î' Ã_'î( Ã_(î) Ã_)î* Ã_*î+ Ã_+î, Ã_,î- Ã_-î. Ã_.î/ Ã_/î0 Ã_0î1 Ã_1î2 Ã_2î3 Ã_3î4 Ã_4î5 Ã_5î6 Ã_6î7 Ã_7î8 Ã_8î9 Ã_9î: Ã_:î; Ã_;î< Ã_<î= Ã_=î> Ã_>î? Ã_?îÃ@ Ã_Ã@îÃA Ã_ÃAîÃB Ã_ÃBîÃC Ã_ÃCîÃD Ã_ÃDîÃE Ã_ÃEîÃF Ã_ÃFîÃG Ã_ÃGîÃH Ã_ÃHîÃI Ã_ÃIîÃJ Ã_ÃJîÃK Ã_ÃKîÃL Ã_ÃLîÃM Ã_ÃMîÃN Ã_ÃNîÃO Ã_ÃOîÃP Ã_ÃPîÃQ Ã_ÃQîÃR Ã_ÃRîÃS Ã_ÃSîÃT Ã_ÃTîÃU Ã_ÃU‹ Vî  Ã` î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î	 Ã`	î
+ Ã`
+î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î Ã`î  Ã` î! Ã`!î" Ã`"î# Ã`#î$ Ã`$î% Ã`%î& Ã`&î' Ã`'î( Ã`(î) Ã`)î* Ã`*î+ Ã`+î, Ã`,î- Ã`-î. Ã`.î/ Ã`/î0 Ã`0î1 Ã`1î2 Ã`2î3 Ã`3î4 Ã`4î5 Ã`5î6 Ã`6î7 Ã`7î8 Ã`8î9 Ã`9î: Ã`:î; Ã`;î< Ã`<î= Ã`=î> Ã`>î? Ã`?îÃ@ Ã`Ã@îÃA Ã`ÃAîÃB Ã`ÃBîÃC Ã`ÃCîÃD Ã`ÃDîÃE Ã`ÃEîÃF Ã`ÃFîÃG Ã`ÃGîÃH Ã`ÃHîÃI Ã`ÃIîÃJ Ã`ÃJîÃK Ã`ÃKîÃL Ã`ÃLîÃM Ã`ÃMîÃN Ã`ÃNîÃO Ã`ÃOîÃP Ã`ÃPîÃQ Ã`ÃQîÃR Ã`ÃRîÃS Ã`ÃSîÃT Ã`ÃTîÃU Ã`ÃU‹ ?î  Ãa î Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî	 Ãa	î
+ Ãa
+î Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî Ãaî  Ãa î! Ãa!î" Ãa"î# Ãa#î$ Ãa$î% Ãa%î& Ãa&î' Ãa'î( Ãa(î) Ãa)î* Ãa*î+ Ãa+î, Ãa,î- Ãa-î. Ãa.î/ Ãa/î0 Ãa0î1 Ãa1î2 Ãa2î3 Ãa3î4 Ãa4î5 Ãa5î6 Ãa6î7 Ãa7î8 Ãa8î9 Ãa9î: Ãa:î; Ãa;î< Ãa<î= Ãa=î> Ãa>õî  Ãb î Ãbî Ãbî Ãbî Ãbî Ãbî Ãbî Ãbî Ãbî	 Ãb	î
+ Ãb
+óî  Ãc î Ãcî Ãcî Ãcî Ãcî Ãcî Ãcëî  Ãd êëŸ§/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/oh_modules/.ohpm/@ohos+hypium@1.0.18/oh_modules/@ohos/hypium/src/main/module/kit/SysTestKit.jsë⁄√/*
+ * Copyright (c) 2022-2023 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import {TAG} from '../../Constant';
+import Core from '../../core.js';
+
+export default class SysTestKit {
+
+  static delegator = null;
+  static systemTime = null;
+
+  constructor() {
+    this.id = 'sysTestKit';
+    this.index = 0;
+  }
+
+  static getDescribeName() {
+    return Core.getInstance().getDefaultService('suite').getCurrentRunningSuite().description;
+  }
+
+  static getItName() {
+    return Core.getInstance().getDefaultService('spec').getCurrentRunningSpec().description;
+  }
+
+  static getItAttribute() {
+    return Core.getInstance().getDefaultService('spec').getCurrentRunningSpec().fi;
+  }
+
+  static actionStart(tag) {
+    console.info(`${TAG}${JSON.stringify(tag)}`);
+    var message = '\n' + 'OHOS_REPORT_ACTIONSTART: ' + JSON.stringify(tag) + '\n';
+    SysTestKit.print(message);
+    console.info(`${TAG}${JSON.stringify(tag)} actionStart print success`);
+  }
+
+  static actionEnd(tag) {
+    console.info(`${TAG}${JSON.stringify(tag)}`);
+    var message = '\n' + 'OHOS_REPORT_ACTIONEND: ' + JSON.stringify(tag) + '\n';
+    SysTestKit.print(message);
+    console.info(`${TAG}${JSON.stringify(tag)}  actionEnd print success`);
+  }
+
+  static async existKeyword(keyword, timeout) {
+    let reg = new RegExp(/^[a-zA-Z0-9]{1,}$/);
+    if (!reg.test(keyword)) {
+      throw new Error('keyword must contain more than one string, and only letters and numbers are supported.');
+    }
+    timeout = timeout || 4;
+
+    let searchResult = false;
+    let cmd = 'hilog -x | grep -i \'' + keyword + '\' | wc -l';
+    await executePromise(cmd, timeout).then((data) => {
+      searchResult = data;
+    });
+    return searchResult;
+  }
+  static async print(message) {
+    if ('printSync' in SysTestKit.delegator) {
+      console.debug(`${TAG}printSync called ...`);
+      SysTestKit.delegator.printSync(message);
+    } else {
+      await SysTestKit.delegator.print(message);
+    }
+  }
+
+  static async getRealTime() {
+    let currentTime = new Date().getTime();
+    if (SysTestKit.systemTime !== null && SysTestKit.systemTime !== undefined) {
+      await SysTestKit.systemTime.getRealTime().then((time) => {
+        console.info(`${TAG}systemTime.getRealTime success data: ${JSON.stringify(time)}`);
+        currentTime = time;
+      }).catch((error) => {
+        console.error(`${TAG}failed to systemTime.getRealTime because ${JSON.stringify(error)}`);
+      });
+    }
+    return currentTime;
+  }
+}
+
+function executePromise(cmd, timeout) {
+  return new Promise((resolve, reject) => {
+    SysTestKit.delegator.executeShellCommand(cmd, timeout,
+      (error, data) => {
+        console.info(`${TAG}existKeyword CallBack: err : ${JSON.stringify(error)}`);
+        console.info(`${TAG}existKeyword CallBack: data : ${JSON.stringify(data)}`);
+        resolve(parseInt(data.stdResult) > 3 ? true : false);
+      });
+  });
+}‘rFíÆ../../Constant≠../../core.js‘rGó™assertions®external¢id§meta±moduleSideEffects™resolvedByµsyntheticNamedExportsA¬Ÿó/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/oh_modules/.ohpm/@ohos+hypium@1.0.18/oh_modules/@ohos/hypium/src/main/Constant.jsA√™oh-resolve¬GA¬Ÿì/Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge/harmonyos/oh_modules/.ohpm/@ohos+hypium@1.0.18/oh_modules/@ohos/hypium/src/main/core.jsA√™oh-resolve¬ë‘rHíßmissing¶plugin√¶genAbc¬ê‘  ‘rIî≤dynamicImportCacheπexportAllDeclarationCacheªexportNamedDeclarationCache´importCacheêêêí‘rJï§type•start£end™specifiers¶source±ImportDeclarationÕuÕòë‘rKï§type•start£end®imported•localØImportSpecifierÕ}ÕÄ‘rLî§type•start£end§name™IdentifierÕ}ÕÄ£TAGL™IdentifierÕ}ÕÄ£TAG‘rMï§type•start£end•value£rawßLiteralÕáÕóÆ../../Constant∞'../../Constant'J±ImportDeclarationÕöÕªë‘rNî§type•start£end•local∂ImportDefaultSpecifierÕ°Õ•L™IdentifierÕ°Õ•§CoreMßLiteralÕ´Õ∫≠../../core.jsØ'../../core.js'

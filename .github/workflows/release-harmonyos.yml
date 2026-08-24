@@ -1,0 +1,80 @@
+# HarmonyOS HAP 自动构建: 推送 v*-harmony tag 时触发 (镜像 release-android.yml)。
+#
+# ⚠️ 前提 (公共 runner 需要):
+#   1. 安装 HarmonyOS 命令行工具链 (hvigor/ohpm/node) 与 SDK (API 24) —
+#      建议以自托管 runner + 本机 DevEco 工具目录运行, 或在 Actions 中下载
+#      developer command-line tools (HarmonyOS Command Line Tools)。
+#   2. 签名材料 (release.p12 / 签名 Profile p7b / 证书 cer) 存入仓库 Secrets:
+#      HAP_STORE_FILE / HAP_STORE_PASSWORD / HAP_KEY_ALIAS / HAP_KEY_PASSWORD /
+#      HAP_PROFILE_P7B / HAP_SIGN_CER  (详见 harmonyos/docs/agc-release-checklist.md)
+#   3. 构建时在 build-profile.json5 注入 signingConfigs (本地调试可跳过, 产物为 unsigned)。
+
+name: release-harmonyos
+
+on:
+  push:
+    tags: ["v*-harmony"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # 或自托管 (已装 DevEco 命令行工具链)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup HarmonyOS toolchain
+        run: |
+          # 占位: 公共 runner 需先安装 hvigor/ohpm/node 与 SDK(API 24)。
+          # 自托管 runner 可改用本机 DevEco 工具目录:
+          #   echo "DEVECO_SDK_HOME=$DEVECO_SDK_HOME" >> $GITHUB_ENV
+          echo "DEVECO_SDK_HOME=$(pwd)/harmonyos-sdk" >> $GITHUB_ENV
+          echo "NODE_HOME=$(which node)" >> $GITHUB_ENV
+
+      - name: ohpm install
+        working-directory: harmonyos
+        run: ohpm install
+
+      - name: Inject signing config (if secrets present)
+        working-directory: harmonyos
+        if: env.HAP_STORE_PASSWORD != ''
+        env:
+          HAP_STORE_FILE: ${{ secrets.HAP_STORE_FILE }}
+          HAP_STORE_PASSWORD: ${{ secrets.HAP_STORE_PASSWORD }}
+          HAP_KEY_ALIAS: ${{ secrets.HAP_KEY_ALIAS }}
+          HAP_KEY_PASSWORD: ${{ secrets.HAP_KEY_PASSWORD }}
+        run: bash scripts/inject-signing.sh
+
+      - name: Build signed HAP
+        working-directory: harmonyos
+        run: ./hvigorw --mode module -p product=default assembleHap --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoGauge-harmonyos-hap
+          path: harmonyos/entry/build/default/outputs/default/*.hap
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Attach assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          VER="${TAG#v}"; VER="${VER%-harmony}"
+          HAP=$(ls *.hap | head -1)
+          mv "$HAP" "GoGauge-v${VER}-harmony.hap"
+          gh release upload "$TAG" "GoGauge-v${VER}-harmony.hap" --clobber || \
+            gh release create "$TAG" "GoGauge-v${VER}-harmony.hap" \
+              --title "GoGauge $TAG" --generate-notes
