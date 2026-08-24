@@ -64,9 +64,9 @@ entry/src/main/ets/
 - [x] M1 脚手架与登录闭环（登录页 Web 组件捕获 auth cookie + 工作区）
 - [x] M2 数据层与同步引擎（RDB 四表、API/解析器、增量/全量同步）
 - [x] M3 主界面（首页/统计/记录 + ArkUI 原生图表 + 一多自适应主壳）
-- [ ] M4 设置/多账号/双主题/中英
-- [ ] M5 PC/2in1 形态 + 后台 WorkScheduler
-- [ ] M6 单测移植、签名与 AppGallery 材料、CI
+- [x] M4 设置/多账号/双主题/中英 i18n
+- [x] M5 PC/2in1 窗口策略 + 前台定时同步 + WorkScheduler 后台任务
+- [ ] M6 单测移植、签名与上架 CI（AppGallery 材料清单已先行产出: docs/agc-release-checklist.md）
 
 ## 验证记录
 
