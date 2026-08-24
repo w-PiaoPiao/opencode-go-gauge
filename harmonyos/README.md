@@ -68,6 +68,11 @@ entry/src/main/ets/
 - [x] M5 PC/2in1 窗口策略 + 前台定时同步 + WorkScheduler 后台任务
 - [ ] M6 正式签名与上架（材料清单/CI 模板/单测已就绪; 证书签发与上架需用户 AGC 操作）
 
+## 验证与交接总览
+
+- 自动验证全部通过项、镜像就位情况与交接步骤见 [docs/verification-summary.md](docs/verification-summary.md)
+- 安装辅助: `./scripts/install.sh [signed.hap]`
+
 ## 运行验证指引 (DevEco 模拟器 / 真机, 需 GUI)
 
 - 启动 DevEco Studio 打开 `harmonyos/`, SDK Manager 下载系统镜像 (当前 `~/Library/Caches/Huawei/Emulator6.1` 为空, 需首次下载), 新建/启动 Huawei_Phone 或 2in1 模拟器
