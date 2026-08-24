@@ -15,6 +15,10 @@ const I18N = {
     usageTrend: "用量趋势", usageRecords: "使用记录", allModels: "全部模型",
     recordsPage: "使用记录",
     sessionUsage: "会话用量", colSession: "会话", colKey: "Key 名称", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
+    accountOverview: "账户总览", costTrend7d: "7 日费用趋势对比",
+    todayTotalReq: "今日总请求", todayTotalTokens: "今日总 TOKEN", todayTotalCost: "今日总费用", todayTotalInput: "今日总输入",
+    activeAccount: "当前活跃", quotaNotReady: "配额获取中…",
+    overviewPanel: "账户总览面板", overviewPanelDesc: "侧边栏显示多账户总览入口，聚合展示各账户配额与用量",
     setUpdate: "软件更新", currentVersion: "当前版本", checkUpdate: "检查更新", checkUpdateDesc: "检查 GitHub 上是否有新版本", checkUpdateBtn: "检查更新",
     checkingUpdate: "检查中…", updateFound: "发现新版本", updateNone: "已是最新版本", updateFailed: "检查更新失败", goDownload: "前往下载",
     colTime: "时间", colModel: "模型", colInput: "输入", colOutput: "输出",
@@ -90,6 +94,10 @@ const I18N = {
     usageTrend: "Usage Trend", usageRecords: "Usage Records", allModels: "All Models",
     recordsPage: "Records",
     sessionUsage: "Session Usage", colSession: "Session", colKey: "Key Name", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
+    accountOverview: "Accounts Overview", costTrend7d: "7-Day Cost Trend",
+    todayTotalReq: "Today Requests", todayTotalTokens: "Today Tokens", todayTotalCost: "Today Cost", todayTotalInput: "Today Input",
+    activeAccount: "Active", quotaNotReady: "Fetching quota…",
+    overviewPanel: "Accounts Panel", overviewPanelDesc: "Show multi-account overview entry in sidebar",
     setUpdate: "Software Update", currentVersion: "Current Version", checkUpdate: "Check Updates", checkUpdateDesc: "Check GitHub for new versions", checkUpdateBtn: "Check Updates",
     checkingUpdate: "Checking…", updateFound: "New Version Available", updateNone: "You're up to date", updateFailed: "Check failed", goDownload: "Go to Download",
     colTime: "Time", colModel: "Model", colInput: "Input", colOutput: "Output",
@@ -170,6 +178,7 @@ let state = {
   darkMode: false,
   syncTimer: null,
   quotaRetryTimer: null,
+  ovRetryTimer: null,
   records: { page: 1, pageSize: 7, total: 0, model: "" },
   sessions: { page: 1, pageSize: 7, total: 0 },
   settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true },
@@ -364,6 +373,7 @@ function applyCurrency(cur) {
   renderStatsTotal(state.data.totals);
   renderDetail6(state.data.totals);
   loadRecords().catch(() => {});
+  if (state.page === "overview") loadOverview(true).catch(() => {});  // 总览页费用随货币即时换算
 }
 
 /* ---------------- 页面路由 ---------------- */
@@ -373,6 +383,7 @@ function switchPage(page) {
   $("page-" + page).hidden = false;
   document.querySelectorAll(".side-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (page === "home" || page === "stats") loadDashboard();
+  if (page === "overview") loadOverview().catch(() => {});
   if (page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
   if (page === "settings") renderSettings();
 }
@@ -762,6 +773,7 @@ function pollUntilIdle() {
         $("btn-full-sync").disabled = false;
         await loadDashboard();
         if (state.page === "settings") renderSettings();
+        if (state.page === "overview") loadOverview(true).catch(() => {});
       }
     } catch (e) { /* ignore */ }
   }, 2500);
@@ -780,6 +792,166 @@ function renderSettingsSyncProgress(progress) {
   $("set-sync-progress-val").textContent = `${t("totalN")} ${fmtInt(progress.inserted)}`;
 }
 
+/* ---------------- 账户总览面板 (多账户聚合) ---------------- */
+let ovSeq = 0;
+let cOvTrendChart = null;
+const OV_COLORS = ["#7c5cf6", "#4f8ef7", "#22c55e", "#d97706", "#06b6d4", "#ec4899"];
+
+/* 开关控制侧边栏入口显隐; 关闭时若停留在总览页则退回首页 */
+function applyOverviewPanel(show) {
+  const btn = document.getElementById("side-overview");
+  if (btn) btn.hidden = !show;
+  if (!show && state.page === "overview") switchPage("home");
+}
+
+async function loadOverview(quiet = false) {
+  const seq = ++ovSeq;
+  if (!quiet) {
+    const sKpi = `<div class="card kpi skeleton"><div class="sk-line w30"></div><div class="sk-line w40 lg"></div><div class="sk-line w50"></div></div>`;
+    $("ov-summary-cards").innerHTML = sKpi.repeat(4);
+    $("ov-accounts").innerHTML = `<div class="card ov-acc skeleton" style="height:140px"></div>`.repeat(2);
+  }
+  try {
+    const data = await api("/api/accounts/overview");
+    if (seq !== ovSeq) return; // 丢弃过期响应 (快速切换页面时旧请求)
+    if (data.exchange_rate?.usd_cny) state.exchangeRate = data.exchange_rate.usd_cny;
+    renderAccountOverview(data);
+    // 已登录账号配额缓存缺失 (后台刷新中), 5s 后静默重拉一次
+    const missing = (data.accounts || []).some((a) => a.logged_in && !a.quota);
+    clearTimeout(state.ovRetryTimer);
+    if (missing) state.ovRetryTimer = setTimeout(() => { if (state.page === "overview") loadOverview(true); }, 5000);
+  } catch (e) {
+    if (!quiet) toast(e.message || t("loadFailed"), "err");
+  }
+}
+
+function renderAccountOverview(data) {
+  const accounts = (data.accounts || []).map((a, i) => ({ ...a, color: OV_COLORS[i % OV_COLORS.length] }));
+  // ---- 顶部汇总: 今日合计 ----
+  const sum = accounts.reduce((acc, a) => {
+    const tt = a.today || {};
+    acc.req += tt.request_count || 0;
+    acc.in += tt.total_input_tokens || 0;
+    acc.out += tt.total_output_tokens || 0;
+    acc.rsn += tt.total_reasoning_tokens || 0;
+    acc.cost += tt.total_cost_usd || 0;
+    return acc;
+  }, { req: 0, in: 0, out: 0, rsn: 0, cost: 0 });
+  const cards = [
+    { cls: "c-violet", l: t("todayTotalReq"), v: fmtInt(sum.req) },
+    { cls: "c-blue", l: t("todayTotalTokens"), v: fmtTokens(sum.in + sum.out + sum.rsn) },
+    { cls: "c-cyan", l: t("todayTotalInput"), v: fmtTokens(sum.in) },
+    { cls: "c-amber", l: t("todayTotalCost"), v: fmtMoney(sum.cost) },
+  ];
+  $("ov-summary-cards").innerHTML = cards.map((c) => `
+    <div class="card kpi ${c.cls}"><div class="kpi-l">${c.l}</div><div class="kpi-v">${c.v}</div></div>`).join("");
+
+  // ---- 7 日费用趋势对比 ----
+  chartOvTrend(accounts);
+
+  // ---- 账号卡片 ----
+  $("ov-accounts").innerHTML = accounts.length
+    ? accounts.map((a) => renderAccountCard(a)).join("")
+    : `<div class="card ov-acc"><div class="ov-quota-empty">${t("noUsers")}</div></div>`;
+}
+
+function renderAccountCard(a) {
+  // 配额三窗口: 有缓存时展示, 缓存未就绪 (后台刷新中) 显示占位
+  let quotaHtml;
+  if (a.quota && a.quota.success && a.quota.windows) {
+    quotaHtml = `<div class="ov-quota-grid">${a.quota.windows.map((w) => {
+      const used = Number(w.used) || 0;
+      const cls = w.label === "5h Rolling" ? "c-rolling" : w.label === "Weekly" ? "c-week" : "c-month";
+      return `<div class="ub ${cls} ov-ub">
+        <div class="ub-head"><span class="ub-l">${(QUOTA_LABEL[w.label] || (() => w.label))()}</span><span class="ub-rem">${t("remaining")} ${(Number(w.remaining) || 0).toFixed(0)}%</span></div>
+        <div class="ub-bar"><div class="ub-bar-fill" style="width:${used}%"></div></div>
+        <div class="ub-meta"><span>${t("used")} ${used.toFixed(0)}%</span><span>${t("resetsIn")} ${fmtDur(w.reset_in_sec)}</span></div>
+      </div>`;
+    }).join("")}</div>`;
+  } else {
+    quotaHtml = `<div class="ov-quota-empty">${t("quotaNotReady")}</div>`;
+  }
+  const tt = a.today || {};
+  const spark = sparklineSvg((a.today_trend || []).map((d) => d.input + d.output + d.reasoning), a.color);
+  return `<div class="card ov-acc">
+    <div class="ov-acc-head">
+      <span class="ov-acc-name">${escapeHtml(a.name)}</span>
+      <span class="ov-acc-badges">${a.active ? `<span class="plan-badge">${t("activeAccount")}</span>` : ""}</span>
+      <span class="ov-acc-sync">${t("lastSync")} ${fmtRelative(a.last_sync_at)}</span>
+    </div>
+    ${quotaHtml}
+    <div class="tc-grid ov-today">
+      <div class="tc"><div class="tc-l">${t("totalRequests")}</div><div class="tc-v">${fmtInt(tt.request_count)}</div></div>
+      <div class="tc"><div class="tc-l">${t("input")}</div><div class="tc-v">${fmtTokens(tt.total_input_tokens)}</div></div>
+      <div class="tc"><div class="tc-l">${t("output")}</div><div class="tc-v">${fmtTokens(tt.total_output_tokens)}</div></div>
+      <div class="tc"><div class="tc-l">${t("colReasoning")}</div><div class="tc-v">${fmtTokens(tt.total_reasoning_tokens)}</div></div>
+      <div class="tc"><div class="tc-l">${t("colCost")}</div><div class="tc-v">${fmtMoney(tt.total_cost_usd)}</div></div>
+      <div class="tc"><div class="tc-l">${t("todayTrend")}</div><div class="tc-v ov-spark">${spark}</div></div>
+    </div>
+  </div>`;
+}
+
+/* 24h 迷你趋势: 纯 SVG 折线 (无 Chart 实例, 轻量随卡片渲染) */
+function sparklineSvg(values, color) {
+  const w = 120, h = 30, n = values.length;
+  if (!n) return `<svg viewBox="0 0 ${w} ${h}" class="spark"></svg>`;
+  const max = Math.max(...values, 1);
+  const step = n > 1 ? w / (n - 1) : w;
+  const pts = values.map((v, i) => `${(i * step).toFixed(1)},${(h - 2 - (v / max) * (h - 4)).toFixed(1)}`);
+  return `<svg viewBox="0 0 ${w} ${h}" class="spark" preserveAspectRatio="none">
+    <polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+    <polyline points="0,${h} ${pts.join(" ")} ${w},${h}" fill="${color}" opacity="0.12" stroke="none"/>
+  </svg>`;
+}
+
+/* 7 日费用对比: 全部账号合计为 总费用/请求/Token 三条线, 与用量趋势样式一致 */
+function chartOvTrend(accounts) {
+  const canvas = $("ov-trend-chart");
+  if (!canvas) return;
+  if (cOvTrendChart) { cOvTrendChart.destroy(); cOvTrendChart = null; }
+  const dated = accounts.filter((a) => (a.daily7 || []).length);
+  if (!dated.length) return;
+  const dateSet = new Set();
+  dated.forEach((a) => a.daily7.forEach((d) => dateSet.add(d.date)));
+  const labels = [...dateSet].sort();
+  // 全部账号合计: 每日 总费用 / 请求数 / Token 总数 (输入+输出+推理)
+  const costSum = {}, reqSum = {}, tokSum = {};
+  dated.forEach((a) => a.daily7.forEach((d) => {
+    costSum[d.date] = (costSum[d.date] || 0) + (d.total_cost_usd || 0);
+    reqSum[d.date] = (reqSum[d.date] || 0) + (d.request_count || 0);
+    tokSum[d.date] = (tokSum[d.date] || 0) + (d.total_input_tokens || 0) + (d.total_output_tokens || 0) + (d.total_reasoning_tokens || 0);
+  }));
+  const costData = labels.map((dt) => costSum[dt] || 0);
+  const reqData = labels.map((dt) => reqSum[dt] || 0);
+  const tokData = labels.map((dt) => tokSum[dt] || 0);
+  cOvTrendChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        { label: t("totalCost"), data: costData, borderColor: COLOR.input, borderWidth: 2, pointRadius: 1.5, tension: 0.3, yAxisID: "y" },
+        { label: t("totalRequests"), data: reqData, borderColor: COLOR.output, borderWidth: 2, pointRadius: 1.5, tension: 0.3, borderDash: [4, 3], yAxisID: "y1" },
+        { label: t("totalTokens"), data: tokData, borderColor: COLOR.reasoning, borderWidth: 2, pointRadius: 1.5, tension: 0.3, borderDash: [4, 3], yAxisID: "y2" },
+      ],
+    },
+    options: {
+      responsive: false, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 }, color: cssVar("--text2") } },
+        tooltip: { callbacks: { label: (it) => it.dataset.label === t("totalRequests") ? ` ${it.dataset.label}: ${fmtInt(it.parsed.y)}` : it.dataset.label === t("totalTokens") ? ` ${it.dataset.label}: ${fmtTokens(it.parsed.y)}` : ` ${it.dataset.label}: ${fmtMoney(it.parsed.y)}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: cssVar("--text3"), font: { size: 10 }, maxTicksLimit: 7 } },
+        y: { position: "left", grid: { color: cssVar("--grid") }, ticks: { color: cssVar("--text3"), font: { size: 10 }, callback: (v) => fmtMoney(v) } },
+        y1: { position: "right", grid: { display: false }, ticks: { color: cssVar("--text3"), font: { size: 10 } } },
+        y2: { position: "right", display: false },  // 总 Token 独立隐藏轴 (与用量趋势一致)
+      },
+    },
+  });
+  cOvTrendChart.resize();
+}
+
 /* ---------------- 设置页 ---------------- */
 async function renderSettings() {
   try {
@@ -792,6 +964,7 @@ async function renderSettings() {
     state.settings = settings;
     syncSettingsPills();
     $("set-auto-sync").checked = settings.auto_sync !== false;
+    $("set-overview-panel").checked = settings.show_accounts_panel === true;
     await fetchAccounts();  // 账户列表 (失败不阻塞其他设置渲染)
   } catch (e) { /* ignore */ }
 }
@@ -822,6 +995,7 @@ function startLoginWatch() {
         await loadDashboard();
         if (state.page === "settings") renderSettings().catch(() => {});
         else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
+        if (state.page === "overview") loadOverview(true).catch(() => {});
       }
     } catch (e) { /* ignore */ }
   };
@@ -865,6 +1039,7 @@ function renderUserMenu(accounts, activeId) {
         await loadDashboard();
         if (state.page === "settings") renderSettings().catch(() => {});
         else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
+        if (state.page === "overview") loadOverview(true).catch(() => {});
       } catch (e) { toast(e.message || t("loadFailed"), "err"); }
     });
   });
@@ -911,6 +1086,7 @@ async function onUserRowAction(id, act) {
       toast(t("switchedAccount"));
       await loadDashboard();
       renderSettings().catch(() => {});
+      if (state.page === "overview") loadOverview(true).catch(() => {});
     } catch (e) { toast(e.message || t("loadFailed"), "err"); }
     return;
   }
@@ -938,6 +1114,7 @@ async function onUserRowAction(id, act) {
           const r = await api("/api/accounts").catch(() => ({ accounts: [] }));
           renderUsersList(r.accounts || [], r.active_id);
           await loadDashboard();
+          if (state.page === "overview") loadOverview(true).catch(() => {});  // 退出后账号卡片即时移除
           if (!(r.accounts || []).some((x) => x.has_token)) showLoginOverlay(true);  // 全部退出 -> 欢迎页
         } catch (e) { toast(e.message || t("loadFailed"), "err"); }
       },
@@ -958,6 +1135,7 @@ async function onUserRowAction(id, act) {
           toast(t("userRenamed"));
           renderSettings().catch(() => {});
           loadDashboard(true);
+          if (state.page === "overview") loadOverview(true).catch(() => {});  // 卡片名称即时更新
         } catch (e) { toast(e.message || t("loadFailed"), "err"); }
       },
     });
@@ -979,6 +1157,7 @@ async function onUserRowAction(id, act) {
           toast(t("userDeleted"));
           await loadDashboard();
           renderSettings().catch(() => {});
+          if (state.page === "overview") loadOverview(true).catch(() => {});
           if ((r.remaining ?? 1) === 0) showLoginOverlay(true);
         } catch (e) { toast(e.message || t("loadFailed"), "err"); }
       },
@@ -1003,6 +1182,7 @@ function showLoginOverlay(show) {
           showLoginOverlay(false);
           await loadDashboard();
           renderSettings().catch(() => {});
+          if (state.page === "overview") loadOverview(true).catch(() => {});  // 新登录账号卡片即时出现
         }
       } catch (e) { /* ignore */ }
     }, 2000);
@@ -1112,6 +1292,12 @@ function bindEvents() {
     api("/api/settings", { method: "PUT", body: JSON.stringify({ auto_sync: e.target.checked }) }).catch(() => {});
     restartAutoSync();
   });
+  // 账户总览面板开关: 控制侧边栏入口显隐 (关闭时停留在总览页则退回首页)
+  $("set-overview-panel").addEventListener("change", (e) => {
+    state.settings.show_accounts_panel = e.target.checked;
+    api("/api/settings", { method: "PUT", body: JSON.stringify({ show_accounts_panel: e.target.checked }) }).catch(() => {});
+    applyOverviewPanel(e.target.checked);
+  });
   // 账户操作已合并进「OpenCode 账户」卡片内的账号行 (relogin/logout 为行级动作)
 
   // 多用户: 顶栏切换器 + 设置页账户列表
@@ -1193,6 +1379,7 @@ window.addEventListener("resize", () => {
       safeResize(cModel);
       safeResize(cTrend);
     }
+    if (!document.getElementById("page-overview").hidden) safeResize(cOvTrendChart);
   }, 250);
 });
 
@@ -1213,6 +1400,8 @@ let APP_VERSION = "";  // 后端版本号 (app/__init__.py), 唯一版本源
   try { state.settings = await api("/api/settings"); } catch (e) { /* ignore */ }
   syncSettingsPills();
   $("set-auto-sync").checked = state.settings.auto_sync !== false;
+  $("set-overview-panel").checked = state.settings.show_accounts_panel === true;
+  applyOverviewPanel(state.settings.show_accounts_panel === true);
   await checkState();
   restartAutoSync();
 })();
