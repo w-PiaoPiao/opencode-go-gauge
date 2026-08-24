@@ -11,6 +11,7 @@ Thumbs.db
 # Build
 build/
 entry/build/
+entry/.test/
 .hvigor/
 oh_modules/
 node_modules/
