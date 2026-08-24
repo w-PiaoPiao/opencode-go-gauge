@@ -2,5 +2,7 @@
   "modelVersion": "5.0.0",
   "description": "GoGauge - OpenCode Go 用量仪表盘 (HarmonyOS NEXT)",
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {
+    "@ohos/hypium": "1.0.18"
+  }
 }
