@@ -1,18 +1,18 @@
 /**
  * 内置 WebView 登录页 —— auth.py / android LoginScreen 的 ArkTS 移植。
  * 加载官方授权页, 登录完成后页面落到 opencode.ai 域, 用 WebCookieManager
- * 读取 HttpOnly 的 auth cookie, 解析工作区 hint 后持久化并返回。
+ * 读取 HttpOnly 的 auth cookie, 解析工作区 hint, 落库账号后返回。
  */
 import webview from '@ohos.web.webview'
 import router from '@ohos.router'
 import { Login } from '../common/auth/Login'
-import { AppPrefs } from '../common/store/AppPrefs'
+import { Repo } from '../data/repository/DashboardRepository'
 
 const POLL_INTERVAL_MS = 1000
 
 @Entry
 @Component
-export struct LoginPage {
+struct LoginPage {
   controller: webview.WebviewController = new webview.WebviewController()
   private pollTimer: number = -1
   private currentUrl: string = ''
@@ -93,7 +93,7 @@ export struct LoginPage {
     }
   }
 
-  private tryCapture(): void {
+  private async tryCapture(): Promise<void> {
     if (this.captured) {
       return
     }
@@ -109,11 +109,16 @@ export struct LoginPage {
     }
     this.captured = true
     this.stopPolling()
-    AppPrefs.setAuthCookie(segment)
-    AppPrefs.setWorkspaceHint(Login.extractWorkspaceHint(this.currentUrl))
-    this.statusText = '登录成功，正在进入仪表盘…'
-    setTimeout(() => {
-      router.back()
-    }, 600)
+    const hint: string = Login.extractWorkspaceHint(this.currentUrl)
+    try {
+      await Repo.get().loginSuccess(segment, hint, 'add')
+      this.statusText = '登录成功，正在进入仪表盘…'
+      setTimeout(() => {
+        router.back()
+      }, 600)
+    } catch (e) {
+      this.statusText = `登录失败: ${(e as Error).message}`
+      this.captured = false
+    }
   }
 }
