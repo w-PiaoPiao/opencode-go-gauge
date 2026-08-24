@@ -3,9 +3,12 @@
  * 子页面通过 refreshToken(带 @Watch) 统一触发刷新。
  */
 import { Repo } from '../data/repository/DashboardRepository'
+import { I18n } from '../common/i18n/I18n'
+import { Theme } from './theme/Theme'
 import { HomePage } from './pages/HomePage'
 import { StatsPage } from './pages/StatsPage'
 import { RecordsPage } from './pages/RecordsPage'
+import { SettingsPage } from './pages/SettingsPage'
 
 @Component
 export struct AppRoot {
@@ -23,6 +26,12 @@ export struct AppRoot {
   private async refreshAccount(): Promise<void> {
     const acct = await Repo.get().account()
     this.accountName = acct !== null ? acct.name : ''
+  }
+
+  /** 切 tab 时刷新外壳外观/文案 (语言/主题变化即时生效)。 */
+  private selectTab(key: string): void {
+    this.tab = key
+    this.refreshToken++
   }
 
   private async doSync(): Promise<void> {
@@ -57,7 +66,7 @@ export struct AppRoot {
           } else if (this.tab === 'records') {
             RecordsPage({ refreshToken: this.refreshToken })
           } else {
-            this.settingsPlaceholder()
+            SettingsPage({ refreshToken: this.refreshToken })
           }
         }
         .layoutWeight(1)
@@ -81,28 +90,29 @@ export struct AppRoot {
       Text('GoGauge')
         .fontSize(16)
         .fontWeight(FontWeight.Bold)
+        .fontColor(Theme.text())
       Blank()
       Text(this.accountName)
         .fontSize(12)
-        .fontColor('#666666')
+        .fontColor(Theme.sub())
       if (this.syncMsg.length > 0) {
         Text(this.syncMsg)
           .fontSize(11)
-          .fontColor('#999999')
+          .fontColor(Theme.faint())
           .maxLines(1)
       }
-      Button(this.syncing ? '同步中…' : '同步')
+      Button(this.syncing ? I18n.t('syncing') : I18n.t('sync'))
         .fontSize(12)
         .height(30)
-        .backgroundColor('#3B82F6')
+        .backgroundColor(Theme.accent())
         .enabled(!this.syncing)
         .onClick(() => {
           this.doSync()
         })
-      Button('退出')
+      Button(I18n.t('logout'))
         .fontSize(12)
         .height(30)
-        .backgroundColor('#E74C3C')
+        .backgroundColor(Theme.danger())
         .onClick(async () => {
           await Repo.get().logout()
           this.accountName = ''
@@ -111,20 +121,20 @@ export struct AppRoot {
     .width('100%')
     .height(48)
     .padding({ left: 12, right: 12 })
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(Theme.surface())
   }
 
   @Builder
   bottomNav() {
     Row() {
-      this.navItem('home', '首页')
-      this.navItem('stats', '统计')
-      this.navItem('records', '记录')
-      this.navItem('settings', '设置')
+      this.navItem('home', I18n.t('tab_home'))
+      this.navItem('stats', I18n.t('tab_stats'))
+      this.navItem('records', I18n.t('tab_records'))
+      this.navItem('settings', I18n.t('tab_settings'))
     }
     .width('100%')
     .height(52)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(Theme.surface())
   }
 
   @Builder
@@ -141,7 +151,7 @@ export struct AppRoot {
     .height(52)
     .justifyContent(FlexAlign.Center)
     .onClick(() => {
-      this.tab = key
+      this.selectTab(key)
     })
   }
 
@@ -151,17 +161,18 @@ export struct AppRoot {
       Text('GoGauge')
         .fontSize(18)
         .fontWeight(FontWeight.Bold)
+        .fontColor(Theme.text())
         .padding({ top: 16, bottom: 20 })
-      this.sideItem('home', '⌂ 首页')
-      this.sideItem('stats', '◔ 统计')
-      this.sideItem('records', '≡ 记录')
-      this.sideItem('settings', '⚙ 设置')
+      this.sideItem('home', `⌂ ${I18n.t('tab_home')}`)
+      this.sideItem('stats', `◔ ${I18n.t('tab_stats')}`)
+      this.sideItem('records', `≡ ${I18n.t('tab_records')}`)
+      this.sideItem('settings', `⚙ ${I18n.t('tab_settings')}`)
       Blank()
     }
     .width(150)
     .height('100%')
     .padding({ left: 8, right: 8 })
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(Theme.surface())
   }
 
   @Builder
@@ -175,30 +186,8 @@ export struct AppRoot {
       .borderRadius(8)
       .backgroundColor(this.tab === key ? '#EFF4FF' : '#00000000')
       .onClick(() => {
-        this.tab = key
+        this.selectTab(key)
       })
-  }
-
-  @Builder
-  settingsPlaceholder() {
-    Column({ space: 12 }) {
-      Text('设置页 (M4 开发中)')
-        .fontSize(16)
-        .fontWeight(FontWeight.Bold)
-      Text(`账号: ${this.accountName}`)
-        .fontSize(13)
-        .fontColor('#666666')
-      Button('退出登录')
-        .height(40)
-        .backgroundColor('#E74C3C')
-        .onClick(async () => {
-          await Repo.get().logout()
-          this.accountName = ''
-        })
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
   }
 
   private tabIcon(key: string): string {

@@ -16,9 +16,19 @@ struct LoginPage {
   controller: webview.WebviewController = new webview.WebviewController()
   private pollTimer: number = -1
   private currentUrl: string = ''
+  private loginMode: string = 'add'
   @State private src: string = Login.buildLoginUrl()
   @State private statusText: string = '正在加载授权页…'
   @State private captured: boolean = false
+
+  aboutToAppear(): void {
+    const params = router.getParams() as Record<string, string> | null
+    if (params !== null && params['mode'] === 'relogin') {
+      this.loginMode = 'relogin'
+    } else {
+      this.loginMode = 'add'
+    }
+  }
 
   aboutToDisappear(): void {
     this.stopPolling()
@@ -111,7 +121,7 @@ struct LoginPage {
     this.stopPolling()
     const hint: string = Login.extractWorkspaceHint(this.currentUrl)
     try {
-      await Repo.get().loginSuccess(segment, hint, 'add')
+      await Repo.get().loginSuccess(segment, hint, this.loginMode)
       this.statusText = '登录成功，正在进入仪表盘…'
       setTimeout(() => {
         router.back()
