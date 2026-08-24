@@ -520,6 +520,45 @@ export class DashboardRepository {
   async logout(): Promise<void> {
     return this.syncDao.clearAccount()
   }
+
+  /**
+   * 开发调试: 注入一组模拟用量记录 (360 条, 覆盖今天全部 24 小时/多模型/多会话/多 key),
+   * 用于无网络环境下验证图表/列表渲染 (上架截图前准备数据)。返回新增条数。
+   */
+  async injectSampleData(): Promise<number> {
+    const aid = await this.syncDao.getActiveAccountId()
+    const models: string[] = ['deepseek-chat', 'gpt-4o', 'qwen-max', 'glm-4', 'claude-sonnet']
+    const now = Date.now()
+    const records: UsageRecord[] = []
+    for (let i = 0; i < 360; i++) {
+      const t = now - i * 15 * 60 * 1000
+      const model = models[i % models.length]
+      records.push({
+        usgId: `usg_sample_${i}`,
+        createdAt: new Date(t).toISOString(),
+        model: model,
+        provider: model.split('-')[0],
+        inputTokens: 100 + (i * 37) % 5000,
+        outputTokens: 50 + (i * 23) % 2000,
+        reasoningTokens: (i * 11) % 300,
+        cacheReadTokens: (i * 7) % 900,
+        cacheWrite5mTokens: (i * 5) % 200,
+        cacheWrite1hTokens: (i * 3) % 100,
+        costRaw: 1000000 + (i * 12345) % 90000000,
+        keyId: i % 2 === 0 ? 'key_demo1' : 'key_demo2',
+        sessionId: `ses_${Math.floor(i / 6) % 25}`,
+        plan: i % 3 === 0 ? 'lite' : null,
+      })
+    }
+    const syncedAt = new Date().toISOString()
+    const entities = records.map((r) => toEntity(r, syncedAt, aid))
+    const inserted = await this.usageDao.insertUsageRecords(entities, aid)
+    const names: Map<string, string> = new Map()
+    names.set('key_demo1', '产品密钥')
+    names.set('key_demo2', '测试密钥')
+    await AppDb.settingsDao().saveKeyNames(names)
+    return inserted
+  }
 }
 
 export function toEntity(r: UsageRecord, syncedAt: string, accountId: number): UsageRecordEntity {

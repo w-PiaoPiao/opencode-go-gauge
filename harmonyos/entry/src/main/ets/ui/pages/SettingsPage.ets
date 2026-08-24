@@ -336,6 +336,24 @@ export struct SettingsPage {
         Text(I18n.t('privacy'))
           .fontSize(11)
           .fontColor(Theme.sub())
+        Divider()
+          .color(Theme.divider())
+        Row() {
+          Text('注入模拟数据 (调试)')
+            .fontSize(12)
+            .fontColor(Theme.sub())
+          Blank()
+          Button('注入 360 条')
+            .fontSize(11)
+            .height(28)
+            .backgroundColor(Theme.surfaceSoft())
+            .fontColor(Theme.accent())
+            .onClick(async () => {
+              const n = await Repo.get().injectSampleData()
+              this.updateMsg = `已注入 ${n} 条模拟记录`
+            })
+        }
+        .width('100%')
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
