@@ -194,6 +194,17 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 },
             )
             SetRow(
+                s.overviewPanel, s.overviewPanelDesc,
+                trailing = {
+                    Switch(
+                        checked = vm.settings.showAccountsPanel,
+                        onCheckedChange = { on ->
+                            vm.saveSettings(vm.settings.copy(showAccountsPanel = on))
+                        },
+                    )
+                },
+            )
+            SetRow(
                 s.currency, s.currencyDesc,
                 stacked = true,
                 trailing = {

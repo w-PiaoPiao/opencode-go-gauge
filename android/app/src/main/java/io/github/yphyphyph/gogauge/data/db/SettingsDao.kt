@@ -36,6 +36,8 @@ abstract class SettingsDao {
                     else -> v.toIntOrNull()?.coerceIn(1, 3650) ?: defaults().windowDays
                 },
                 autoSync = obj["auto_sync"]?.jsonPrimitive?.contentOrNull()?.toBooleanStrictOrNull() ?: defaults().autoSync,
+                showAccountsPanel = obj["show_accounts_panel"]?.jsonPrimitive?.contentOrNull()
+                    ?.toBooleanStrictOrNull() ?: defaults().showAccountsPanel,
             )
         } catch (e: Exception) {
             defaults()
@@ -48,6 +50,7 @@ abstract class SettingsDao {
             syncIntervalSec = patch.syncIntervalSec.coerceIn(30, 3600),
             windowDays = patch.windowDays?.coerceIn(1, 3650),
             autoSync = patch.autoSync,
+            showAccountsPanel = patch.showAccountsPanel,
         )
         // 保存时在既有 payload 上合并覆盖 (与桌面 db.save_settings 的整行 JSON 覆盖不同,
         // 安卓端 settings 行还承载 active_account_id 等运行时键, 不能整包丢弃)
@@ -62,6 +65,7 @@ abstract class SettingsDao {
             put("sync_interval_sec", JsonPrimitive(merged.syncIntervalSec))
             put("window_days", merged.windowDays?.let { JsonPrimitive(it) } ?: JsonNull)
             put("auto_sync", JsonPrimitive(merged.autoSync))
+            put("show_accounts_panel", JsonPrimitive(merged.showAccountsPanel))
             put("key_names", buildJsonObject { for ((k, v) in keyNames) put(k, JsonPrimitive(v)) })
         }.toString()
         savePayload(payload, java.time.Instant.now().toString())

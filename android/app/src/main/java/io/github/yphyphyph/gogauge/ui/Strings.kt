@@ -194,6 +194,17 @@ open class Strings(
     val cacheWrite: String,
     val newCacheWrites: String,
     val loginTitle: String,
+    // 账户总览面板 (desktop v2.1.0)
+    val accountOverview: String,
+    val costTrend7d: String,
+    val todayTotalReq: String,
+    val todayTotalTokens: String,
+    val todayTotalInput: String,
+    val todayTotalCost: String,
+    val activeAccount: String,
+    val quotaNotReady: String,
+    val overviewPanel: String,
+    val overviewPanelDesc: String,
 )
 
 object ZhStrings : Strings(
@@ -284,6 +295,11 @@ object ZhStrings : Strings(
     updateFailed = "检查更新失败", goDownload = "前往下载",
     cacheWrite = "缓存写", newCacheWrites = "新写入缓存",
     loginTitle = "连接 OpenCode Go",
+    accountOverview = "账户总览", costTrend7d = "7 日费用趋势对比",
+    todayTotalReq = "今日总请求", todayTotalTokens = "今日总 TOKEN",
+    todayTotalInput = "今日总输入", todayTotalCost = "今日总费用",
+    activeAccount = "当前活跃", quotaNotReady = "配额获取中…",
+    overviewPanel = "账户总览面板", overviewPanelDesc = "底部导航显示多账户总览入口，聚合展示各账户配额与用量",
 )
 
 object EnStrings : Strings(
@@ -374,4 +390,9 @@ object EnStrings : Strings(
     updateFailed = "Check failed", goDownload = "Go to Download",
     cacheWrite = "Cache Write", newCacheWrites = "new cache writes",
     loginTitle = "Connect OpenCode Go",
+    accountOverview = "Accounts Overview", costTrend7d = "7-Day Cost Trend",
+    todayTotalReq = "Today Requests", todayTotalTokens = "Today Tokens",
+    todayTotalInput = "Today Input", todayTotalCost = "Today Cost",
+    activeAccount = "Active", quotaNotReady = "Fetching quota…",
+    overviewPanel = "Accounts Panel", overviewPanelDesc = "Show multi-account overview entry in bottom navigation",
 )

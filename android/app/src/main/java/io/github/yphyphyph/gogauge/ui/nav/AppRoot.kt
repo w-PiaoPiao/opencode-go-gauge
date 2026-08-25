@@ -23,6 +23,7 @@ import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.auth.LoginScreen
 import io.github.yphyphyph.gogauge.ui.auth.WelcomeScreen
 import io.github.yphyphyph.gogauge.ui.home.HomeScreen
+import io.github.yphyphyph.gogauge.ui.overview.OverviewScreen
 import io.github.yphyphyph.gogauge.ui.records.RecordsScreen
 import io.github.yphyphyph.gogauge.ui.settings.SettingsScreen
 import io.github.yphyphyph.gogauge.ui.stats.StatsScreen
@@ -55,10 +56,25 @@ private fun MainShell(vm: MainViewModel) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
 
+    // 账户总览入口由设置开关控制 (desktop applyOverviewPanel parity);
+    // 关闭时若停留在总览页则退回首页
+    val showOverviewTab = vm.settings.showAccountsPanel
+    LaunchedEffect(showOverviewTab) {
+        if (!showOverviewTab &&
+            currentDestination?.hierarchy?.any { it.route == GgTab.Overview.route } == true
+        ) {
+            navController.navigate(GgTab.Home.route) {
+                popUpTo(navController.graph.startDestinationId) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
-                GgTab.entries.forEach { tab ->
+                GgTab.entries.filter { it != GgTab.Overview || showOverviewTab }.forEach { tab ->
                     NavigationBarItem(
                         selected = currentDestination?.hierarchy?.any { it.route == tab.route } == true,
                         onClick = {
@@ -91,6 +107,7 @@ private fun MainShell(vm: MainViewModel) {
             }
             composable(GgTab.Stats.route) { StatsScreen(vm) }
             composable(GgTab.Records.route) { RecordsScreen(vm) }
+            composable(GgTab.Overview.route) { OverviewScreen(vm) }
             composable(GgTab.Settings.route) { SettingsScreen(vm) }
         }
     }

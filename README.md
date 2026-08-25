@@ -22,7 +22,7 @@
 |:---:|:---:|:---|:---|
 | **Windows** | ✅ 正式版 | [上游 Releases](https://github.com/yphyphyph/opencode-go-gauge/releases)：`GoGauge.exe`（单文件，无需安装） | — |
 | **macOS** | ✅ 正式版 | [本仓库 Releases](releases)：arm64 / x86_64 分包（以 Releases 页实际产物为准） | [docs/macos.md](docs/macos.md) |
-| **Android** | ✅ 正式版 | [本仓库 Releases](releases)：`GoGauge-v2.0.0-android.apk`（APK 侧载） | [android/README.md](android/README.md) |
+| **Android** | ✅ 正式版 | [本仓库 Releases](releases)：`GoGauge-v2.1.0-android.apk`（APK 侧载） | [android/README.md](android/README.md) |
 | **HarmonyOS NEXT** | 🚧 开发中（M1 骨架与登录已提交） | HAP（构建/签名/上架见 [harmonyos/README.md](harmonyos/README.md)） | [harmonyos/README.md](harmonyos/README.md) |
 
 ---
@@ -52,6 +52,7 @@
 - **会话历史**：按会话聚合请求数 / 输入 / 输出 / 推理 / 总 Token / 成本，分页浏览
 - **使用记录**：请求级明细分页浏览，支持模型筛选，含模型 / Key 名称列
 - **多账号支持**：用户管理（添加 / 切换 / 重命名 / 删除 / 重新登录），用量按账号隔离，记录与会话表显示 Key 名称列
+- **账户总览面板**：设置中可开关，聚合展示各账户配额三窗口、今日用量与跨账号合计 KPI、7 日费用趋势对比
 - **内置 WebView 登录**：独立登录窗口打开官方授权页，自动回填 cookie 与工作区，无需手动复制
 - **自动同步**：增量同步（1/5/15/30 分钟可选）+ 同步范围设置（30/60/90/180 天 / 所有）
 - **双主题**：亮色 / 深色一键切换；中英双语界面
@@ -80,7 +81,7 @@
 
 ### Android
 
-从本仓库 [Releases](releases) 下载 `GoGauge-v2.0.0-android.apk`，在系统设置中允许「安装未知来源应用」后侧载安装。
+从本仓库 [Releases](releases) 下载 `GoGauge-v2.1.0-android.apk`，在系统设置中允许「安装未知来源应用」后侧载安装。
 
 > Android 版为 Kotlin + Jetpack Compose 原生实现，功能与桌面版一致，
 > 构建 / 技术栈 / 与桌面版的差异详见 [android/README.md](android/README.md)。

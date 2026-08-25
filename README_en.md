@@ -51,6 +51,7 @@
 - **Session history**: per-session aggregation of requests / input / output / reasoning / total tokens / cost, paginated
 - **Usage records**: request-level detail with pagination and model filtering, incl. model / key-name columns
 - **Multi-account support**: user management (add / switch / rename / remove / re-login), usage isolated per account, key-name column on records & sessions
+- **Accounts overview panel**: toggle in settings, aggregates each account's quota windows and today's usage with cross-account summary KPIs and a 7-day cost trend comparison
 - **Built-in WebView login**: independent login window opens the official auth page, auto-fills cookie & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)
