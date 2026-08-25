@@ -1,6 +1,8 @@
 package io.github.yphyphyph.gogauge.data.repository
 
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
+import io.github.yphyphyph.gogauge.data.model.AccountOverview
+import io.github.yphyphyph.gogauge.data.model.AccountsOverviewData
 import io.github.yphyphyph.gogauge.data.model.DashboardData
 import io.github.yphyphyph.gogauge.data.model.PageResult
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
@@ -114,11 +116,16 @@ class DashboardRepository(
         return ok
     }
 
+    private fun clearQuotaSlot(accountId: Int) {
+        synchronized(quotaCache) { quotaCache.remove(accountId) }
+    }
+
     suspend fun renameAccount(accountId: Int, name: String): Boolean = syncDao.renameAccount(accountId, name)
 
     /** 返回剩余账号数 (desktop /api/accounts/delete remaining 口径). */
     suspend fun deleteAccount(accountId: Int): Int {
         val remaining = syncDao.deleteAccount(accountId)
+        clearQuotaSlot(accountId)  // 账号已删除, 配额缓存一并清除
         _quota.value = null
         return remaining
     }
@@ -143,7 +150,11 @@ class DashboardRepository(
         ensureQuotaFor(activeAccountId())
     }
 
-    private suspend fun ensureQuotaFor(accountId: Int) {
+    /**
+     * 刷新任意账号 (含非活跃账号) 的配额缓存 — desktop v2.1.0 _ensure_quota_async(aid) parity:
+     * 凭证直接从 accounts 表读取, 供账户总览面板使用; 30s 缓存 + 防重入.
+     */
+    suspend fun ensureQuotaFor(accountId: Int) {
         if (accountId == 0) return
         val now = System.currentTimeMillis() / 1000.0
         val slot = synchronized(quotaCache) { quotaCache[accountId] }
@@ -228,6 +239,42 @@ class DashboardRepository(
                 serverTime = now,
             )
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Accounts overview (server.py GET /api/accounts/overview parity — v2.1.0)
+    // ------------------------------------------------------------------
+
+    /**
+     * 账户总览面板数据: 仅返回已登录账号, 聚合各自配额缓存 / 今日合计 / 24h 趋势 / 7 日统计.
+     * 配额缺失的账号由调用方先触发后台刷新 (ensureQuotaFor), 本次先返回缓存值.
+     */
+    suspend fun accountsOverview(): AccountsOverviewData {
+        val activeId = activeAccountId()
+        val loggedIn = accounts().filter { it.hasToken }
+        val list = loggedIn.map { acc ->
+            val aid = acc.id
+            val slot = synchronized(quotaCache) { quotaCache[aid] }
+            coroutineScope {
+                val todayDeferred = async { usageDao.totals("today", aid) }
+                val trendDeferred = async { usageDao.todayTrend(aid) }
+                val dailyDeferred = async { usageDao.dailyStats(7, aid) }
+                val syncDeferred = async { syncDao.getSyncStateFor(aid) }
+                val syncState = syncDeferred.await()
+                AccountOverview(
+                    id = aid,
+                    name = acc.name,
+                    active = aid == activeId,
+                    quota = slot?.data,
+                    today = todayDeferred.await(),
+                    todayTrend = trendDeferred.await(),
+                    daily7 = dailyDeferred.await(),
+                    lastSyncAt = syncState.lastSyncAt,
+                    lastSyncStatus = syncState.lastSyncStatus,
+                )
+            }
+        }
+        return AccountsOverviewData(accounts = list, usdCny = usdCny())
     }
 
     // ------------------------------------------------------------------
@@ -500,8 +547,16 @@ class DashboardRepository(
 
     suspend fun saveSettings(patch: AppSettings): AppSettings = db.settingsDao().saveSettings(patch)
 
-    /** 退出登录当前活跃账号 (清其数据, 保留账号行). */
-    suspend fun logout() = syncDao.clearAccount()
+    /**
+     * 退出登录当前活跃账号 (清其数据, 保留账号行).
+     * 退出前记录账号 id, 退出后清理其配额缓存槽 — 防止残留旧配额 (desktop v2.1.0 fix parity).
+     */
+    suspend fun logout() {
+        val aid = activeAccountId()
+        syncDao.clearAccount()
+        if (aid != 0) clearQuotaSlot(aid)
+        _quota.value = null
+    }
 
     @Deprecated("Use loginSuccess(token, hint, mode)", ReplaceWith("loginSuccess(token, workspaceHint, \"relogin\")"))
     suspend fun saveLogin(token: String, workspaceHint: String) = loginSuccess(token, workspaceHint, "relogin")

@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.yphyphyph.gogauge.GoGaugeApp
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
+import io.github.yphyphyph.gogauge.data.model.AccountsOverviewData
 import io.github.yphyphyph.gogauge.data.model.AppSettings
 import io.github.yphyphyph.gogauge.data.model.DashboardData
 import io.github.yphyphyph.gogauge.data.model.PageResult
@@ -67,6 +68,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 已登录账号数 (顶栏计数与列表口径一致). */
     val loggedInCount: Int get() = accounts.count { it.hasToken }
 
+    // ---- 账户总览面板 (desktop /api/accounts/overview parity, v2.1.0) ----
+    var overview by mutableStateOf<AccountsOverviewData?>(null)
+        private set
+
     // ---- home page ----
     var homeRange by mutableStateOf("today")
         private set
@@ -104,6 +109,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var autoSyncJob: Job? = null
     private var quotaRefreshJob: Job? = null
     private var runningAutoSyncKey: String? = null
+
+    // 账户总览: 序号守卫丢弃过期响应 + 5s 静默重拉 (desktop ovSeq/ovRetryTimer parity)
+    private var ovSeq = 0
+    private var ovRetryJob: Job? = null
+    private var overviewVisible = false
 
     init {
         scope.launch {
@@ -235,6 +245,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.e("GoGauge", "loadDashboard failed range=$range", e)
             } finally {
                 loading = false
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Accounts overview (desktop v2.1.0 账户总览面板 parity)
+    // ------------------------------------------------------------------
+
+    /** 页面可见性: 离开总览页后停止 5s 静默重拉循环. */
+    fun setOverviewVisible(visible: Boolean) {
+        overviewVisible = visible
+        if (!visible) ovRetryJob?.cancel()
+    }
+
+    /**
+     * 加载账户总览: 为每个已登录账号触发后台配额刷新 (非活跃账号凭证直读 accounts 表,
+     * 不阻塞响应), 再聚合本地数据立即渲染; 有配额未就绪时 5s 后静默重拉,
+     * 直到补齐或离开页面 (desktop loadOverview + ovRetryTimer parity).
+     */
+    fun loadOverview(quiet: Boolean = false) {
+        val seq = ++ovSeq
+        scope.launch {
+            try {
+                val loggedIn = repo.accounts().filter { it.hasToken }
+                loggedIn.forEach { acc ->
+                    launch { repo.ensureQuotaFor(acc.id) }
+                }
+                val data = repo.accountsOverview()
+                if (seq != ovSeq) return@launch  // 丢弃过期响应 (快速切换页面时旧请求)
+                overview = data
+                val missing = data.accounts.any { it.quota == null }
+                ovRetryJob?.cancel()
+                if (missing && overviewVisible) {
+                    ovRetryJob = scope.launch {
+                        delay(5000)
+                        if (seq == ovSeq && overviewVisible) loadOverview(true)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("GoGauge", "loadOverview failed", e)
             }
         }
     }

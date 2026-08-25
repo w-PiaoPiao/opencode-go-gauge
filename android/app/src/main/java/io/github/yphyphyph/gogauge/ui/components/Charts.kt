@@ -1,11 +1,17 @@
 package io.github.yphyphyph.gogauge.ui.components
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.BarChart
@@ -157,6 +163,48 @@ private fun getVal(m: ModelStat, dim: String): Double = when (dim) {
     "output" -> m.totalOutputTokens.toDouble()
     "cost" -> m.totalCostUsd
     else -> m.uncachedInputTokens.toDouble()
+}
+
+/**
+ * 24h 迷你趋势 — desktop sparklineSvg parity: 纯 Canvas 折线 + 12% 透明度填充,
+ * 无图表实例, 随账号卡片轻量渲染.
+ */
+@Composable
+fun Sparkline(
+    values: List<Long>,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        val n = values.size
+        if (n == 0) return@Canvas
+        val maxV = (values.maxOrNull() ?: 0L).coerceAtLeast(1L).toFloat()
+        val w = size.width
+        val h = size.height
+        val pad = 2.dp.toPx()
+        val step = if (n > 1) w / (n - 1) else w
+        val points = values.mapIndexed { i, v ->
+            Offset(i * step, h - pad - (v / maxV) * (h - 2 * pad))
+        }
+        val linePath = Path().apply {
+            moveTo(points.first().x, points.first().y)
+            for (i in 1 until points.size) lineTo(points[i].x, points[i].y)
+        }
+        drawPath(
+            Path().apply {
+                addPath(linePath)
+                lineTo(w, h)
+                lineTo(0f, h)
+                close()
+            },
+            color = color.copy(alpha = 0.12f),
+        )
+        drawPath(
+            linePath,
+            color = color,
+            style = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+        )
+    }
 }
 
 /** Usage trend 3-line dual-axis — desktop chartTrend (cost left, requests right, tokens hidden axis). */

@@ -82,6 +82,7 @@ data class AppSettings(
     val syncIntervalSec: Int = 300,   // 1/5/15/30 min
     val windowDays: Int? = 60,        // 30/60/90/180, null = all
     val autoSync: Boolean = true,
+    val showAccountsPanel: Boolean = false,  // 账户总览面板开关 (v2.1.0)
 )
 
 /** Dashboard bundle — mirrors GET /api/dashboard (desktop). */
@@ -108,4 +109,24 @@ data class AccountInfo(
     val workspaceId: String,
     val resolvedWorkspaceId: String?,
     val hasToken: Boolean,
+)
+
+/** 单账号总览卡片数据 — mirrors server.py /api/accounts/overview 的 accounts[i] (desktop v2.1.0). */
+data class AccountOverview(
+    val id: Int,
+    val name: String,
+    val active: Boolean,
+    /** 配额缓存槽当前值; null = 尚未就绪 (后台刷新中) */
+    val quota: QuotaResult?,
+    val today: Totals,
+    val todayTrend: List<HourStat>,
+    val daily7: List<DailyStat>,
+    val lastSyncAt: String?,
+    val lastSyncStatus: String?,
+)
+
+/** 账户总览聚合 — mirrors GET /api/accounts/overview 响应体 (desktop v2.1.0). */
+data class AccountsOverviewData(
+    val accounts: List<AccountOverview>,
+    val usdCny: Double,
 )
