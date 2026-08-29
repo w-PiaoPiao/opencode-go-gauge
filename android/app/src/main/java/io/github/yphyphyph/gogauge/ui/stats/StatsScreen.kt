@@ -85,7 +85,7 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
         }
         PillRow(
             options = listOf(
-                "today" to s.today, "7d" to s.d7, "30d" to s.d30, "all" to s.all,
+                "today" to s.today, "7d" to s.d7, "30d" to s.d30, "month" to s.month, "all" to s.all,
             ),
             selected = vm.statsRange,
             onSelect = vm::changeStatsRange,

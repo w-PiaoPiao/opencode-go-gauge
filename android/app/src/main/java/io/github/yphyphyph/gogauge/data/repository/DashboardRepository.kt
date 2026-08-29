@@ -18,6 +18,7 @@ import io.github.yphyphyph.gogauge.data.remote.OpenCodeApiException
 import io.github.yphyphyph.gogauge.data.remote.UpdateApi
 import io.github.yphyphyph.gogauge.data.remote.UpdateInfo
 import io.github.yphyphyph.gogauge.data.db.AppDatabase
+import io.github.yphyphyph.gogauge.data.db.MonthlyCycle
 import io.github.yphyphyph.gogauge.data.db.SyncDao
 import io.github.yphyphyph.gogauge.data.db.UsageDao
 import io.github.yphyphyph.gogauge.data.model.AppSettings
@@ -178,6 +179,15 @@ class DashboardRepository(
                 null
             }
             if (accountId == activeAccountId()) _quota.value = target.data
+            // 配额拉取成功后持久化月度窗口的重置时间 (供「本月」筛选推算周期起点,
+            // desktop server._record_monthly_reset parity); 失败不影响配额返回.
+            target.data?.takeIf { it.success }?.windows?.firstOrNull { it.label == "Monthly" }?.let { w ->
+                try {
+                    db.settingsDao().saveMonthlyReset(accountId, formatResetUtc(w.resetAt))
+                } catch (e: Exception) {
+                    android.util.Log.w("GoGauge", "saveMonthlyReset failed", e)
+                }
+            }
             android.util.Log.i(
                 "GoGauge",
                 "quota refreshed acc=$accountId success=" + (target.data?.success) + " err=" + (target.data?.error),
@@ -185,6 +195,17 @@ class DashboardRepository(
         } finally {
             quotaRefreshing.remove(accountId)
         }
+    }
+
+    /**
+     * Quota resetAt (Instant ISO) -> UTC "yyyy-MM-dd HH:mm:ss" —
+     * desktop record_monthly_reset 存储格式 parity; 解析失败返回 null (不落库).
+     */
+    private fun formatResetUtc(resetAt: String): String? = try {
+        java.time.LocalDateTime.ofInstant(java.time.Instant.parse(resetAt), java.time.ZoneOffset.UTC)
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+    } catch (e: Exception) {
+        null
     }
 
     private suspend fun usdCny(): Double {
@@ -213,14 +234,19 @@ class DashboardRepository(
         val quota = if (token.isNotEmpty()) _quota.value else null
         val now = java.time.LocalDateTime.now()
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+        // 「本月」= 当前月度重置周期: 从持久化的下次月度重置时间推算周期起点 (desktop parity);
+        // 无配额记录时为 null, DAO 层回退滚动 30 天.
+        val cycleStart = if (range == "month") {
+            MonthlyCycle.start(db.settingsDao().getMonthlyReset(aid), MonthlyCycle.nowUtc())
+        } else null
         // Run the independent DB/exchange queries concurrently to cut first-paint latency.
         return coroutineScope {
-            val totalsDeferred = async { usageDao.totals(range, aid) }
+            val totalsDeferred = async { usageDao.totals(range, aid, cycleStart) }
             val todayDeferred = async { usageDao.totals("today", aid) }
             val dailyDeferred = async { usageDao.dailyStats(7, aid) }
             val trendDeferred = async { usageDao.dailyStats(30, aid) }
             val todayTrendDeferred = async { usageDao.todayTrend(aid) }
-            val modelsDeferred = async { usageDao.modelStats(range, aid) }
+            val modelsDeferred = async { usageDao.modelStats(range, aid, cycleStart) }
             val syncDeferred = async { syncDao.getSyncStateFor(aid) }
             val usdCnyDeferred = async { usdCny() }
             DashboardData(

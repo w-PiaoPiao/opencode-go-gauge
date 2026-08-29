@@ -65,8 +65,12 @@ abstract class UsageDao {
     /**
      * Period where builder — mirrors db._PERIOD_CLAUSES + _period_where;
      * 返回不含 WHERE 前缀的条件与参数, 由调用方与 account_id 过滤组合.
+     *
+     * "month" = 「本月」, 按当前月度重置周期 (最近激活的 $10 付费期间) 筛选:
+     * [cycleStart] 为周期起点 (UTC "yyyy-MM-dd HH:mm:ss", 由调用方从持久化的
+     * 下次月度重置时间推算); 起点缺失 (配额从未拉到) 时回退滚动 30 天, 与 "30d" 口径一致.
      */
-    private fun periodClause(period: String): Pair<String?, Array<Any>> {
+    private fun periodClause(period: String, cycleStart: String?): Pair<String?, Array<Any>> {
         val clause: String?
         val args: Array<Any>
         when (period) {
@@ -77,6 +81,13 @@ abstract class UsageDao {
             "today" -> {
                 clause = "substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')"
                 args = emptyArray()
+            }
+            "month" -> if (cycleStart != null) {
+                clause = "datetime(created_at) >= datetime(?)"
+                args = arrayOf(cycleStart)
+            } else {
+                clause = "datetime(created_at) >= datetime('now', ?)"
+                args = arrayOf("-${MonthlyCycle.PERIOD_DAYS} days")
             }
             "all" -> return null to emptyArray()
             else -> {
@@ -89,8 +100,8 @@ abstract class UsageDao {
     }
 
     /** 组合 WHERE: account 过滤恒在首位, 周期条件以 AND 追加. */
-    private fun buildWhere(period: String, accountId: Int): Pair<String, Array<Any>> {
-        val (clause, args) = periodClause(period)
+    private fun buildWhere(period: String, accountId: Int, cycleStart: String? = null): Pair<String, Array<Any>> {
+        val (clause, args) = periodClause(period, cycleStart)
         val allArgs = listOf<Any>(accountId) + args.toList()
         return if (clause == null) {
             "WHERE account_id = ?" to arrayOf<Any>(accountId)
@@ -116,8 +127,8 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun totalsRaw(query: SupportSQLiteQuery): TotalsRow
 
-    suspend fun totals(period: String, accountId: Int): Totals {
-        val (where, args) = buildWhere(period, accountId)
+    suspend fun totals(period: String, accountId: Int, cycleStart: String? = null): Totals {
+        val (where, args) = buildWhere(period, accountId, cycleStart)
         val row = totalsRaw(SimpleSQLiteQuery(totalsSql(where), args))
         val hit = row.cacheHitTokens
         val miss = row.uncachedInputTokens
@@ -210,8 +221,8 @@ abstract class UsageDao {
     }
 
     /** Per-model aggregation — mirrors db.model_stats (按账号). */
-    suspend fun modelStats(period: String, accountId: Int): List<ModelStat> {
-        val (where, args) = buildWhere(period, accountId)
+    suspend fun modelStats(period: String, accountId: Int, cycleStart: String? = null): List<ModelStat> {
+        val (where, args) = buildWhere(period, accountId, cycleStart)
         val rows = modelStatsRaw(
             SimpleSQLiteQuery(
                 """

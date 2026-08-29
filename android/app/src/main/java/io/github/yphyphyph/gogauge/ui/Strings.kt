@@ -13,6 +13,7 @@ open class Strings(
     val today: String,
     val d7: String,
     val d30: String,
+    val month: String,
     val all: String,
     val overviewTitle: String,
     val followRange: String,
@@ -209,7 +210,7 @@ open class Strings(
 
 object ZhStrings : Strings(
     syncing = "同步中", themeDark = "暗色", themeLight = "亮色", refresh = "刷新",
-    homeTitle = "用量统计总览", today = "今天", d7 = "近7天", d30 = "近30天", all = "全部",
+    homeTitle = "用量统计总览", today = "今天", d7 = "近7天", d30 = "近30天", month = "本月", all = "全部",
     overviewTitle = "用量概览", followRange = "数据跟随时间范围",
     todayTrend = "今日趋势", hours24 = "24 小时",
     statsTitle = "用量统计", tokenBreakdown = "Token 构成",
@@ -304,7 +305,7 @@ object ZhStrings : Strings(
 
 object EnStrings : Strings(
     syncing = "Syncing", themeDark = "Dark", themeLight = "Light", refresh = "Refresh",
-    homeTitle = "Usage Overview", today = "Today", d7 = "7 Days", d30 = "30 Days", all = "All",
+    homeTitle = "Usage Overview", today = "Today", d7 = "7 Days", d30 = "30 Days", month = "This Month", all = "All",
     overviewTitle = "Usage Overview", followRange = "Follows selected range",
     todayTrend = "Today's Trend", hours24 = "24 Hours",
     statsTitle = "Usage Stats", tokenBreakdown = "Token Breakdown",
