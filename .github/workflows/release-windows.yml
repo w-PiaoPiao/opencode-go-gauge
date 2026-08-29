@@ -1,0 +1,73 @@
+# Windows 单文件 exe 自动构建: 推送 v*-windows tag 时触发, 构建产物自动附到同名 release.
+# 与 build.bat 等效 (bat 末尾 pause 不可用于 CI); 另生成 _build_info.py 使更新检查指向本 fork.
+name: release-windows
+
+on:
+  push:
+    tags: ["v*-windows"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build GoGauge.exe
+        shell: pwsh
+        run: |
+          python -m pip install -q pywebview pystray pillow pyinstaller
+          $ver = python -c "from app import __version__; print(__version__)"
+          @"
+          """构建时自动生成 (gitignored): 打包产物元信息, 供更新检查使用."""
+          UPDATE_REPO = "${{ github.repository }}"
+          BUILD_VERSION = "$ver"
+          "@ | Out-File -Encoding utf8 app/_build_info.py
+          python -m PyInstaller --noconfirm --clean --onefile --noconsole --name GoGauge `
+            --add-data "app/web;app/web" `
+            --add-data "assets;assets" `
+            --icon assets/GoGauge.ico `
+            --collect-submodules webview `
+            --hidden-import clr `
+            --hidden-import pythonnet `
+            --hidden-import pystray `
+            --exclude-module numpy `
+            --exclude-module cryptography `
+            --exclude-module PIL._avif `
+            entry.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoGauge-windows-exe
+          path: dist/GoGauge.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoGauge-windows-exe
+
+      - name: Attach assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # v2.1.0b-windows -> 资产命名 GoGauge-v2.1.0b-windows.exe
+          VER="${TAG#v}"; VER="${VER%-windows}"
+          mv GoGauge.exe "GoGauge-v${VER}-windows.exe"
+          ls -l
+          gh release upload "$TAG" "GoGauge-v${VER}-windows.exe" --clobber || \
+            gh release create "$TAG" "GoGauge-v${VER}-windows.exe" \
+              --title "GoGauge $TAG" --generate-notes
