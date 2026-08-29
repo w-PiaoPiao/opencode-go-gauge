@@ -98,6 +98,17 @@ def _set_phase(phase: str, message: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
+def _record_monthly_reset(account_id: int, quota: dict[str, Any]) -> None:
+    """配额拉取成功后持久化月度窗口的重置时间 (供「本月」筛选推算周期起点)."""
+    try:
+        for window in quota.get("windows") or []:
+            if window.get("label") == "Monthly" and window.get("reset_at"):
+                db.record_monthly_reset(account_id, window["reset_at"])
+                break
+    except Exception:  # noqa: BLE001 持久化失败不影响配额返回
+        pass
+
+
 def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str) -> dict[str, Any]:
     slot = _quota_cache.setdefault(account_id, {"at": 0.0, "data": None})
     now = time.time()
@@ -106,6 +117,7 @@ def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str) ->
     result = fetch_quota(token, workspace_hint)
     slot["at"] = now
     slot["data"] = result.to_dict()
+    _record_monthly_reset(account_id, slot["data"])
     return slot["data"]
 
 
@@ -482,12 +494,14 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         return
 
     if route == "/api/dashboard" and method == "GET":
-        # 时间范围: today / 7d / 30d / all
+        # 时间范围: today / 7d / 30d / month / all
         range_param = query.get("range", ["today"])[0]
         if range_param == "today":
             period, days = "today", 1
         elif range_param == "7d":
             period, days = "7d", 7
+        elif range_param == "month":
+            period, days = "month", 31
         elif range_param == "all":
             period, days = "all", 365
         else:
