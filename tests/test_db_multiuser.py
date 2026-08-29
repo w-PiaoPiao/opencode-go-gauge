@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -278,3 +279,53 @@ def test_settings_roundtrip_preserves_extras(tmp_db):
     assert db.get_key_names() == {"k1": "名字"}
     assert db.get_settings()["sync_interval_sec"] == 60
     assert db.get_active_account_id() == aid
+
+
+# ---------------------------------------------------------------------------
+# 「本月」= 当前月度重置周期 (最近激活的 $10 付费期间) 筛选
+# ---------------------------------------------------------------------------
+
+
+def _iso_utc(days_offset: int) -> str:
+    """相对当前 UTC 时间偏移 N 天的时间; 正=过去, 负=未来."""
+    dt = datetime.now(timezone.utc) - timedelta(days=days_offset)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _assert_cycle_start(start: str, expect_days_ago: int) -> None:
+    dt = datetime.strptime(start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    delta = abs((datetime.now(timezone.utc) - dt).total_seconds() - expect_days_ago * 86400)
+    assert delta < 3600  # 容差 1 小时, 吸收执行耗时
+
+
+def test_month_range_future_reset(tmp_db):
+    """reset 在未来: 周期起点 = 下次重置 - 30 天, 只统计周期内记录."""
+    db.insert_usage_records([_rec("u-in", created=_iso_utc(2)), _rec("u-out", created=_iso_utc(10))])
+    db.record_monthly_reset(None, _iso_utc(-25))  # 下次重置在 25 天后
+    assert db.totals("month")["request_count"] == 1
+    _assert_cycle_start(db.monthly_cycle_start(), 5)
+
+
+def test_month_range_past_reset(tmp_db):
+    """reset 已过去 (重置发生而配额未刷新): 周期起点 = 该重置时刻."""
+    db.insert_usage_records([_rec("u-in", created=_iso_utc(5)), _rec("u-out", created=_iso_utc(12))])
+    db.record_monthly_reset(None, _iso_utc(10))  # 重置发生在 10 天前
+    assert db.totals("month")["request_count"] == 1
+    _assert_cycle_start(db.monthly_cycle_start(), 10)
+
+
+def test_month_range_fallback_30d(tmp_db):
+    """无月度重置记录 (配额从未拉到): 回退为滚动 30 天, 与 30d 口径一致."""
+    db.insert_usage_records([_rec("u-in", created=_iso_utc(20)), _rec("u-out", created=_iso_utc(40))])
+    assert db.totals("month")["request_count"] == db.totals("30d")["request_count"] == 1
+
+
+def test_monthly_reset_per_account(tmp_db):
+    """重置时间按账号隔离存储, 周期起点跟随活跃账号."""
+    db.record_monthly_reset(None, _iso_utc(-25))  # 种子账号 (id=1)
+    other = db.add_account("tM", "ws-m")          # add 默认 switch -> 活跃为 other
+    assert db.monthly_cycle_start() is None       # 新账号尚无配额记录
+    db.record_monthly_reset(other, _iso_utc(-25))
+    _assert_cycle_start(db.monthly_cycle_start(), 5)
+    db.set_active_account(1)
+    _assert_cycle_start(db.monthly_cycle_start(), 5)

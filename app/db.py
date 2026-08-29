@@ -14,7 +14,7 @@ import os
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 # 每线程独立连接 (thread-local), 避免多线程共享同一 sqlite3.Connection:
@@ -850,17 +850,72 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     conn.commit()
     return current
 
+# 月度重置周期: OpenCode Go $10 月度套餐按 30 天滚动周期重置, 官方接口只暴露
+# 下次重置时间 (配额 HTML 的 resetInSec), 周期起点以 "下次重置 - 30 天" 推算;
+# 若记录的重置时刻已过去 (重置已发生而配额未刷新), 该时刻即本周期开始的精确边界.
+_MONTHLY_PERIOD_DAYS = 30
+
+
+def record_monthly_reset(account_id: Optional[int], reset_at_utc: str) -> None:
+    """记录账号的下次月度重置时间, 供「本月」筛选推算当前周期起点."""
+    aid = _resolve_account_id(account_id)
+    if not aid or not reset_at_utc:
+        return
+    try:
+        dt = datetime.fromisoformat(str(reset_at_utc).replace("Z", "+00:00"))
+    except ValueError:
+        return
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    value = dt.strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db()
+    data = _raw_payload(conn)
+    key = f"monthly_reset:{aid}"
+    if data.get(key) == value:
+        return
+    data[key] = value
+    _write_payload(conn, data)
+    conn.commit()
+
+
+def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
+    """当前月度重置周期起点 (UTC "YYYY-MM-DD HH:MM:SS"); 无配额记录时返回 None."""
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return None
+    raw = _raw_payload(get_db()).get(f"monthly_reset:{aid}")
+    if not raw:
+        return None
+    try:
+        reset = datetime.strptime(str(raw), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if reset > now:
+        reset -= timedelta(days=_MONTHLY_PERIOD_DAYS)
+    return reset.strftime("%Y-%m-%d %H:%M:%S")
+
+
 _PERIOD_CLAUSES = {
     "5h": "datetime(created_at) >= datetime('now', '-5 hours')",
     "today": "substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')",
 }
 
 
-def _period_where(period: str) -> tuple[str, list[Any]]:
+def _period_where(period: str, account_id: Optional[int] = None) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     if period in _PERIOD_CLAUSES:
         clauses.append(_PERIOD_CLAUSES[period])
+    elif period == "month":
+        start = monthly_cycle_start(account_id)
+        if start:
+            clauses.append("datetime(created_at) >= datetime(?)")
+            params.append(start)
+        else:
+            # 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 口径一致)
+            clauses.append("datetime(created_at) >= datetime('now', ?)")
+            params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
     elif period != "all":
         days = 30
         match = _NUM_DAYS_RE.match(period or "")
@@ -876,8 +931,9 @@ _NUM_DAYS_RE = __import__("re").compile(r"^(\d+)d$")
 
 def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """按模型聚合: 请求数 / 会话数 / 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 命中率."""
-    where, params = _period_where(period)
-    where, params = _account_filter(where, params, _resolve_account_id(account_id))
+    aid = _resolve_account_id(account_id)
+    where, params = _period_where(period, aid)
+    where, params = _account_filter(where, params, aid)
     rows = get_db().execute(
         f"""
         SELECT model,
@@ -999,8 +1055,9 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
 
 def totals(period: str = "30d", account_id: Optional[int] = None) -> dict[str, Any]:
     """总览指标, 口径与模型占比一致."""
-    where, params = _period_where(period)
-    where, params = _account_filter(where, params, _resolve_account_id(account_id))
+    aid = _resolve_account_id(account_id)
+    where, params = _period_where(period, aid)
+    where, params = _account_filter(where, params, aid)
     row = get_db().execute(
         f"""
         SELECT COUNT(*) AS request_count,
