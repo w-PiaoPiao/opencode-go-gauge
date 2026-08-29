@@ -43,7 +43,9 @@ class UpdateApi(
         private const val MAX_ATTEMPTS = 3
         private const val RETRY_SLEEP_MS = 800L
         private const val ATOM_NS = "http://www.w3.org/2005/Atom"
-        private val TAG_RE = Regex("""^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$""")
+        // 版本号支持三段数字 + 可选字母预发布后缀 (2.1.0b > 2.1.0) 及 -/+ 起尾缀
+        // (2.1.0-macos / 2.1.0b-android, 尾缀不参与比较) — desktop updater.py parity
+        private val TAG_RE = Regex("""^v?(\d+)\.(\d+)\.(\d+)([a-z])?(?:[-+].*)?$""")
         private val HTML_TAG_RE = Regex("<[^>]*>")
         private val WS_RE = Regex("\\s+")
     }
@@ -57,16 +59,24 @@ class UpdateApi(
         @SerialName("body") val body: String? = null,
     )
 
-    private fun parseVersion(text: String): Triple<Int, Int, Int>? {
+    /** 四元组比较 (字母后缀按 a=1,b=2... 计入第四位, 无后缀=0) — desktop _parse_version parity. */
+    private fun parseVersion(text: String): List<Int>? {
         val m = TAG_RE.matchEntire(text.trim()) ?: return null
-        return Triple(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt())
+        val suffix = m.groupValues[4]
+        val letterRank = if (suffix.isEmpty()) 0 else suffix[0] - 'a' + 1
+        return listOf(
+            m.groupValues[1].toInt(),
+            m.groupValues[2].toInt(),
+            m.groupValues[3].toInt(),
+            letterRank,
+        )
     }
 
-    private fun isNewer(latest: Triple<Int, Int, Int>, current: Triple<Int, Int, Int>): Boolean {
-        return latest.first > current.first ||
-            (latest.first == current.first &&
-                (latest.second > current.second ||
-                    (latest.second == current.second && latest.third > current.third)))
+    private fun isNewer(latest: List<Int>, current: List<Int>): Boolean {
+        for (i in latest.indices) {
+            if (latest[i] != current[i]) return latest[i] > current[i]
+        }
+        return false
     }
 
     /** 请求 URL 返回文本, 网络/HTTP 失败自动重试; 重试耗尽抛最后一次错误. */

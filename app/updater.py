@@ -53,7 +53,9 @@ _TIMEOUT = 8  # 秒; GitHub 直连可能超时, 快速失败避免卡住 UI
 _MAX_ATTEMPTS = 3  # 境内直连 GitHub 间歇性 502/超时/重置, 自动重试提高成功率
 _RETRY_SLEEP = 0.8  # 每次重试间隔(秒)
 
-_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
+# 版本号支持三段数字 + 可选字母预发布后缀 (如 2.1.0b, 排序上 2.1.0b > 2.1.0),
+# 以及 -/+ 起尾缀 (如 2.1.0-macos / 2.1.0b-android, 尾缀不参与版本比较)
+_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)([a-z])?(?:[-+].*)?$")
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
 _WS_RE = re.compile(r"\s+")
 
@@ -154,11 +156,14 @@ def _fetch_latest_atom() -> dict[str, str]:
     raise RuntimeError(f"Releases 订阅流中暂无 {_PLATFORM_SUFFIX} 版本")
 
 
-def _parse_version(text: str) -> Optional[tuple[int, int, int]]:
+def _parse_version(text: str) -> Optional[tuple[int, int, int, int]]:
+    """解析版本为可比较的四元组; 字母后缀按 a=1,b=2... 计入第四位 (无后缀=0)."""
     m = _TAG_RE.match((text or "").strip())
     if not m:
         return None
-    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    suffix = m.group(4) or ""
+    letter_rank = (ord(suffix) - ord("a") + 1) if suffix else 0
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), letter_rank
 
 
 def _is_platform_tag(tag: str) -> bool:
