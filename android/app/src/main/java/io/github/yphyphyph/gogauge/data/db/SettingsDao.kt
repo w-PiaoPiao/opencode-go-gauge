@@ -15,7 +15,6 @@ import kotlinx.serialization.json.jsonPrimitive
 abstract class SettingsDao {
 
     private val json = Json { ignoreUnknownKeys = true }
-
     @Query("SELECT payload FROM settings WHERE id = 1")
     abstract suspend fun payload(): String?
 
@@ -103,4 +102,60 @@ abstract class SettingsDao {
     private fun kotlinx.serialization.json.JsonElement.contentOrNull(): String? {
         return (this as? kotlinx.serialization.json.JsonPrimitive)?.content
     }
+
+    /** 读取账号的下次月度重置时间 (desktop settings payload 键 monthly_reset:{aid} parity). */
+    suspend fun getMonthlyReset(accountId: Int): String? {
+        val raw = payload() ?: return null
+        return try {
+            json.parseToJsonElement(raw).jsonObject["monthly_reset:$accountId"]?.let {
+                (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 持久化账号的下次月度重置时间, UTC "yyyy-MM-dd HH:mm:ss" (desktop db.record_monthly_reset parity). */
+    suspend fun saveMonthlyReset(accountId: Int, resetUtc: String?) {
+        if (resetUtc.isNullOrBlank()) return
+        val raw = payload() ?: "{}"
+        val base = try {
+            json.parseToJsonElement(raw).jsonObject
+        } catch (e: Exception) {
+            buildJsonObject {}
+        }
+        val merged = buildJsonObject {
+            for ((k, v) in base) put(k, v)
+            put("monthly_reset:$accountId", JsonPrimitive(resetUtc))
+        }
+        savePayload(merged.toString(), java.time.Instant.now().toString())
+    }
+}
+
+/**
+ * 月度重置周期策略 — mirrors desktop db.monthly_cycle_start.
+ *
+ * OpenCode Go $10 月度套餐按 30 天滚动周期重置, 官方接口只暴露下次重置时间, 周期起点
+ * 以 "下次重置 - 30 天" 推算; 若记录的重置时刻已过去 (重置已发生而配额未刷新),
+ * 该时刻即本周期开始的精确边界. 无记录或格式异常时返回 null (调用方回退滚动 30 天).
+ */
+object MonthlyCycle {
+    const val PERIOD_DAYS = 30
+    private val FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
+    /** 推导当前周期起点 (UTC "yyyy-MM-dd HH:mm:ss"); resetUtc 为存储的下次重置时间. */
+    fun start(resetUtc: String?, nowUtc: String): String? {
+        if (resetUtc.isNullOrBlank()) return null
+        return try {
+            val reset = java.time.LocalDateTime.parse(resetUtc, FMT)
+            val now = java.time.LocalDateTime.parse(nowUtc, FMT)
+            val started = if (reset.isAfter(now)) reset.minusDays(PERIOD_DAYS.toLong()) else reset
+            started.format(FMT)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 当前 UTC 时间 (与存储格式一致), 供 [start] 使用. */
+    fun nowUtc(): String = java.time.LocalDateTime.now(java.time.ZoneOffset.UTC).format(FMT)
 }
