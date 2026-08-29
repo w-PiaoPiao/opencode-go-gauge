@@ -35,7 +35,8 @@ class UpdateApi(
     private val client: OkHttpClient = OpenCodeApi.defaultClient(),
 ) {
     companion object {
-        const val REPO = "yphyphyph/opencode-go-gauge"
+        // fork 发布仓库: 安卓 APK 由本 fork 的 release 分发, 更新检查指向 fork
+        const val REPO = "w-PiaoPiao/opencode-go-gauge"
         const val RELEASES_URL = "https://api.github.com/repos/$REPO/releases/latest"
         const val ATOM_URL = "https://github.com/$REPO/releases.atom"
         const val RELEASE_PAGE_URL = "https://github.com/$REPO/releases/latest"
