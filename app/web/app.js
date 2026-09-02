@@ -87,6 +87,9 @@ const I18N = {
     loginExternalBtn: "在系统浏览器中打开登录页",
     loginExternalTip: "内置窗口白屏时：在系统浏览器完成登录 → DevTools 复制 Cookie → 粘贴到下方",
     ccSyncCounts: "全周期 {m} 请求 / 明细 {n} 条",
+    timeout: "请求超时",
+    syncingQuota: "同步配额",
+    loginGoatBtn: "登录 Command Code GOAT",
     userSwitchTip: "切换用户", userCountTip: "已登录用户数",
     switchTo: "切换", currentUserBadge: "当前", renameBtn: "重命名", deleteUser: "删除",
     renameTitle: "重命名用户", save: "保存", deleteUserTitle: "删除用户",
@@ -179,6 +182,9 @@ const I18N = {
     loginExternalBtn: "Open sign-in page in system browser",
     loginExternalTip: "If the built-in window is blank: sign in via your system browser → copy Cookie from DevTools → paste below",
     ccSyncCounts: "{m} requests (billing period) / {n} detail rows",
+    timeout: "Request timed out",
+    syncingQuota: "Syncing quota",
+    loginGoatBtn: "Sign in to Command Code GOAT",
     userSwitchTip: "Switch user", userCountTip: "Logged-in users",
     switchTo: "Switch", currentUserBadge: "Active", renameBtn: "Rename", deleteUser: "Delete",
     renameTitle: "Rename User", save: "Save", deleteUserTitle: "Delete User",
@@ -227,11 +233,12 @@ function fmtMoney(usd) {
   usd = Number(usd) || 0;
   if (state.currency === "CNY") {
     const v = usd * state.exchangeRate;
-    return "¥" + (v >= 1 ? v.toFixed(2) : v.toFixed(4));
+    if (v === 0) return "¥0";
+    const a = Math.abs(v);
+    return (v < 0 ? "-¥" : "¥") + (a >= 1 ? a.toFixed(2) : a.toFixed(4));
   }
-  if (usd >= 1) return "$" + usd.toFixed(2);
-  if (usd > 0) return "$" + usd.toFixed(4);
-  return "$0";
+  if (usd === 0) return "$0";
+  return (usd < 0 ? "-$" : "$") + (Math.abs(usd) >= 1 ? Math.abs(usd).toFixed(2) : Math.abs(usd).toFixed(4));
 }
 function fmtDur(sec) {
   sec = Math.max(0, Number(sec) || 0);
@@ -276,7 +283,7 @@ async function api(path, opts = {}) {
     }
     return await resp.json();
   } catch (e) {
-    if (e && e.name === "AbortError") throw new Error("请求超时");
+    if (e && e.name === "AbortError") throw new Error(t("timeout"));
     throw e;
   } finally {
     clearTimeout(timer);
@@ -292,6 +299,9 @@ function applyLang(l) {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     el.textContent = t(el.dataset.i18n);
   });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.title = t(el.dataset.i18nTitle);
+  });
   document.querySelectorAll("#set-lang-pills .pill").forEach((b) => b.classList.toggle("active", b.dataset.v === lang));
   // 版本号: 唯一来源为后端 /api/version (app/__init__.py), 前端动态获取
   const ver = APP_VERSION ? "v" + APP_VERSION : "GoGauge";
@@ -305,6 +315,7 @@ function applyLang(l) {
     renderAll(state.data);
     renderSettings();
     loadRecords().catch(() => {});
+    loadSessions().catch(() => {});  // 会话表含 t("unassigned") 等动态文案, 也要重渲染
   }
 }
 
@@ -320,9 +331,17 @@ function showModal({ title = t("confirm"), message = "", okText = t("ok"), cance
   icon.className = "modal-icon" + (danger ? " danger" : "");
   icon.textContent = danger ? "⚠" : "?";
   overlay.hidden = false;
-  const cleanup = () => { overlay.hidden = true; $("modal-ok").onclick = null; $("modal-cancel").onclick = null; };
+  const cleanup = () => {
+    overlay.hidden = true;
+    $("modal-ok").onclick = null;
+    $("modal-cancel").onclick = null;
+    document.removeEventListener("keydown", onKey);
+  };
+  const cancel = () => { cleanup(); };
+  const onKey = (e) => { if (e.key === "Escape") cancel(); };
+  document.addEventListener("keydown", onKey);
   $("modal-ok").onclick = () => { cleanup(); onOk && onOk(); };
-  $("modal-cancel").onclick = () => { cleanup(); };
+  $("modal-cancel").onclick = cancel;
 }
 function toast(msg, type = "ok") {
   const wrap = $("toast-wrap");
@@ -404,8 +423,7 @@ function applyDarkMode(on) {
   $("tb-theme").innerHTML = `◐ <span data-i18n="${on ? "themeLight" : "themeDark"}">${on ? t("themeLight") : t("themeDark")}</span>`;
   try { localStorage.setItem("gousage-dark", on ? "1" : "0"); } catch (e) { /* ignore */ }
   syncThemePills();
-  refreshIcons();
-  rerenderCharts();
+  rerenderCharts();  // 含统计页图表重绘, 勿再调 refreshIcons (会重复创建图表)
 }
 function syncThemePills() {
   document.querySelectorAll("#set-theme-pills .pill").forEach((b) => b.classList.toggle("active", b.dataset.v === (state.darkMode ? "dark" : "light")));
@@ -462,7 +480,7 @@ async function loadDashboard(quiet = false) {
     showLoading(false);
   } catch (e) {
     if (seq === loadSeq) showLoading(false);
-    if (!quiet) console.error("dashboard load failed", e);
+    if (!quiet) toast(e.message || t("loadFailed"), "err");
   }
 }
 function showLoading(show) { $("top-loading").hidden = !show; }
@@ -477,6 +495,7 @@ function renderUsageBlocks(quota) {
       return;
     }
     if (state.quotaRetryTimer) clearTimeout(state.quotaRetryTimer);
+    if (state.data && state.data.logged_in === false) return;  // 未登录: 不轮询重试
     state.quotaRetryTimer = setTimeout(() => loadDashboard(true), 5000);
     row.innerHTML = `<div class="ub skeleton"><div class="sk-line w40"></div><div class="sk-line w20 lg"></div><div class="sk-bar"></div><div class="sk-line w60"></div></div>`.repeat(3);
     return;
@@ -759,7 +778,7 @@ function modelIcon(m) {
   return `<img src="icons/${themed}.svg" alt="${escapeHtml(m)}" title="${escapeHtml(m)}" style="width:16px;height:16px">`;
 }
 function refreshIcons() {
-  if (!document.getElementById("page-stats").hidden) chartModel(state.data?.models);
+  // 主题切换的重绘由 rerenderCharts 统一处理 (此处曾重复创建统计页图表)
 }
 
 /* ---------------- 组装 ---------------- */
@@ -814,9 +833,11 @@ async function startSync(mode) {
 }
 function pollUntilIdle() {
   if (state.syncTimer) clearInterval(state.syncTimer);
+  let failures = 0;
   state.syncTimer = setInterval(async () => {
     try {
       const st = await api("/api/state");
+      failures = 0;
       renderSyncBanner(st.progress);
       renderSettingsSyncProgress(st.progress);
       if (!st.progress.running) {
@@ -827,7 +848,14 @@ function pollUntilIdle() {
         if (state.page === "settings") renderSettings();
         if (state.page === "overview") loadOverview(true).catch(() => {});
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      // 连续失败 3 次 (本地服务异常): 解除按钮禁用并停止轮询, 避免永久卡死
+      if (++failures >= 3) {
+        clearInterval(state.syncTimer); state.syncTimer = null;
+        $("tb-refresh").disabled = false;
+        $("btn-full-sync").disabled = false;
+      }
+    }
   }, 2500);
 }
 function renderSyncBanner(progress) {
@@ -839,7 +867,7 @@ function renderSettingsSyncProgress(progress) {
     $("set-sync-progress-val").textContent = "";
     return;
   }
-  const phase = progress.phase === "usage" ? t("syncing") : t("syncing");
+  const phase = progress.phase === "quota" ? t("syncingQuota") : t("syncing");
   $("set-sync-progress-desc").textContent = `${phase} · ${t("pageOf")} ${progress.page + 1}`;
   $("set-sync-progress-val").textContent = `${t("totalN")} ${fmtInt(progress.inserted)}`;
 }
@@ -1026,7 +1054,7 @@ async function renderSettings() {
     if (macApp) $("set-autostart").checked = settings.autostart === true;
     $("set-overview-panel").checked = settings.show_accounts_panel === true;
     await fetchAccounts();  // 账户列表 (失败不阻塞其他设置渲染)
-  } catch (e) { /* ignore */ }
+  } catch (e) { toast(e.message || t("loadFailed"), "err"); }
 }
 function syncSettingsPills() {
   const s = state.settings;
@@ -1128,13 +1156,20 @@ function showGoatLoginDialog() {
 function startLoginWatch() {
   stopLoginWatch();
   let baseline = "";
+  let baselineReady = false;
+  let polls = 0;
   const startedAt = Date.now();
   const poll = async () => {
     if (Date.now() - startedAt > 5 * 60 * 1000) { stopLoginWatch(); return; }
+    polls++;
     try {
       const r = await api("/api/accounts");
       const sig = JSON.stringify((r.accounts || []).map((a) => [a.id, a.has_token, a.name])) + "|" + r.active_id;
-      if (!baseline) { baseline = sig; return; }  // 首轮采基线
+      if (!baselineReady) {
+        // 首个成功响应才采基线; 若请求一直失败, 基线可能在登录完成后才采到,
+        // 之后 sig===baseline 永远成立 → 漏检. 5 次未就绪就强制刷一次兜底.
+        baseline = sig; baselineReady = true; return;
+      }
       if (sig !== baseline) {
         stopLoginWatch();
         await loadDashboard();
@@ -1142,7 +1177,12 @@ function startLoginWatch() {
         else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
         if (state.page === "overview") loadOverview(true).catch(() => {});
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      if (!baselineReady && polls >= 5) {
+        polls = 0;
+        await loadDashboard().catch(() => {});
+      }
+    }
   };
   poll();
   loginWatchTimer = setInterval(poll, 2000);
@@ -1150,14 +1190,26 @@ function startLoginWatch() {
 function stopLoginWatch() {
   if (loginWatchTimer) { clearInterval(loginWatchTimer); loginWatchTimer = null; }
 }
+/* 分页上限: 按后端返回的 total 与固定 page_size 推算, 防连点越过末页出空表 */
+function recPageMax() { return Math.max(1, Math.ceil((state.records.total || 0) / 7)); }
+function sesPageMax() { return Math.max(1, Math.ceil((state.sessions.total || 0) / 7)); }
+/* 切换/删除/退出账号后复位记录页筛选: 新账号可能没有旧筛选的模型, 避免列表恒空 */
+function resetRecordFilters() {
+  state.records.page = 1;
+  state.records.model = "";
+  state.sessions.page = 1;
+}
 
+let menuSeq = 0;  // 用户菜单开关序号: 丢弃迟到的过期 /api/accounts 响应
 async function toggleUserMenu(force) {
   const menu = $("user-menu");
   if (!menu) return;
   const show = force !== undefined ? force : menu.hidden;
+  const seq = ++menuSeq;  // 关闭也递增: 使在途的打开请求响应后自知过期
   if (!show) { menu.hidden = true; return; }
   try {
     const r = await api("/api/accounts");
+    if (seq !== menuSeq) return;  // 期间被关闭/重开: 丢弃过期响应 (防菜单幽灵弹出)
     renderUserMenu((r.accounts || []).filter((a) => a.has_token), r.active_id);
     menu.hidden = false;
   } catch (e) { toast(t("loadFailed"), "err"); }
@@ -1235,6 +1287,7 @@ async function onUserRowAction(id, act) {
     try {
       await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
       toast(t("switchedAccount"));
+      resetRecordFilters();  // 新账号可能没有旧筛选的模型: 复位避免列表恒空
       await loadDashboard();
       renderSettings().catch(() => {});
       if (state.page === "overview") loadOverview(true).catch(() => {});
@@ -1265,6 +1318,7 @@ async function onUserRowAction(id, act) {
         try {
           await api("/api/logout", { method: "POST", body: "{}" });
           toast(t("loggedOut"));
+          resetRecordFilters();
           const r = await api("/api/accounts").catch(() => ({ accounts: [] }));
           renderUsersList(r.accounts || [], r.active_id);
           await loadDashboard();
@@ -1309,6 +1363,7 @@ async function onUserRowAction(id, act) {
         try {
           const r = await api("/api/accounts/delete", { method: "POST", body: JSON.stringify({ id }) });
           toast(t("userDeleted"));
+          resetRecordFilters();
           await loadDashboard();
           renderSettings().catch(() => {});
           if (state.page === "overview") loadOverview(true).catch(() => {});
@@ -1390,9 +1445,9 @@ function bindEvents() {
     showModal({ title: t("fullSync"), message: t("fullSyncConfirm"), okText: t("startSync"), onOk: () => startSync("full") });
   });
   $("pg-prev").addEventListener("click", () => { if (state.records.page > 1) { state.records.page--; loadRecords(); } });
-  $("pg-next").addEventListener("click", () => { state.records.page++; loadRecords(); });
+  $("pg-next").addEventListener("click", () => { if (recPageMax() >= state.records.page + 1) { state.records.page++; loadRecords(); } });
   $("ses-prev").addEventListener("click", () => { if (state.sessions.page > 1) { state.sessions.page--; loadSessions(); } });
-  $("ses-next").addEventListener("click", () => { state.sessions.page++; loadSessions(); });
+  $("ses-next").addEventListener("click", () => { if (sesPageMax() >= state.sessions.page + 1) { state.sessions.page++; loadSessions(); } });
   $("rec-model-filter").addEventListener("change", (e) => { state.records.model = e.target.value; state.records.page = 1; loadRecords(); });
 
   // 半自动更新: 后台下载新版本 zip 到 ~/Downloads, 完成后 Finder 定位;
@@ -1413,7 +1468,7 @@ function bindEvents() {
         if (st.state === "no_update") { toast(t("updateNone")); return; }
         if (st.state === "error" || st.state === "no_asset") throw new Error(st.error || st.state);
       }
-      throw new Error("timeout");
+      throw new Error(t("timeout"));
     } catch (e) {
       showModal({
         title: t("downloadFailed"), message: escapeHtml(e.message || ""), okText: t("openReleasePage"),
@@ -1436,7 +1491,8 @@ function bindEvents() {
         desc.textContent = `${t("updateFound")} ${r.latest}`;
         showModal({
           title: t("updateFound"),
-          message: `<b>${r.latest}</b> (${t("currentVersion")} v${r.current})<br><br>${escapeHtml((r.notes || "").slice(0, 300)) || ""}`,
+          // r.latest 来自远端 release tag, 必须转义 (updater 版本尾缀不限制字符)
+          message: `<b>${escapeHtml(r.latest)}</b> (${t("currentVersion")} v${r.current})<br><br>${escapeHtml((r.notes || "").slice(0, 300)) || ""}`,
           okText: t("goDownload"),
           onOk: () => { downloadUpdateFlow(desc); },
         });
@@ -1518,6 +1574,7 @@ function restartAutoSync() {
   if (state.settings.auto_sync === false) return;
   const sec = Math.max(30, Number(state.settings?.sync_interval_sec) || 300) * 1000;
   autoSyncTimer = setInterval(() => {
+    if (state.data && state.data.logged_in === false) return;  // 未登录: 不自动同步
     const prog = state.data && state.data.progress;
     if (!prog || !prog.running) startSync("incremental");
   }, sec);

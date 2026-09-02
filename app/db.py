@@ -28,6 +28,9 @@ from typing import Any, Optional
 # sqlite3_stmt 交替 reset/step, 导致原生内存损坏 (SIGSEGV) 或挂起.
 _db_local = threading.local()
 _schema_lock = threading.Lock()
+# settings payload 是整包 JSON 读-改-写: 多线程 (quota/sync/HTTP) 并发改不同键时
+# 无锁会互相覆盖丢键 (active_account_id 回退 / key_names 丢失). 写侧全走此锁.
+_payload_lock = threading.RLock()
 _data_dir_override: Optional[str] = None
 
 
@@ -103,6 +106,18 @@ def close_db() -> None:
             conn.close()
         finally:
             _db_local.conn = None
+
+
+def checkpoint_wal() -> None:
+    """退出前压缩 WAL 文件 (主线程调用): 避免长期滞留膨胀.
+
+    os._exit 兜底退出路径不会走这里, 数据安全依赖 SQLite 逐操作 commit +
+    启动时的 WAL 恢复, 不受影响.
+    """
+    try:
+        get_db().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:  # noqa: BLE001 checkpoint 失败不影响退出
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +336,11 @@ def _write_payload(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
 
 
 def _persist_active(conn: sqlite3.Connection, account_id: int) -> None:
-    data = _raw_payload(conn)
-    data["active_account_id"] = int(account_id)
-    _write_payload(conn, data)
-    conn.commit()
+    with _payload_lock:
+        data = _raw_payload(conn)
+        data["active_account_id"] = int(account_id)
+        _write_payload(conn, data)
+        conn.commit()
 
 
 def get_active_account_id() -> int:
@@ -436,6 +452,9 @@ def save_token(
     conn = get_db()
     aid = get_active_account_id()
     if not aid:
+        # 删光账号后无活跃行 (运行期不会重建种子行): 兜底转为新增账号,
+        # 避免 relogin 流程走完全程后凭证被静默丢弃
+        add_account(token, workspace_id, switch=True, provider=provider)
         return
     if provider not in ALL_PROVIDERS:
         provider = PROVIDER_OPENCODE
@@ -593,16 +612,17 @@ def delete_account(account_id: int) -> int:
     conn.execute("DELETE FROM usage_sync_state WHERE account_id = ?", (aid,))
     conn.execute("DELETE FROM accounts WHERE id = ?", (aid,))
     remaining = int(conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"])
-    active = _raw_payload(conn).get("active_account_id")
-    if active == aid:
-        nxt = conn.execute("SELECT MIN(id) AS i FROM accounts").fetchone()["i"]
-        if nxt is not None:
-            _persist_active(conn, int(nxt))
-        else:
-            data = _raw_payload(conn)
-            data.pop("active_account_id", None)
-            _write_payload(conn, data)
-            conn.commit()
+    with _payload_lock:
+        active = _raw_payload(conn).get("active_account_id")
+        if active == aid:
+            nxt = conn.execute("SELECT MIN(id) AS i FROM accounts").fetchone()["i"]
+            if nxt is not None:
+                _persist_active(conn, int(nxt))
+            else:
+                data = _raw_payload(conn)
+                data.pop("active_account_id", None)
+                _write_payload(conn, data)
+                conn.commit()
     conn.commit()
     return remaining
 
@@ -614,6 +634,7 @@ def clear_account() -> None:
     if not aid:
         return
     conn.execute("DELETE FROM usage_records WHERE account_id = ?", (aid,))
+    conn.execute("DELETE FROM usage_charts WHERE account_id = ?", (aid,))
     conn.execute(
         "UPDATE accounts SET token = '', resolved_workspace_id = NULL, updated_at = ? WHERE id = ?",
         (_now_iso(), aid),
@@ -655,6 +676,8 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id, plan, synced_at, account_id)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(usg_id) DO UPDATE SET"
+        " created_at = excluded.created_at, model = excluded.model,"
+        " provider = excluded.provider,"
         " input_tokens = excluded.input_tokens,"
         " output_tokens = excluded.output_tokens,"
         " reasoning_tokens = excluded.reasoning_tokens,"
@@ -662,7 +685,8 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " cache_write_5m_tokens = excluded.cache_write_5m_tokens,"
         " cache_write_1h_tokens = excluded.cache_write_1h_tokens,"
         " cost_raw = excluded.cost_raw, cost_usd = excluded.cost_usd,"
-        " synced_at = excluded.synced_at"
+        " key_id = excluded.key_id, session_id = excluded.session_id, plan = excluded.plan,"
+        " account_id = excluded.account_id, synced_at = excluded.synced_at"
     )
     inserted = 0
     try:
@@ -1008,43 +1032,45 @@ def get_key_names() -> dict[str, str]:
 def save_key_names(names: dict[str, str]) -> None:
     """持久化 key_id -> 显示名称 映射到 settings."""
     conn = get_db()
-    data = _raw_payload(conn)
-    data["key_names"] = {k: v for k, v in names.items() if k and v}
-    _write_payload(conn, data)
-    conn.commit()
+    with _payload_lock:
+        data = _raw_payload(conn)
+        data["key_names"] = {k: v for k, v in names.items() if k and v}
+        _write_payload(conn, data)
+        conn.commit()
 
 
 def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     conn = get_db()
-    raw = _raw_payload(conn)
-    current = dict(_DEFAULT_SETTINGS)
-    current.update({k: v for k, v in raw.items() if k in _DEFAULT_SETTINGS})
-    for key in _DEFAULT_SETTINGS:
-        if key in payload and payload[key] is not None:
-            if key == "sync_interval_sec":
-                try:
-                    current[key] = max(30, min(int(payload[key]), 3600))
-                except (TypeError, ValueError):
-                    pass
-            elif key == "window_days":
-                val = payload[key]
-                if val is None or val == "" or str(val).lower() in ("all", "所有"):
-                    current[key] = None
-                else:
+    with _payload_lock:
+        raw = _raw_payload(conn)
+        current = dict(_DEFAULT_SETTINGS)
+        current.update({k: v for k, v in raw.items() if k in _DEFAULT_SETTINGS})
+        for key in _DEFAULT_SETTINGS:
+            if key in payload and payload[key] is not None:
+                if key == "sync_interval_sec":
                     try:
-                        current[key] = max(1, min(int(val), 3650))
+                        current[key] = max(30, min(int(payload[key]), 3600))
                     except (TypeError, ValueError):
                         pass
-            elif key in ("auto_sync", "show_accounts_panel"):
-                current[key] = bool(payload[key])
-            else:
-                current[key] = payload[key]
-    # 写回时保留非白名单键 (key_names / active_account_id 等), 避免被整体覆盖丢失
-    out = dict(raw)
-    out.update(current)
-    _write_payload(conn, out)
-    conn.commit()
-    return current
+                elif key == "window_days":
+                    val = payload[key]
+                    if val is None or val == "" or str(val).lower() in ("all", "所有"):
+                        current[key] = None
+                    else:
+                        try:
+                            current[key] = max(1, min(int(val), 3650))
+                        except (TypeError, ValueError):
+                            pass
+                elif key in ("auto_sync", "show_accounts_panel"):
+                    current[key] = bool(payload[key])
+                else:
+                    current[key] = payload[key]
+        # 写回时保留非白名单键 (key_names / active_account_id 等), 避免被整体覆盖丢失
+        out = dict(raw)
+        out.update(current)
+        _write_payload(conn, out)
+        conn.commit()
+        return current
 
 # 月度重置周期: OpenCode Go $10 月度套餐按 30 天滚动周期重置, 官方接口只暴露
 # 下次重置时间 (配额 HTML 的 resetInSec), 周期起点以 "下次重置 - 30 天" 推算;
@@ -1066,11 +1092,12 @@ def record_period_bounds(account_id: Optional[int], period_start: str, period_en
     if start is None or end is None:
         return
     conn = get_db()
-    data = _raw_payload(conn)
-    data[f"period_start:{aid}"] = start
-    data[f"period_end:{aid}"] = end
-    _write_payload(conn, data)
-    conn.commit()
+    with _payload_lock:
+        data = _raw_payload(conn)
+        data[f"period_start:{aid}"] = start
+        data[f"period_end:{aid}"] = end
+        _write_payload(conn, data)
+        conn.commit()
 
 
 def _parse_utc_naive(value: str) -> Optional[str]:
@@ -1106,13 +1133,14 @@ def record_monthly_reset(account_id: Optional[int], reset_at_utc: str) -> None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     value = dt.strftime("%Y-%m-%d %H:%M:%S")
     conn = get_db()
-    data = _raw_payload(conn)
-    key = f"monthly_reset:{aid}"
-    if data.get(key) == value:
-        return
-    data[key] = value
-    _write_payload(conn, data)
-    conn.commit()
+    with _payload_lock:
+        data = _raw_payload(conn)
+        key = f"monthly_reset:{aid}"
+        if data.get(key) == value:
+            return
+        data[key] = value
+        _write_payload(conn, data)
+        conn.commit()
 
 
 def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
@@ -1143,8 +1171,14 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
                 except ValueError:
                     end = None
                 if end is not None:
-                    while end <= now:  # 跨过已结束的周期, 顺延整周期长度
+                    for _ in range(1200):  # 顺延跨周期; 上限兜底防异常数据死循环
+                        if end > now:
+                            break
                         span = end - start
+                        if span <= timedelta(0):
+                            # 服务端返回 end<=start: 数据非法, 回退滚动 30 天口径
+                            # (此处曾因 span<=0 时 end 永不前进而死循环挂死请求线程)
+                            return None
                         start = end
                         end = end + span
             return start.strftime("%Y-%m-%d %H:%M:%S")

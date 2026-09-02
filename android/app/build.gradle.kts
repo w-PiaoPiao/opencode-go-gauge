@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -27,14 +29,33 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        // 正式发布签名: 根目录提供 keystore.properties (gitignored) 时启用,
+        // 避免公开仓库 keystore 签名 release (任何人可伪造同签名覆盖安装).
+        // 文件格式: storeFile=/abs/path/release.keystore / storePassword=... /
+        //           keyAlias=... / keyPassword=...
+        if (rootProject.file("keystore.properties").exists()) {
+            val keystoreProps = Properties().apply {
+                rootProject.file("keystore.properties").inputStream().use { load(it) }
+            }
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Personal sideload use: sign release with the workspace debug keystore.
-            // For Play Store distribution, replace with a dedicated release keystore.
-            signingConfig = signingConfigs.getByName("debug")
+            // 有 keystore.properties 时用正式签名, 否则回退 debug keystore (个人侧载/CI).
+            // 注意: 换签名后无法覆盖安装旧版本, 需先卸载.
+            signingConfig = if (signingConfigs.names.contains("release")) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

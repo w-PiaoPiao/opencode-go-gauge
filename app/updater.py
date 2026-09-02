@@ -47,7 +47,11 @@ REPO = _resolve_repo()
 RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
 ATOM_URL = f"https://github.com/{REPO}/releases.atom"
 RELEASE_PAGE_URL = f"https://github.com/{REPO}/releases/latest"
-_PLATFORM_SUFFIX = "-macos"
+# 平台后缀/资产扩展名: 更新检查与下载按运行平台分流 (-macos .zip / -windows .exe)
+_IS_WIN = sys.platform == "win32"
+_PLATFORM_SUFFIX = "-windows" if _IS_WIN else "-macos"
+_ASSET_EXT = ".exe" if _IS_WIN else ".zip"
+_ASSET_NAME = f"gogauge{_PLATFORM_SUFFIX}{_ASSET_EXT}"  # release 资产的标准文件名 (小写比较)
 _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 _TIMEOUT = 8  # 秒; GitHub 直连可能超时, 快速失败避免卡住 UI
 _MAX_ATTEMPTS = 3  # 境内直连 GitHub 间歇性 502/超时/重置, 自动重试提高成功率
@@ -246,9 +250,9 @@ _ASSET_NAME = "gogauge-macos.zip"  # release 资产的标准文件名 (小写比
 
 
 def fetch_asset_url(tag: str) -> str:
-    """取指定 release 中 mac 分发包的下载直链.
+    """取指定 release 中本平台分发包的下载直链.
 
-    优先精确匹配 GoGauge-macos.zip, 否则回退任一 .zip 资产.
+    优先精确匹配标准资产名, 否则回退任一本平台扩展名的资产.
 
     Returns:
         browser_download_url; 找不到返回空串
@@ -265,7 +269,10 @@ def fetch_asset_url(tag: str) -> str:
             continue
         if name == _ASSET_NAME:
             return url
-        if not fallback and name.endswith(".zip"):
+        if not fallback and (
+            name.endswith(_PLATFORM_SUFFIX + _ASSET_EXT)
+            or (not _IS_WIN and name.endswith(".zip"))
+        ):
             fallback = url
     return fallback
 
@@ -290,7 +297,7 @@ def download_update(dest_dir: str) -> dict[str, Any]:
             result["error"] = f"release {result['latest']} 中未找到 {_ASSET_NAME}"
             return result
         os.makedirs(dest_dir, exist_ok=True)
-        dest = os.path.join(dest_dir, f"GoGauge-{result['latest']}-macos.zip")
+        dest = os.path.join(dest_dir, f"GoGauge-{result['latest']}{_PLATFORM_SUFFIX}{_ASSET_EXT}")
         req = urllib.request.Request(
             url, headers={"User-Agent": f"GoGauge/{__version__}"})
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -300,6 +307,18 @@ def download_update(dest_dir: str) -> dict[str, Any]:
                     if not chunk:
                         break
                     fh.write(chunk)
+        # 完整性自检 (HTTPS 之外的第二道防线): zip 验 CRC, exe 至少验 PE 头,
+        # 防半截/损坏/被替换的文件在 os.replace 后被用户直接安装
+        if _ASSET_EXT == ".zip":
+            import zipfile
+            with zipfile.ZipFile(dest + ".part") as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    raise RuntimeError(f"下载包损坏 (CRC 校验失败): {bad}")
+        else:
+            with open(dest + ".part", "rb") as fh:
+                if fh.read(2) != b"MZ":
+                    raise RuntimeError("下载包损坏 (非有效的 Windows 可执行文件)")
         os.replace(dest + ".part", dest)  # .part 中间态防半截文件
         result["state"] = "done"
         result["path"] = dest

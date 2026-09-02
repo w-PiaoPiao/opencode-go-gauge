@@ -73,6 +73,7 @@ class DashboardRepository(
     /** {account_id: slot} — desktop _quota_cache: dict[int, dict]. */
     private val quotaCache = HashMap<Int, QuotaCache>()
     private val quotaMutex = Mutex()
+    private val syncMutex = Mutex()  // 同步单飞守卫: check-then-set 原子化
 
     /** 防重入: 同一账号同一时刻只允许一个刷新协程 — desktop _quota_refreshing: set[int]. */
     private val quotaRefreshing = mutableSetOf<Int>()
@@ -318,11 +319,14 @@ class DashboardRepository(
             accounts().filter { it.hasToken }.map { it.id to it.name }
         }
         if (targets.isEmpty()) return SyncResult(ok = false, error = "未登录")
-        if (_progress.value.running) return SyncResult(ok = false, error = "已有同步任务进行中")
+        // check-then-set 原子化: WorkManager / 前台定时器 / 下拉刷新 / 登录后 fullSync
+        // 可能并发进入, 无锁会双同步并互踩进度状态 (desktop 对应有 _sync_lock)
+        syncMutex.withLock {
+            if (_progress.value.running) return SyncResult(ok = false, error = "已有同步任务进行中")
+            _progress.value = SyncProgress(running = true, mode = mode, phase = "usage")
+        }
 
         val windowDays = db.settingsDao().getSettings().windowDays
-
-        _progress.value = SyncProgress(running = true, mode = mode, phase = "usage")
 
         try {
             var totalInserted = 0

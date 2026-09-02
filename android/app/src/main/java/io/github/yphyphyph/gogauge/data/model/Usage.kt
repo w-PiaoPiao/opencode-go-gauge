@@ -12,7 +12,7 @@ data class UsageRecord(
     val cacheReadTokens: Int,
     val cacheWrite5mTokens: Int,
     val cacheWrite1hTokens: Int,
-    val costRaw: Int,          // unit 1e-8 USD
+    val costRaw: Long,         // unit 1e-8 USD (Int 会在单条 > $21.47 时溢出归零)
     val keyId: String,
     val sessionId: String,
     val plan: String? = null,

@@ -87,7 +87,13 @@ def _fetch(url: str, headers: dict[str, str], timeout: float = REQUEST_TIMEOUT) 
                     raise AuthError("认证失败 (HTTP %d)，请重新登录" % status)
                 if status < 200 or status >= 300:
                     raise CommandCodeAPIError(f"请求返回 HTTP {status}")
-                return resp.read(MAX_BODY_BYTES).decode("utf-8", errors="replace")
+                body = resp.read(MAX_BODY_BYTES)
+                # 截断检测: Content-Length 声明超限时明确报错, 而非静默解析半包丢尾部数据
+                declared = resp.headers.get("Content-Length") or ""
+                if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+                    raise CommandCodeAPIError(
+                        f"响应过大 ({int(declared) // (1 << 20)} MiB, 上限 4 MiB)")
+                return body.decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise AuthError("认证失败 (HTTP %d)，请重新登录" % exc.code) from exc
@@ -438,6 +444,9 @@ def parse_usage_response(text: str, provider: str = "commandcode") -> tuple[list
         if not isinstance(item, dict) or not item.get("id"):
             continue
         usg_id = str(item["id"])
+        created_at = _normalize_created_at(str(item.get("createdAt") or ""))
+        if not created_at:
+            continue  # 时间非法/缺失: 丢弃该条, 防止入库成永不清理的僵尸行
         meta = item.get("meta") or {}
         model = str(meta.get("model") or item.get("model") or "unknown")
         # meta.totalCost 已是 USD; 与 opencode 的 1e-8 cost_raw 区分: 只写 cost_usd
@@ -445,7 +454,7 @@ def parse_usage_response(text: str, provider: str = "commandcode") -> tuple[list
         records.append(
             UsageRecord(
                 usg_id=usg_id,
-                created_at=_normalize_created_at(str(item.get("createdAt") or "")),
+                created_at=created_at,
                 model=model,
                 provider=provider,
                 input_tokens=_int_or(item.get("tokensIn")),
@@ -465,18 +474,19 @@ def parse_usage_response(text: str, provider: str = "commandcode") -> tuple[list
     return records, next_cursor
 
 
-def _normalize_created_at(value: str) -> str:
+def _normalize_created_at(value: str) -> Optional[str]:
     """校验并原样保留 ISO 时间串 (与 opencode 记录口径一致, 不做格式改写).
 
-    只做合法性检查, 非法时返回空串 (入库后该行会被裁剪逻辑忽略).
+    非法/缺失返回 None (调用方丢弃该条): 否则 created_at="" 入库后命中不了任何
+    周期过滤、也永不被 prune 清理, 成为计入明细总数的僵尸行.
     """
     if not value:
-        return ""
+        return None
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return value if dt.tzinfo is not None else value
     except ValueError:
-        return value
+        return None
+    return value if dt.tzinfo is not None else None
 
 
 def fetch_usage_page(

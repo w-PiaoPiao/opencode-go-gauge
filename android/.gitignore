@@ -28,3 +28,4 @@ captures/
 # 仓库根 .gitignore 的 data/ 规则(匹配任意层级)会误伤安卓源码目录,此处取消忽略
 !app/src/main/java/io/github/yphyphyph/gogauge/data/
 !app/src/test/java/io/github/yphyphyph/gogauge/data/
+keystore.properties
