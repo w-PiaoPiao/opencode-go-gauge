@@ -83,6 +83,10 @@ const I18N = {
     goatCookiePh: "粘贴完整 Cookie（含 __Secure-commandcode_prod_.session_token=…），可从已登录浏览器 DevTools 复制",
     goatLoginPaste: "用粘贴的 Cookie 登录",
     goatCookieEmpty: "请先粘贴 Cookie",
+    loginDialogTitleOpencode: "添加 OpenCode Go 账号",
+    loginExternalBtn: "在系统浏览器中打开登录页",
+    loginExternalTip: "内置窗口白屏时：在系统浏览器完成登录 → DevTools 复制 Cookie → 粘贴到下方",
+    ccSyncCounts: "全周期 {m} 请求 / 明细 {n} 条",
     userSwitchTip: "切换用户", userCountTip: "已登录用户数",
     switchTo: "切换", currentUserBadge: "当前", renameBtn: "重命名", deleteUser: "删除",
     renameTitle: "重命名用户", save: "保存", deleteUserTitle: "删除用户",
@@ -171,6 +175,10 @@ const I18N = {
     goatCookiePh: "Paste full Cookie header (with __Secure-commandcode_prod_.session_token=…) from a signed-in browser DevTools",
     goatLoginPaste: "Sign in with pasted Cookie",
     goatCookieEmpty: "Paste a Cookie first",
+    loginDialogTitleOpencode: "Add OpenCode Go account",
+    loginExternalBtn: "Open sign-in page in system browser",
+    loginExternalTip: "If the built-in window is blank: sign in via your system browser → copy Cookie from DevTools → paste below",
+    ccSyncCounts: "{m} requests (billing period) / {n} detail rows",
     userSwitchTip: "Switch user", userCountTip: "Logged-in users",
     switchTo: "Switch", currentUserBadge: "Active", renameBtn: "Rename", deleteUser: "Delete",
     renameTitle: "Rename User", save: "Save", deleteUserTitle: "Delete User",
@@ -771,7 +779,12 @@ function renderAll(data) {
     chartTrend(data.trend);
     $("trend-hint").textContent = t("trendHint");
   }
-  $("tb-sync").textContent = data.logged_in ? `${t("lastSync")} ${fmtRelative(data.sync?.last_sync_at)} · ${fmtInt(data.sync?.total_records || 0)} ${t("records")}` : t("notLoggedIn");
+  const sync = data.sync || {};
+  // GOAT (commandcode): 明细仅最近 24h/100 条, 同步状态展示全周期聚合请求数
+  const syncCountText = sync.provider === "commandcode" && sync.chart_requests
+    ? t("ccSyncCounts").replace("{m}", fmtInt(sync.chart_requests)).replace("{n}", fmtInt(sync.total_records || 0))
+    : `${fmtInt(sync.total_records || 0)} ${t("records")}`;
+  $("tb-sync").textContent = data.logged_in ? `${t("lastSync")} ${fmtRelative(sync.last_sync_at)} · ${syncCountText}` : t("notLoggedIn");
   const accLabel = data.account_name || maskWs(data);
   $("tb-login").innerHTML = data.logged_in ? `<b>${t("loggedIn")}</b> · ${escapeHtml(accLabel)}` : t("notLoggedIn");
   $("tb-login").style.color = data.logged_in ? "" : "var(--red)";
@@ -995,8 +1008,12 @@ function chartOvTrend(accounts) {
 async function renderSettings() {
   try {
     const st = await api("/api/state");
-    $("set-sync-info").textContent = st.sync && st.sync.last_sync_at
-      ? `${t("lastSync")} ${fmtDateTime(st.sync.last_sync_at)} (${st.sync.last_sync_status}) · ${t("totalN")} ${fmtInt(st.sync.total_records || 0)} ${t("items")}`
+    const stSync = st.sync || {};
+    const stSyncCounts = stSync.provider === "commandcode" && stSync.chart_requests
+      ? t("ccSyncCounts").replace("{m}", fmtInt(stSync.chart_requests)).replace("{n}", fmtInt(stSync.total_records || 0))
+      : `${t("totalN")} ${fmtInt(stSync.total_records || 0)} ${t("items")}`;
+    $("set-sync-info").textContent = stSync.last_sync_at
+      ? `${t("lastSync")} ${fmtDateTime(stSync.last_sync_at)} (${stSync.last_sync_status}) · ${stSyncCounts}`
       : t("never");
     $("set-datadir").textContent = st.datadir || "—";
     const settings = await api("/api/settings");
@@ -1038,20 +1055,25 @@ async function startLogin(mode, provider) {
   } catch (e) { toast(e.message || t("loadFailed"), "err"); }
 }
 
-/* GOAT 登录对话框: 内嵌登录窗 / 手动粘贴会话 Cookie (WKWebView 白屏兜底) */
-function showGoatLoginDialog() {
+/* 登录对话框 (opencode / commandcode 通用): 内置登录窗 / 系统浏览器打开 /
+   手动粘贴会话 Cookie (内置 WebView 白屏或被 Cloudflare 质询时的兜底) */
+function showLoginDialog(mode, provider) {
+  const prov = provider === "commandcode" ? "commandcode" : "opencode";
   const overlay = $("modal-overlay");
-  $("modal-title").textContent = t("addGoatUser");
+  $("modal-title").textContent =
+    prov === "commandcode" ? t("addGoatUser") : t("loginDialogTitleOpencode");
   $("modal-message").innerHTML = `
     <div style="display:flex;flex-direction:column;gap:10px;margin:6px 0 4px">
       <button class="btn" id="goat-win" style="width:100%">${t("goatLoginWin")}</button>
+      <button class="btn" id="goat-ext" style="width:100%">${t("loginExternalBtn")}</button>
       <div style="font-size:12px;color:var(--text3);text-align:center">${t("goatLoginOr")}</div>
+      <div style="font-size:12px;color:var(--text3)">${t("loginExternalTip")}</div>
       <textarea id="goat-cookie" rows="3" placeholder="${t("goatCookiePh")}" style="width:100%;box-sizing:border-box;font-size:12px;font-family:ui-monospace,monospace"></textarea>
       <button class="btn btn-primary" id="goat-paste" style="width:100%">${t("goatLoginPaste")}</button>
     </div>`;
   const icon = $("modal-icon");
   icon.className = "modal-icon";
-  icon.textContent = "🐐";
+  icon.textContent = prov === "commandcode" ? "🐐" : "📊";
   $("modal-ok").hidden = true;
   $("modal-cancel").hidden = false;
   $("modal-cancel").textContent = t("cancel");
@@ -1064,7 +1086,19 @@ function showGoatLoginDialog() {
   $("modal-cancel").onclick = cleanup;
   $("goat-win").onclick = async () => {
     cleanup();
-    await startLogin("add", "commandcode");
+    await startLogin(mode, prov);
+  };
+  $("goat-ext").onclick = async () => {
+    // 系统浏览器兜底: 不关对话框, 方便登录后回来粘贴 Cookie
+    const a = await pywebviewApi();
+    if (a && a.open_login_external) {
+      const ok = await a.open_login_external(prov);
+      if (!ok) toast(t("loadFailed"), "err");
+    } else {
+      // 浏览器环境兜底: 直接新窗口打开登录页
+      window.open(prov === "commandcode" ? "https://commandcode.ai/signin"
+        : "https://opencode.ai/authorize?client_id=app&redirect_uri=https%3A%2F%2Fopencode.ai%2Fauth%2Fcallback&response_type=code", "_blank");
+    }
   };
   $("goat-paste").onclick = async () => {
     const token = $("goat-cookie").value.trim();
@@ -1073,7 +1107,7 @@ function showGoatLoginDialog() {
     try {
       startLoginWatch();
       const r = await api("/api/accounts/add-token", {
-        method: "POST", body: JSON.stringify({ token, provider: "commandcode" }),
+        method: "POST", body: JSON.stringify({ token, provider: prov }),
       });
       cleanup();
       toast(t("switchedAccount"));
@@ -1085,6 +1119,11 @@ function showGoatLoginDialog() {
       $("goat-paste").disabled = false;
     }
   };
+}
+
+/* 兼容旧入口: GOAT 添加账号对话框 */
+function showGoatLoginDialog() {
+  showLoginDialog("add", "commandcode");
 }
 function startLoginWatch() {
   stopLoginWatch();
@@ -1454,7 +1493,7 @@ function bindEvents() {
     const menu = $("user-menu");
     if (menu && !menu.hidden && !e.target.closest(".user-switch")) toggleUserMenu(false);
   });
-  $("btn-add-user").addEventListener("click", async () => { startLogin("add", "opencode"); });
+  $("btn-add-user").addEventListener("click", () => { showLoginDialog("add", "opencode"); });
   $("btn-add-goat").addEventListener("click", () => { showGoatLoginDialog(); });
   $("btn-login-goat").addEventListener("click", () => { showGoatLoginDialog(); });
   $("users-list").addEventListener("click", (e) => {

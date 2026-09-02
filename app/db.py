@@ -180,6 +180,29 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               newest_record_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS usage_charts (
+              account_id INTEGER NOT NULL,
+              model TEXT NOT NULL,
+              provider TEXT,
+              time_bucket TEXT NOT NULL,  -- UTC "YYYY-MM-DD HH:MM:SS"
+              requests INTEGER NOT NULL DEFAULT 0,
+              input_cost REAL NOT NULL DEFAULT 0,
+              output_cost REAL NOT NULL DEFAULT 0,
+              cache_cost REAL NOT NULL DEFAULT 0,
+              total_cost REAL NOT NULL DEFAULT 0,
+              credits_total REAL NOT NULL DEFAULT 0,
+              tokens_in INTEGER NOT NULL DEFAULT 0,
+              tokens_out INTEGER NOT NULL DEFAULT 0,
+              tokens_total INTEGER NOT NULL DEFAULT 0,
+              cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+              cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+              synced_at TEXT NOT NULL,
+              PRIMARY KEY (account_id, model, time_bucket)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_charts_account_time
+              ON usage_charts(account_id, time_bucket);
+
             CREATE TABLE IF NOT EXISTS settings (
               id INTEGER PRIMARY KEY CHECK (id = 1),
               payload TEXT NOT NULL,
@@ -566,6 +589,7 @@ def delete_account(account_id: int) -> int:
     conn = get_db()
     aid = int(account_id)
     conn.execute("DELETE FROM usage_records WHERE account_id = ?", (aid,))
+    conn.execute("DELETE FROM usage_charts WHERE account_id = ?", (aid,))
     conn.execute("DELETE FROM usage_sync_state WHERE account_id = ?", (aid,))
     conn.execute("DELETE FROM accounts WHERE id = ?", (aid,))
     remaining = int(conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"])
@@ -669,6 +693,56 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
     return inserted
 
 
+def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = None) -> int:
+    """写入 charts 聚合行 (commandcode 全计费周期), 按 (账号, 模型, 时间桶) UPSERT.
+
+    与明细表独立: usage_charts 是 GOAT 全周期口径的聚合快照, 每次同步整体覆盖
+    同键行 (服务端聚合值随计费单调, UPSERT 取最新).
+    """
+    if not rows:
+        return 0
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return 0
+    conn = get_db()
+    synced_at = _now_iso()
+    stmt = (
+        "INSERT INTO usage_charts (account_id, model, provider, time_bucket, requests,"
+        " input_cost, output_cost, cache_cost, total_cost, credits_total,"
+        " tokens_in, tokens_out, tokens_total, cache_read_tokens, cache_creation_tokens, synced_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(account_id, model, time_bucket) DO UPDATE SET"
+        " provider = excluded.provider, requests = excluded.requests,"
+        " input_cost = excluded.input_cost, output_cost = excluded.output_cost,"
+        " cache_cost = excluded.cache_cost, total_cost = excluded.total_cost,"
+        " credits_total = excluded.credits_total, tokens_in = excluded.tokens_in,"
+        " tokens_out = excluded.tokens_out, tokens_total = excluded.tokens_total,"
+        " cache_read_tokens = excluded.cache_read_tokens,"
+        " cache_creation_tokens = excluded.cache_creation_tokens,"
+        " synced_at = excluded.synced_at"
+    )
+    try:
+        conn.execute("BEGIN")
+        for r in rows:
+            conn.execute(
+                stmt,
+                (
+                    aid, r["model"], r.get("provider") or "", r["time_bucket"],
+                    r.get("requests") or 0, r.get("input_cost") or 0,
+                    r.get("output_cost") or 0, r.get("cache_cost") or 0,
+                    r.get("total_cost") or 0, r.get("credits_total") or 0,
+                    r.get("tokens_in") or 0, r.get("tokens_out") or 0,
+                    r.get("tokens_total") or 0, r.get("cache_read_tokens") or 0,
+                    r.get("cache_creation_tokens") or 0, synced_at,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(rows)
+
+
 def get_sync_state(account_id: Optional[int] = None) -> dict[str, Any]:
     aid = _resolve_account_id(account_id)
     if not aid:
@@ -687,7 +761,33 @@ def get_sync_state(account_id: Optional[int] = None) -> dict[str, Any]:
         "total_records": row["total_records"],
         "oldest_record_at": row["oldest_record_at"],
         "newest_record_at": row["newest_record_at"],
+        "provider": get_account_provider(aid),
+        # GOAT 聚合覆盖 (usage_charts): 明细仅最近 24h/100 条, 全周期口径看这里
+        "chart_requests": _charts_requests(aid),
+        "chart_synced_at": _charts_last_synced(aid),
     }
+
+
+def _charts_requests(aid: int) -> int:
+    """聚合表覆盖的请求总数 (全计费周期); 无数据时为 0."""
+    try:
+        row = get_db().execute(
+            "SELECT COALESCE(SUM(requests), 0) AS reqs FROM usage_charts WHERE account_id = ?",
+            (aid,),
+        ).fetchone()
+        return int(row["reqs"] or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _charts_last_synced(aid: int) -> Optional[str]:
+    try:
+        row = get_db().execute(
+            "SELECT MAX(synced_at) AS at FROM usage_charts WHERE account_id = ?", (aid,)
+        ).fetchone()
+        return row["at"] if row else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def update_sync_state(
@@ -812,6 +912,15 @@ def usage_records_page(
 
 
 def list_models(account_id: Optional[int] = None) -> list[str]:
+    aid = _resolve_account_id(account_id)
+    if _use_charts_stats(aid):
+        rows = get_db().execute(
+            "SELECT DISTINCT model FROM usage_charts WHERE account_id = ?"
+            " UNION SELECT DISTINCT model FROM usage_records WHERE account_id = ?"
+            " ORDER BY model",
+            (aid, aid),
+        ).fetchall()
+        return [r["model"] for r in rows]
     where, params = _account_filter("", [], _resolve_account_id(account_id))
     rows = get_db().execute(
         f"SELECT DISTINCT model FROM usage_records {where} ORDER BY model", params
@@ -1085,9 +1194,126 @@ def _period_where(period: str, account_id: Optional[int] = None) -> tuple[str, l
 _NUM_DAYS_RE = __import__("re").compile(r"^(\d+)d$")
 
 
+# ---------------------------------------------------------------------------
+# GOAT 聚合统计 (usage_charts): commandcode 明细接口仅最近 24h/100 条 (服务端
+# 硬顶), 统计口径以 charts 全计费周期聚合为准 (请求总数与 /usage/summary 的
+# totalCount 对齐, 已实测); 无 charts 数据时回退明细路径.
+# ---------------------------------------------------------------------------
+
+
+def _charts_ready(aid: int) -> bool:
+    """该账号是否已同步过 charts 聚合数据."""
+    if not aid:
+        return False
+    row = get_db().execute(
+        "SELECT 1 FROM usage_charts WHERE account_id = ? LIMIT 1", (aid,)
+    ).fetchone()
+    return row is not None
+
+
+def _charts_period_where(period: str, account_id: int) -> tuple[str, list[Any]]:
+    """usage_charts 周期过滤 (与明细 _period_where 口径一致: UTC 存储 + localtime 日界)."""
+    clauses = ["account_id = ?"]
+    params: list[Any] = [account_id]
+    if period == "5h":
+        clauses.append("datetime(time_bucket) >= datetime('now', '-5 hours')")
+    elif period == "today":
+        clauses.append(
+            "substr(datetime(time_bucket, 'localtime'), 1, 10) = date('now', 'localtime')"
+        )
+    elif period == "month":
+        start = monthly_cycle_start(account_id)
+        if start:
+            clauses.append("datetime(time_bucket) >= datetime(?)")
+            params.append(start)
+        else:
+            clauses.append("datetime(time_bucket) >= datetime('now', ?)")
+            params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
+    elif period != "all":
+        days = 30
+        match = _NUM_DAYS_RE.match(period or "")
+        if match:
+            days = max(1, int(match.group(1)))
+        clauses.append("datetime(time_bucket) >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    return "WHERE " + " AND ".join(clauses), params
+
+
+def _charts_stats_select(period: str, account_id: int, group_by_model: bool = False):
+    """charts 聚合查询, 输出列与明细统计查询同形.
+
+    注意: charts 的 tokens_in 已包含缓存读 (tokensTotal = tokensIn + tokensOut,
+    cacheReadInputTokens 为其中一部分), 因此 total_input = SUM(tokens_in) 而
+    非叠加 cache_read, 否则重复计数.
+    """
+    where, params = _charts_period_where(period, account_id)
+    if group_by_model:
+        sql = f"""
+            SELECT model,
+                   SUM(requests) AS request_count,
+                   0 AS session_count,
+                   SUM(tokens_in) AS total_input_tokens,
+                   SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
+                   0 AS total_reasoning_tokens,
+                   SUM(cache_read_tokens) AS cache_hit_tokens,
+                   SUM(cache_creation_tokens) AS cache_write_tokens,
+                   SUM(tokens_out) AS total_output_tokens,
+                   SUM(total_cost) AS total_cost_usd
+            FROM usage_charts {where}
+            GROUP BY model
+            ORDER BY SUM(tokens_in + tokens_out) DESC
+        """
+    else:
+        sql = f"""
+            SELECT SUM(requests) AS request_count,
+                   0 AS session_count,
+                   SUM(tokens_in) AS total_input_tokens,
+                   SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
+                   0 AS total_reasoning_tokens,
+                   SUM(cache_read_tokens) AS cache_hit_tokens,
+                   SUM(cache_creation_tokens) AS cache_write_tokens,
+                   SUM(tokens_out) AS total_output_tokens,
+                   SUM(total_cost) AS total_cost_usd
+            FROM usage_charts {where}
+        """
+    return sql, params
+
+
+def _use_charts_stats(aid: Optional[int]) -> bool:
+    """统计是否走 charts 数据源: commandcode 账号且已有聚合数据."""
+    return bool(
+        aid
+        and get_account_provider(aid) == PROVIDER_COMMANDCODE
+        and _charts_ready(aid)
+    )
+
+
 def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """按模型聚合: 请求数 / 会话数 / 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 命中率."""
     aid = _resolve_account_id(account_id)
+    if _use_charts_stats(aid):
+        rows = get_db().execute(*_charts_stats_select(period, aid, group_by_model=True)).fetchall()
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            hit = int(r["cache_hit_tokens"] or 0)
+            miss = int(r["uncached_input_tokens"] or 0)
+            hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
+            result.append(
+                {
+                    "model": r["model"],
+                    "request_count": int(r["request_count"] or 0),
+                    "session_count": 0,
+                    "total_input_tokens": int(r["total_input_tokens"] or 0),
+                    "uncached_input_tokens": miss,
+                    "total_reasoning_tokens": 0,
+                    "cache_hit_tokens": hit,
+                    "cache_write_tokens": int(r["cache_write_tokens"] or 0),
+                    "total_output_tokens": int(r["total_output_tokens"] or 0),
+                    "total_cost_usd": round(float(r["total_cost_usd"] or 0), 6),
+                    "hit_rate": round(hit_rate, 2),
+                }
+            )
+        return result
     where, params = _period_where(period, aid)
     where, params = _account_filter(where, params, aid)
     rows = get_db().execute(
@@ -1142,25 +1368,46 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
     """
     days = max(1, min(days, 365))
     aid = _resolve_account_id(account_id)
-    rows = get_db().execute(
-        """
-        SELECT substr(datetime(created_at, 'localtime'), 1, 10) AS date,
-               SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
-               SUM(input_tokens) AS uncached_input_tokens,
-               SUM(reasoning_tokens) AS total_reasoning_tokens,
-               SUM(cache_read_tokens) AS cache_hit_tokens,
-               SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS cache_write_tokens,
-               SUM(output_tokens) AS total_output_tokens,
-               SUM(cost_usd) AS total_cost_usd,
-               COUNT(*) AS request_count
-        FROM usage_records
-        WHERE account_id = ?
-          AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
-        GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
-        ORDER BY date ASC
-        """,
-        (aid, f"-{days} days"),
-    ).fetchall()
+    if _use_charts_stats(aid):
+        rows = get_db().execute(
+            """
+            SELECT substr(datetime(time_bucket, 'localtime'), 1, 10) AS date,
+                   SUM(tokens_in) AS total_input_tokens,
+                   SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
+                   0 AS total_reasoning_tokens,
+                   SUM(cache_read_tokens) AS cache_hit_tokens,
+                   SUM(cache_creation_tokens) AS cache_write_tokens,
+                   SUM(tokens_out) AS total_output_tokens,
+                   SUM(total_cost) AS total_cost_usd,
+                   SUM(requests) AS request_count
+            FROM usage_charts
+            WHERE account_id = ?
+              AND substr(datetime(time_bucket, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
+            GROUP BY substr(datetime(time_bucket, 'localtime'), 1, 10)
+            ORDER BY date ASC
+            """,
+            (aid, f"-{days} days"),
+        ).fetchall()
+    else:
+        rows = get_db().execute(
+            """
+            SELECT substr(datetime(created_at, 'localtime'), 1, 10) AS date,
+                   SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
+                   SUM(input_tokens) AS uncached_input_tokens,
+                   SUM(reasoning_tokens) AS total_reasoning_tokens,
+                   SUM(cache_read_tokens) AS cache_hit_tokens,
+                   SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS cache_write_tokens,
+                   SUM(output_tokens) AS total_output_tokens,
+                   SUM(cost_usd) AS total_cost_usd,
+                   COUNT(*) AS request_count
+            FROM usage_records
+            WHERE account_id = ?
+              AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
+            GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
+            ORDER BY date ASC
+            """,
+            (aid, f"-{days} days"),
+        ).fetchall()
     # 连续日期窗口 [今天-days, 今天], 与上面 SQL 过滤条件同源 (同一 SQLite 时区口径)
     bounds = get_db().execute(
         "SELECT date('now', 'localtime', ?) AS start_date, date('now', 'localtime') AS end_date",
@@ -1214,19 +1461,34 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
 def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """今日 24 小时趋势: 每小时 输入/输出/推理 (本地时区, 无数据补 0)."""
     aid = _resolve_account_id(account_id)
-    rows = get_db().execute(
-        """
-        SELECT CAST(strftime('%H', datetime(created_at, 'localtime')) AS INTEGER) AS h,
-               SUM(input_tokens) AS input,
-               SUM(output_tokens) AS output,
-               SUM(reasoning_tokens) AS reasoning
-        FROM usage_records
-        WHERE account_id = ?
-          AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
-        GROUP BY h
-        """,
-        (aid,),
-    ).fetchall()
+    if _use_charts_stats(aid):
+        rows = get_db().execute(
+            """
+            SELECT CAST(strftime('%H', datetime(time_bucket, 'localtime')) AS INTEGER) AS h,
+                   SUM(tokens_in) AS input,
+                   SUM(tokens_out) AS output,
+                   0 AS reasoning
+            FROM usage_charts
+            WHERE account_id = ?
+              AND substr(datetime(time_bucket, 'localtime'), 1, 10) = date('now', 'localtime')
+            GROUP BY h
+            """,
+            (aid,),
+        ).fetchall()
+    else:
+        rows = get_db().execute(
+            """
+            SELECT CAST(strftime('%H', datetime(created_at, 'localtime')) AS INTEGER) AS h,
+                   SUM(input_tokens) AS input,
+                   SUM(output_tokens) AS output,
+                   SUM(reasoning_tokens) AS reasoning
+            FROM usage_records
+            WHERE account_id = ?
+              AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
+            GROUP BY h
+            """,
+            (aid,),
+        ).fetchall()
     by_hour = {int(r["h"]): r for r in rows}
     result: list[dict[str, Any]] = []
     for h in range(24):
@@ -1245,6 +1507,25 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
 def totals(period: str = "30d", account_id: Optional[int] = None) -> dict[str, Any]:
     """总览指标, 口径与模型占比一致."""
     aid = _resolve_account_id(account_id)
+    if _use_charts_stats(aid):
+        sql, params = _charts_stats_select(period, aid)
+        row = get_db().execute(sql, params).fetchone()
+        if row is not None and row["request_count"] is not None:
+            hit = int(row["cache_hit_tokens"] or 0)
+            miss = int(row["uncached_input_tokens"] or 0)
+            hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
+            return {
+                "request_count": int(row["request_count"] or 0),
+                "session_count": 0,
+                "total_input_tokens": int(row["total_input_tokens"] or 0),
+                "uncached_input_tokens": miss,
+                "total_reasoning_tokens": 0,
+                "cache_hit_tokens": hit,
+                "cache_write_tokens": int(row["cache_write_tokens"] or 0),
+                "total_output_tokens": int(row["total_output_tokens"] or 0),
+                "total_cost_usd": round(float(row["total_cost_usd"] or 0), 6),
+                "hit_rate": round(hit_rate, 2),
+            }
     where, params = _period_where(period, aid)
     where, params = _account_filter(where, params, aid)
     row = get_db().execute(

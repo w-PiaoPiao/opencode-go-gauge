@@ -132,6 +132,11 @@ class LoginWatcher:
         target_host = self._target_host()
         target_cookie = self._target_cookie_name()
         while not self._stop.is_set():
+            # 每轮主动检查窗口存活: macOS 关闭窗口后 get_current_url() 返回 None
+            # 而非抛异常, 仅靠异常分支检测会让线程变僵尸 (阻塞单飞守卫, 无法再次登录)
+            if not self._window_alive():
+                _log("[login] window gone, watcher exits")
+                break
             try:
                 url = self.win.get_current_url() or ""
             except Exception as exc:  # noqa: BLE001 窗口未加载完成或已销毁

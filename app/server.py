@@ -19,6 +19,7 @@ from .commandcode_api import (
     AuthError as CCAuthError,
     CommandCodeAPIError,
     fetch_quota as cc_fetch_quota,
+    fetch_usage_charts as cc_fetch_usage_charts,
     fetch_usage_page as cc_fetch_usage_page,
 )
 from .db import PROVIDER_COMMANDCODE, PROVIDER_OPENCODE
@@ -319,7 +320,7 @@ def _sync_one_account(
 def _sync_one_cc_account(
     account_id: int, name: str, token: str, mode: str, window_days: Optional[int]
 ) -> dict[str, Any]:
-    """同步单个 Command Code 账号 (游标翻页, 单页即一页, 无需并发页号)."""
+    """同步单个 Command Code 账号: 明细游标翻页 + charts 全周期聚合落库."""
     total_inserted = 0
     pages = 0
     cursor: Optional[str] = None
@@ -384,8 +385,22 @@ def _sync_one_cc_account(
 
         # commandcode 无 key 名称概念, 不需要 fetch_key_names
 
-        if failed:
-            msg = "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
+        # charts 聚合 (全计费周期, 模型×5min 桶): 补全明细接口 24h/100 条之外的
+        # 历史统计 (统计面板的 totals/趋势/模型占比以聚合表为准). 独立容错:
+        # 失败仅标记 partial, 不影响已落库明细, 下次同步自动重试.
+        charts_ok = True
+        try:
+            chart_rows = cc_fetch_usage_charts(token)
+            db.insert_usage_charts([r.to_db_dict() for r in chart_rows], account_id)
+        except Exception:  # noqa: BLE001
+            charts_ok = False
+
+        if failed or not charts_ok:
+            msg = (
+                "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
+                if failed
+                else "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
+            )
             db.update_sync_state("partial", msg, total_inserted, account_id)
             return {"ok": True, "partial": True, "inserted": total_inserted, "pages": pages}
         db.update_sync_state("ok", None, total_inserted, account_id)
