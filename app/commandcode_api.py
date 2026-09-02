@@ -4,6 +4,10 @@
 - 配额 (quota): GET /internal/billing/credits + /internal/billing/subscriptions
   提供 5h / weekly / monthly 三个用量窗口 (monthly = 月池 - 已用)
 - 用量记录 (usage): GET /internal/usage?limit=N&cursor=... 游标翻页明细
+  (服务端仅保留最近 24h / 100 条, 硬限制)
+- 用量聚合 (charts): GET /internal/usage/charts?period=billing 按 (模型 × 5min
+  时间桶) 聚合的整个计费周期用量 —— 补全明细接口拿不到的历史数据, 请求数与
+  /internal/usage/summary 的 totalCount 对齐 (已实测)
 
 鉴权: httpOnly cookie ``__Secure-commandcode_prod_.session_token`` (无 CSRF/Origin 校验,
 纯 HTTP 客户端可直接携带; 已实测). token 在本应用内统一存为
@@ -490,3 +494,93 @@ def fetch_usage_summary(token: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
     return data
+
+
+# ---------------------------------------------------------------------------
+# 用量聚合 (charts): 全计费周期, 补全明细接口的 24h/100 条缺口
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class UsageChartBucket:
+    """单个 (模型 × 时间桶) 聚合行, 对应 /internal/usage/charts 的 data[] 元素."""
+
+    model: str
+    provider: str
+    time_bucket: str  # "YYYY-MM-DD HH:MM:SS" (UTC)
+    requests: int
+    input_cost: float
+    output_cost: float
+    cache_cost: float
+    total_cost: float
+    credits_total: float
+    tokens_in: int
+    tokens_out: int
+    tokens_total: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+
+    def to_db_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "provider": self.provider,
+            "time_bucket": self.time_bucket,
+            "requests": self.requests,
+            "input_cost": self.input_cost,
+            "output_cost": self.output_cost,
+            "cache_cost": self.cache_cost,
+            "total_cost": self.total_cost,
+            "credits_total": self.credits_total,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "tokens_total": self.tokens_total,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+        }
+
+
+def parse_charts_response(text: str) -> list[UsageChartBucket]:
+    """解析 /internal/usage/charts 响应为聚合行列表.
+
+    data[] 元素形如: {model, provider, timeBucket, requests, totalCost, inputCost,
+    outputCost, creditsTotal, tokensIn, tokensOut, tokensTotal,
+    cacheReadInputTokens, cacheCreationInputTokens, ...}
+    """
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise CommandCodeAPIError("charts 响应不是合法 JSON") from exc
+    if not isinstance(data, dict):
+        raise CommandCodeAPIError("charts 响应结构异常")
+    rows: list[UsageChartBucket] = []
+    for item in data.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        bucket = str(item.get("timeBucket") or "")
+        if not bucket:
+            continue
+        rows.append(
+            UsageChartBucket(
+                model=str(item.get("model") or "unknown"),
+                provider=str(item.get("provider") or ""),
+                time_bucket=bucket,
+                requests=_int_or(item.get("requests")),
+                input_cost=_float_or(item.get("inputCost")),
+                output_cost=_float_or(item.get("outputCost")),
+                cache_cost=_float_or(item.get("cacheCost")),
+                total_cost=_float_or(item.get("totalCost")),
+                credits_total=_float_or(item.get("creditsTotal")),
+                tokens_in=_int_or(item.get("tokensIn")),
+                tokens_out=_int_or(item.get("tokensOut")),
+                tokens_total=_int_or(item.get("tokensTotal")),
+                cache_read_tokens=_int_or(item.get("cacheReadInputTokens")),
+                cache_creation_tokens=_int_or(item.get("cacheCreationInputTokens")),
+            )
+        )
+    return rows
+
+
+def fetch_usage_charts(token: str, period: str = "billing") -> list[UsageChartBucket]:
+    """拉取聚合用量 (默认整个计费周期); period 透传, 服务端目前仅识别 billing."""
+    data = _get("/usage/charts", token, {"period": period} if period else None)
+    return parse_charts_response(json.dumps(data))

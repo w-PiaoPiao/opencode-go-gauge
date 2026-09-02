@@ -57,6 +57,27 @@ def _screen_workarea_logical() -> tuple[int, int]:
 _move_lock = threading.Lock()  # 拖动 move_by 串行化: 防 js_api 并发读-写丢增量
 
 
+def _mac_safari_user_agent() -> Optional[str]:
+    """macOS 标准 Safari UA (WKWebView 默认 UA 缺 Version/x 段, 易被
+    Cloudflare 质询卡在白屏; 换成完整 Safari UA 提升登录页兼容性)."""
+    if not _IS_MAC:
+        return None
+    try:
+        import platform
+        mac_ver = platform.mac_ver()[0] or "15.0"
+        parts = (mac_ver.split(".") + ["0", "0"])[:2]
+        os_ver = "_".join(parts)  # Safari UA 中 macOS 版本用下划线, 如 15_6
+        saf_ver = "18.6"
+        webkit_ver = "605.1.15"
+        return (
+            f"Mozilla/5.0 (Macintosh; Intel Mac OS X {os_ver}) "
+            f"AppleWebKit/{webkit_ver} (KHTML, like Gecko) "
+            f"Version/{saf_ver} Safari/{webkit_ver}"
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _install_macos_app_delegate() -> None:
     """替换 pywebview 的 macOS AppDelegate, 补齐两个原生行为:
 
@@ -687,6 +708,18 @@ class WindowApi:
             )
         return True
 
+    def open_login_external(self, provider: str = "opencode") -> bool:
+        """系统默认浏览器打开登录页 (内置 WebView 白屏/被 Cloudflare 质询时的兜底):
+        用户在外部浏览器完成登录后, 从 DevTools 复制 Cookie 粘贴回来."""
+        import webbrowser
+        try:
+            webbrowser.open(build_login_url(
+                provider if provider in ("opencode", "commandcode") else "opencode"
+            ))
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+
     def minimize(self) -> bool:
         if self._win:
             self._win.minimize()
@@ -820,26 +853,6 @@ def main() -> None:
     # 进程内存; 首次"立即登录"才实例化 (被手动关闭后由 _recreate_login_window 重建).
     login_win_ref: dict[str, object] = {"win": None}
 
-    def login_win() -> object:
-        w = login_win_ref["win"]
-        if w is not None:
-            try:
-                if w in webview.windows:
-                    return w
-            except Exception:  # noqa: BLE001
-                pass
-        w = webview.create_window(
-            "GoGauge - Login",
-            "about:blank",
-            width=720,
-            height=640,
-            min_size=(560, 500),
-            hidden=True,
-            background_color="#f7f6f4",
-        )
-        login_win_ref["win"] = w
-        return w
-
     def _bind_login_close_cleanup(win) -> None:
         """登录窗被手动关闭时: 停掉其监听线程并清理引用 (仅当引用仍指向该窗口).
 
@@ -858,7 +871,28 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  bind login closed event error: {exc}")
 
-    _bind_login_close_cleanup(login_win_ref["win"])
+    def login_win() -> object:
+        w = login_win_ref["win"]
+        if w is not None:
+            try:
+                if w in webview.windows:
+                    return w
+            except Exception:  # noqa: BLE001
+                pass
+        w = webview.create_window(
+            "GoGauge - Login",
+            "about:blank",
+            width=720,
+            height=640,
+            min_size=(560, 500),
+            hidden=True,
+            background_color="#f7f6f4",
+        )
+        login_win_ref["win"] = w
+        # 创建即绑定红叉关闭清理 (此前在启动时对 None 调用, 首个登录窗从未
+        # 绑定, 关闭后 watcher 残留导致单飞守卫拦死后续登录).
+        _bind_login_close_cleanup(w)
+        return w
 
     # 登录模式: open_login(mode, provider) 记录意图, on_login_success 按模式落库
     pending_mode = {"mode": "relogin", "provider": "opencode"}
@@ -872,6 +906,7 @@ def main() -> None:
         mode = pending_mode.get("mode", "relogin")
         provider = provider if provider in ("opencode", "commandcode") else "opencode"
         _mlog(f"on_login_success: ws={workspace_hint} mode={mode} provider={provider}")
+        watcher["ref"] = None  # 本次登录已完结: 释放单飞守卫占用
         try:
             if mode == "add":
                 db.add_account(auth_cookie, workspace_hint, switch=True, provider=provider)
@@ -904,7 +939,15 @@ def main() -> None:
     def _start_watcher(lw, provider: str = "opencode") -> None:
         """启动登录监听: 优先等 shown 事件 (避免 hidden 窗口调用窗口方法抛内部异常);
         复用窗口 (已显示过) 直接启动; 事件不触发时 3s 兜底启动 (LoginWatcher 对未就绪窗口有重试)."""
-        w = LoginWatcher(lw, provider, on_login_success)
+        def _on_cancelled() -> None:
+            # 监听线程退出 (窗口被关/自愈) 后释放单飞守卫引用
+            if watcher.get("ref") is w_ref["self"]:
+                watcher["ref"] = None
+                _mlog("  watcher exited -> ref cleared")
+
+        w_ref: dict[str, object] = {}
+        w = LoginWatcher(lw, provider, on_login_success, on_cancelled=_on_cancelled)
+        w_ref["self"] = w
         watcher["ref"] = w
         if getattr(lw, "_gousage_shown", False):
             w.start()
@@ -913,19 +956,29 @@ def main() -> None:
 
         def on_shown() -> None:
             setattr(lw, "_gousage_shown", True)
-            w.start()
-            _mlog("  watcher started (shown event)")
+            # 复用窗口时旧 shown 闭包仍挂在事件列表上: 仅当自己仍是当前 watcher 才启动
+            if watcher.get("ref") is w:
+                w.start()
+                _mlog("  watcher started (shown event)")
 
-        try:
-            lw.events.shown += on_shown
-        except Exception as exc:  # noqa: BLE001
-            _mlog(f"  shown event register error: {exc}")
+        # 同一窗口只注册一次 shown 监听: 复用窗口重复 += 会累积旧闭包 (泄漏)
+        if not getattr(lw, "_gousage_shown_bound", False):
+            setattr(lw, "_gousage_shown_bound", True)
+            try:
+                lw.events.shown += on_shown
+            except Exception as exc:  # noqa: BLE001
+                _mlog(f"  shown event register error: {exc}")
         # 兜底: shown 事件在打包环境可能不触发, 3s 后无条件启动监听
-        threading.Timer(3.0, w.start).start()
+        # (同样带当前 watcher 校验: 被 recreate 取代的旧 Timer 不拉起过期 watcher)
+        threading.Timer(3.0, lambda: watcher.get("ref") is w and w.start()).start()
 
     def _login_win_alive() -> bool:
+        """只读检查登录窗是否存活 (不触发创建副作用, 否则恒为 True 使重建分支失效)."""
+        w = login_win_ref["win"]
+        if w is None:
+            return False
         try:
-            return login_win() in webview.windows
+            return w in webview.windows
         except Exception:  # noqa: BLE001
             return False
 
@@ -947,7 +1000,15 @@ def main() -> None:
             return
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher) and w._thread and w._thread.is_alive() and not w.done:
-            return  # 已有登录监听进行中 (窗口存活)
+            # 线程存活但窗口已死 = 僵尸监听 (红叉关闭后 closed 清理未生效的历史残留):
+            # 停掉并继续正常弹出, 不再静默拦截.
+            if not _login_win_alive():
+                w.stop()
+                watcher["ref"] = None
+                _mlog("[main] zombie watcher stopped (thread alive, window gone)")
+            else:
+                _mlog(f"[main] open_login ignored: login in progress (provider={provider})")
+                return
         pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
         pending_mode["provider"] = provider
         lw = login_win()
@@ -965,10 +1026,12 @@ def main() -> None:
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher):
             w.stop()
-        try:
-            login_win().destroy()
-        except Exception:  # noqa: BLE001
-            pass
+        old = login_win_ref["win"]
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:  # noqa: BLE001
+                pass
         new_win = webview.create_window(
             "GoGauge - Login",
             build_login_url(provider),
@@ -1033,7 +1096,7 @@ def main() -> None:
 
     # 窗口/Dock 图标: 按平台选择 (Win=ico, macOS 用 png 生成 dock icon 由 .app 提供)
     icon_path = _app_icon_path()
-    webview.start(icon=icon_path if icon_path else None)
+    webview.start(icon=icon_path if icon_path else None, user_agent=_mac_safari_user_agent())
 
     if not _quitting:
         tray.stop()
