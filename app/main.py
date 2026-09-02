@@ -574,8 +574,10 @@ class TrayIcon:
                 rows.append(pystray.MenuItem(
                     f"{t['today_label']}: ${cost:.2f} · {req} {t['req_unit']}",
                     None, enabled=False))
-                # 读 server 配额缓存 (只读跨线程安全); 未就绪时自然缺省
-                quota = getattr(server, "_quota_cache", {}).get("data") or {}
+                # 读 server 配额缓存 (只读跨线程安全); 未就绪时自然缺省.
+                # 缓存结构为 {account_id: {at, data}}, 需按活跃账号取内层
+                quota = (getattr(server, "_quota_cache", {})
+                         .get(db.get_active_account_id()) or {}).get("data") or {}
                 for w in (quota.get("windows") or [])[:3]:
                     label = str(w.get("label") or "").strip()
                     remaining = w.get("remaining")
@@ -916,8 +918,9 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  save_token ERROR: {exc}")
         try:
-            login_win().hide()
-            _mlog("  login window hidden")
+            if _login_win_alive():
+                login_win_ref["win"].hide()
+                _mlog("  login window hidden")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  hide ERROR: {exc}")
         try:
@@ -1104,6 +1107,7 @@ def main() -> None:
 
 def shutdown() -> None:
     server.stop_server()
+    db.checkpoint_wal()
     db.close_db()
 
 

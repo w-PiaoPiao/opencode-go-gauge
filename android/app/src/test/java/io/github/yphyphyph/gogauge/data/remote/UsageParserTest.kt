@@ -33,7 +33,7 @@ class UsageParserTest {
         assertEquals(100, first.cacheReadTokens)
         assertEquals(50, first.cacheWrite5mTokens)
         assertEquals(25, first.cacheWrite1hTokens)
-        assertEquals(12_345_678, first.costRaw)
+        assertEquals(12_345_678L, first.costRaw)
         assertEquals(0.12345678, first.costUsd, 1e-9)
         assertEquals("key_1", first.keyId)
         assertEquals("ses_1", first.sessionId)

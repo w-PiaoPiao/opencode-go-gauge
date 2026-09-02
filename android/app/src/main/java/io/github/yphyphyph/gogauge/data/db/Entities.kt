@@ -40,7 +40,7 @@ data class UsageRecordEntity(
     @ColumnInfo(name = "cache_read_tokens") val cacheReadTokens: Int = 0,
     @ColumnInfo(name = "cache_write_5m_tokens") val cacheWrite5mTokens: Int = 0,
     @ColumnInfo(name = "cache_write_1h_tokens") val cacheWrite1hTokens: Int = 0,
-    @ColumnInfo(name = "cost_raw") val costRaw: Int = 0,
+    @ColumnInfo(name = "cost_raw") val costRaw: Long = 0,
     @ColumnInfo(name = "cost_usd") val costUsd: Double = 0.0,
     @ColumnInfo(name = "key_id") val keyId: String? = null,
     @ColumnInfo(name = "session_id") val sessionId: String? = null,

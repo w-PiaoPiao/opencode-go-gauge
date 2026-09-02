@@ -218,7 +218,13 @@ def _fetch(
                     raise OpenCodeAPIError("工作区不存在 (HTTP 404)")
                 if status < 200 or status >= 300:
                     raise OpenCodeAPIError(f"请求返回 HTTP {status}")
-                return resp.read(MAX_BODY_BYTES).decode("utf-8", errors="replace")
+                body = resp.read(MAX_BODY_BYTES)
+                # 截断检测: Content-Length 声明超限时明确报错, 而非静默解析半包丢尾部数据
+                declared = resp.headers.get("Content-Length") or ""
+                if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+                    raise OpenCodeAPIError(
+                        f"响应过大 ({int(declared) // (1 << 20)} MiB, 上限 4 MiB)")
+                return body.decode("utf-8", errors="replace")
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
             last_exc = exc
             if isinstance(exc, urllib.error.HTTPError):

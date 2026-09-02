@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__, db
 from .autostart import disable as _autostart_disable, enable as _autostart_enable
@@ -63,16 +63,25 @@ _sync_state: dict[str, Any] = {
 }
 _quota_cache: dict[int, dict[str, Any]] = {}  # {account_id: {"at": float, "data": ...}}
 _quota_refreshing: set[int] = set()  # 防重入: 同一账号同一时刻只允许一个 quota 刷新线程
+_quota_gate = threading.Lock()  # check-then-add 原子化 (并发 dashboard 请求)
 _exchange_cache: dict[str, Any] = {"at": 0.0, "usd_cny": 7.2}
 _EXCHANGE_TTL = 6 * 3600  # 汇率缓存 6 小时
+_exchange_refreshing = threading.Event()  # 防重入: 汇率后台刷新单线程
 _DEFAULT_USD_CNY = 7.2
 
 
 def _fetch_usd_cny() -> float:
-    """从 open.er-api.com 获取 USD→CNY 汇率, 失败时返回上次缓存/默认值."""
+    """返回 USD→CNY 汇率 (缓存值即时返回, 过期由后台线程刷新, 不阻塞请求)."""
     now = time.time()
-    if now - _exchange_cache["at"] < _EXCHANGE_TTL:
-        return _exchange_cache["usd_cny"]
+    if now - _exchange_cache["at"] >= _EXCHANGE_TTL and not _exchange_refreshing.is_set():
+        _exchange_refreshing.set()
+        threading.Thread(target=_refresh_exchange_async, daemon=True,
+                         name="gousage-fx").start()
+    return _exchange_cache["usd_cny"]
+
+
+def _refresh_exchange_async() -> None:
+    """后台刷新汇率: 成功按 TTL 缓存, 失败短重试 (5 分钟), 不阻塞调用方."""
     try:
         import urllib.request
         req = urllib.request.Request(
@@ -83,10 +92,13 @@ def _fetch_usd_cny() -> float:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
         rate = float(data.get("rates", {}).get("CNY") or 0)
         if rate > 0:
-            _exchange_cache.update(at=now, usd_cny=rate)
-    except Exception:  # noqa: BLE001 网络失败时保留旧值
-        _exchange_cache["at"] = now
-    return _exchange_cache["usd_cny"]
+            _exchange_cache.update(at=time.time(), usd_cny=rate)
+        else:
+            _exchange_cache["at"] = time.time() - _EXCHANGE_TTL + 300
+    except Exception:  # noqa: BLE001 网络失败: 短 TTL 重试, 保留旧值
+        _exchange_cache["at"] = time.time() - _EXCHANGE_TTL + 300
+    finally:
+        _exchange_refreshing.clear()
 
 
 def _sync_progress_snapshot() -> dict[str, Any]:
@@ -149,12 +161,14 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
     now = time.time()
     if slot and slot["data"] and now - slot["at"] < QUOTA_CACHE_TTL:
         return
-    if aid in _quota_refreshing:
-        return  # 该账号已有刷新线程在跑
     token, workspace_hint, provider = db.get_account_credentials(aid)
     if not token:
         return
-    _quota_refreshing.add(aid)
+    # check-then-add 原子化: 并发 dashboard 请求只放一个刷新线程过去
+    with _quota_gate:
+        if aid in _quota_refreshing:
+            return  # 该账号已有刷新线程在跑
+        _quota_refreshing.add(aid)
 
     def worker() -> None:
         try:
@@ -487,6 +501,7 @@ _server: Optional[ThreadingHTTPServer] = None
 
 # 半自动更新下载状态机: idle -> checking -> downloading -> done/no_update/no_asset/error
 _update_download: dict[str, Any] = {"state": "idle", "path": "", "error": "", "latest": ""}
+_update_lock = threading.Lock()  # 下载状态机原子占位: 防并发双开写坏同一 .part
 
 
 def _update_download_worker() -> None:
@@ -498,7 +513,11 @@ def _update_download_worker() -> None:
         if result.get("state") == "done" and result.get("path"):
             import subprocess
 
-            subprocess.Popen(["open", "-R", result["path"]])
+            if sys.platform == "win32":
+                # Windows: 资源管理器定位文件 (open -R 仅 macOS)
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(result["path"])])
+            else:
+                subprocess.Popen(["open", "-R", result["path"]])
     except Exception as exc:  # noqa: BLE001
         _update_download.update({"state": "error", "error": str(exc)[:300]})
 
@@ -513,9 +532,14 @@ def set_login_callback(callback: Callable[[str, str], None]) -> None:
     _on_open_login = callback
 
 
+_MAX_BODY_BYTES = 1 << 20  # 1 MiB: 本地接口请求体上限 (防异常声明挂死线程)
+
+
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
     """读取并解析 JSON 请求体, 失败抛 ValueError."""
     length = int(handler.headers.get("Content-Length") or 0)
+    if length > _MAX_BODY_BYTES:
+        raise ValueError("请求体过大")
     return json.loads(handler.rfile.read(length).decode("utf-8", errors="replace"))
 
 
@@ -530,12 +554,19 @@ def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200
 
 
 def _static_response(handler: BaseHTTPRequestHandler, rel: str) -> None:
-    # 防目录穿越
-    rel = rel.lstrip("/")
+    # 防目录穿越: 单纯过滤 '..' 不够 —— Windows 下 os.path.join 遇到盘符绝对
+    # 组件会丢弃前缀 (GET /C:/Users/.../gousage.db 可读任意文件). 解码后做
+    # realpath 包含校验, 双平台都强制落在资源目录内.
+    rel = unquote(rel or "").lstrip("/")
     if ".." in rel.replace("\\", "/").split("/"):
         handler.send_error(403)
         return
     path = _resource_path(rel)
+    root = os.path.normcase(os.path.dirname(os.path.realpath(_resource_path("index.html"))))
+    real = os.path.normcase(os.path.realpath(path))
+    if real != root and not real.startswith(root + os.sep):
+        handler.send_error(403)
+        return
     if not os.path.isfile(path):
         handler.send_error(404)
         return
@@ -560,12 +591,14 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
     if route == "/api/version" and method == "GET":
         _json_response(handler, {"version": __version__})
+        return
 
     if route == "/api/update/check" and method == "GET":
         try:
             _json_response(handler, check_update())
         except Exception as exc:  # noqa: BLE001 网络/解析失败 -> 前端提示
             _json_response(handler, {"error": str(exc)}, status=502)
+        return
 
     if route == "/api/update/open" and method == "POST":
         # 用系统默认浏览器打开 GitHub Releases 页 (WebView 内 window.open 不可靠)
@@ -573,6 +606,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
         webbrowser.open(RELEASE_PAGE_URL)
         _json_response(handler, {"ok": True})
+        return
 
     if route == "/api/state" and method == "GET":
         account = db.get_account()
@@ -654,11 +688,13 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         return
 
     if route == "/api/logout" and method == "POST":
-        # 退出前记录账号 id, 退出后清理其配额缓存槽 (防止残留旧配额)
+        # 退出前记录账号 id, 退出后清理其配额缓存槽 (防止残留旧配额);
+        # 同步丢弃在途刷新防重启标记, 避免进行中的 worker 把弹出的槽位塞回去
         aid = db.get_active_account_id()
         db.clear_account()
         if aid:
             _quota_cache.pop(aid, None)
+            _quota_refreshing.discard(aid)
         _json_response(handler, {"ok": True})
         return
 
@@ -915,10 +951,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         return
 
     if route == "/api/update/download" and method == "POST":
-        if _update_download["state"] in ("checking", "downloading"):
-            _json_response(handler, {"ok": False, "error": "下载进行中"}, 409)
-            return
-        _update_download.update({"state": "checking", "path": "", "error": "", "latest": ""})
+        with _update_lock:
+            if _update_download["state"] in ("checking", "downloading"):
+                _json_response(handler, {"ok": False, "error": "下载进行中"}, 409)
+                return
+            _update_download.update({"state": "checking", "path": "", "error": "", "latest": ""})
         threading.Thread(target=_update_download_worker, daemon=True,
                          name="gousage-update-dl").start()
         _json_response(handler, {"ok": True})
@@ -933,11 +970,34 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "GoGauge/1.0"
+    timeout = 15  # socket 读超时: 防异常客户端声明超大 Content-Length 挂死线程
 
     def log_message(self, fmt: str, *args: Any) -> None:  # 静默日志
         pass
 
+    def _reject_non_local(self) -> bool:
+        """请求来自本机才处理. Host 必须为本机 (防 DNS rebinding 把外部域名
+        解析到 127.0.0.1); 浏览器跨站请求必带 Origin (CSRF), 只允许本机来源.
+        无 Origin 的请求 (本机进程/脚本) 放行 —— 本机可信边界即安全边界."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
+        if host and host not in ("127.0.0.1", "localhost", "::1", "[::1]"):
+            self.send_error(403)
+            return True
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            try:
+                o = urlparse(origin)
+            except ValueError:
+                self.send_error(403)
+                return True
+            if (o.hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+                self.send_error(403)
+                return True
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
+        if self._reject_non_local():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
@@ -959,6 +1019,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._handle_api_request()
 
     def _handle_api_request(self) -> None:
+        if self._reject_non_local():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)

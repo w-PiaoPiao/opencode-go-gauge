@@ -80,6 +80,9 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
         if (auth != null) {
             val workspace = Login.extractWorkspaceHint(url)
             Log.i("GoGauge", "login cookie captured, ws=$workspace url=$url")
+            // 登录完成即清空 WebView cookie: OAuth/会话 cookie 不留在本地 cookie 库
+            CookieManager.getInstance().removeAllCookies(null)
+            CookieManager.getInstance().flush()
             vm.completeLogin(auth, workspace)
             return true
         }

@@ -173,23 +173,43 @@ abstract class UsageDao {
                 arrayOf(accountId, "-${clamped} days"),
             )
         )
-        return rows.map { r ->
+        // 连续日期补 0 (desktop db.daily_stats parity): 无记录的天也占位,
+        // 避免折线/柱状图 x 轴错位跳线
+        val byDate = rows.associateBy { it.date }
+        val today = java.time.LocalDate.now()
+        val out = ArrayList<DailyStat>(clamped + 1)
+        for (i in clamped downTo 0) {
+            val key = today.minusDays(i.toLong()).toString()
+            val r = byDate[key]
+            if (r == null) {
+                out.add(
+                    DailyStat(
+                        date = key, totalInputTokens = 0, uncachedInputTokens = 0,
+                        totalReasoningTokens = 0, cacheHitTokens = 0, cacheWriteTokens = 0,
+                        totalOutputTokens = 0, totalCostUsd = 0.0, requestCount = 0, hitRate = 0.0,
+                    )
+                )
+                continue
+            }
             val hit = r.cacheHitTokens
             val miss = r.uncachedInputTokens
             val hitRate = if (hit + miss > 0) hit.toDouble() / (hit + miss) * 100 else 0.0
-            DailyStat(
-                date = r.date,
-                totalInputTokens = r.totalInputTokens,
-                uncachedInputTokens = miss,
-                totalReasoningTokens = r.totalReasoningTokens,
-                cacheHitTokens = hit,
-                cacheWriteTokens = r.cacheWriteTokens,
-                totalOutputTokens = r.totalOutputTokens,
-                totalCostUsd = r.totalCostUsd,
-                requestCount = r.requestCount,
-                hitRate = Math.round(hitRate * 100) / 100.0,
+            out.add(
+                DailyStat(
+                    date = r.date,
+                    totalInputTokens = r.totalInputTokens,
+                    uncachedInputTokens = miss,
+                    totalReasoningTokens = r.totalReasoningTokens,
+                    cacheHitTokens = hit,
+                    cacheWriteTokens = r.cacheWriteTokens,
+                    totalOutputTokens = r.totalOutputTokens,
+                    totalCostUsd = r.totalCostUsd,
+                    requestCount = r.requestCount,
+                    hitRate = Math.round(hitRate * 100) / 100.0,
+                )
             )
         }
+        return out
     }
 
     @Query(

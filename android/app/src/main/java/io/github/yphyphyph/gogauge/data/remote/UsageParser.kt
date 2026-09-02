@@ -21,6 +21,13 @@ object UsageParser {
         return if (v == "null") 0 else v.toIntOrNull() ?: 0
     }
 
+    /** cost 字段用 Long: costRaw 单位 1e-8 USD, Int 在单条 > $21.47 时溢出归零. */
+    private fun parseLongField(body: String, name: String): Long {
+        val m = Regex("""${Regex.escape(name)}:\s*(\d+|null)""").find(body) ?: return 0
+        val v = m.groupValues[1]
+        return if (v == "null") 0 else v.toLongOrNull() ?: 0
+    }
+
     private fun parseStrField(body: String, name: String): String {
         val m = Regex("""${Regex.escape(name)}:\s*"([^"]*)"""").find(body)
         return m?.groupValues?.get(1) ?: ""
@@ -52,7 +59,7 @@ object UsageParser {
                 cacheReadTokens = parseNumField(body, "cacheReadTokens"),
                 cacheWrite5mTokens = parseNumField(body, "cacheWrite5mTokens"),
                 cacheWrite1hTokens = parseNumField(body, "cacheWrite1hTokens"),
-                costRaw = parseNumField(body, "cost"),
+                costRaw = parseLongField(body, "cost"),
                 keyId = parseStrField(body, "keyID"),
                 sessionId = parseStrField(body, "sessionID"),
                 plan = plans[usgId],

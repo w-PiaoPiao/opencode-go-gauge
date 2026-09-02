@@ -80,7 +80,26 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
                     for ((k, v) in headers) rb.header(k, v)
                     val result = client.newCall(rb.build()).execute().use { resp ->
                         val status = resp.code
-                        val body = resp.body?.string()?.take(MAX_BODY_BYTES) ?: ""
+                        // 有界读取 (desktop 为 socket 层 4MiB 截断): 防超大响应整读内存
+                        val declared = resp.header("Content-Length")?.toLongOrNull() ?: 0L
+                        if (declared > MAX_BODY_BYTES) {
+                            throw OpenCodeApiException("响应过大 ($declared 字节, 上限 $MAX_BODY_BYTES)")
+                        }
+                        val body = resp.body?.byteStream()?.use { input ->
+                            val buf = java.io.ByteArrayOutputStream()
+                            val chunk = ByteArray(64 * 1024)
+                            var total = 0
+                            while (true) {
+                                val n = input.read(chunk)
+                                if (n < 0) break
+                                total += n
+                                if (total > MAX_BODY_BYTES) {
+                                    throw OpenCodeApiException("响应过大 (超过 $MAX_BODY_BYTES 字节)")
+                                }
+                                buf.write(chunk, 0, n)
+                            }
+                            buf.toString("UTF-8")
+                        } ?: ""
                         when {
                             status == 401 || status == 403 ->
                                 throw AuthException("认证失败 (HTTP $status)，请重新登录")

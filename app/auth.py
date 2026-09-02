@@ -40,10 +40,18 @@ def _log(msg: str) -> None:
     """同时输出到 stdout 与日志文件 (便于诊断)."""
     print(msg, flush=True)
     try:
-        with open(_LOG_FILE, "a", encoding="utf-8") as fh:
+        # 0600: 该文件位于公共临时目录, 防其他本地用户读取
+        fd = os.open(_LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(msg + "\n")
     except OSError:
         pass
+
+
+try:  # 历史版本可能以默认 0644 创建过日志: 收紧权限
+    os.chmod(_LOG_FILE, 0o600)
+except OSError:
+    pass
 
 
 def build_login_url(provider: str = PROVIDER_OPENCODE) -> str:
@@ -149,11 +157,17 @@ class LoginWatcher:
             if url.startswith("https://" + target_host):
                 try:
                     cookies = self.win.get_cookies() or []
-                    raw_desc = [str(c) for c in cookies]
+                    # 只记录 cookie 名, 不落值: 日志在公共临时目录, 防会话凭证泄漏
+                    raw_desc = [
+                        ",".join(c.keys())
+                        if isinstance(c, SimpleCookieCls)
+                        else str(c.get("name") or "?")
+                        for c in cookies
+                    ]
                 except Exception as exc:  # noqa: BLE001
                     cookies = []
                     raw_desc = [f"<get_cookies ERROR {type(exc).__name__}: {exc}>"]
-                _log(f"[login] on {target_host}, url={url[:120]}, cookies={raw_desc}")
+                _log(f"[login] on {target_host}, url={url[:120]}, cookie_names={raw_desc}")
 
                 for name, value in _cookie_entries(cookies):
                     if name != target_cookie:
