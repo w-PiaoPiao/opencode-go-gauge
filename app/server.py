@@ -15,6 +15,13 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__, db
 from .autostart import disable as _autostart_disable, enable as _autostart_enable
 from .updater import RELEASE_PAGE_URL, check_update, download_update
+from .commandcode_api import (
+    AuthError as CCAuthError,
+    CommandCodeAPIError,
+    fetch_quota as cc_fetch_quota,
+    fetch_usage_page as cc_fetch_usage_page,
+)
+from .db import PROVIDER_COMMANDCODE, PROVIDER_OPENCODE
 from .opencode_api import (
     AuthError,
     OpenCodeAPIError,
@@ -98,27 +105,35 @@ def _set_phase(phase: str, message: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _record_monthly_reset(account_id: int, quota: dict[str, Any]) -> None:
-    """配额拉取成功后持久化月度窗口的重置时间 (供「本月」筛选推算周期起点)."""
+def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str, provider: str = PROVIDER_OPENCODE) -> dict[str, Any]:
+    slot = _quota_cache.setdefault(account_id, {"at": 0.0, "data": None})
+    now = time.time()
+    if slot["data"] and now - slot["at"] < QUOTA_CACHE_TTL:
+        return slot["data"]
+    if provider == PROVIDER_COMMANDCODE:
+        result = cc_fetch_quota(token)
+    else:
+        result = fetch_quota(token, workspace_hint)
+    slot["at"] = now
+    slot["data"] = result.to_dict()
+    _record_monthly_reset(account_id, slot["data"], provider)
+    return slot["data"]
+
+
+def _record_monthly_reset(account_id: int, quota: dict[str, Any], provider: str = PROVIDER_OPENCODE) -> None:
+    """配额拉取成功后持久化月度窗口的重置/周期时间 (供「本月」筛选推算周期起点)."""
     try:
+        if provider == PROVIDER_COMMANDCODE:
+            # commandcode 直接记录真实计费周期起止
+            if quota.get("period_start") and quota.get("period_end"):
+                db.record_period_bounds(account_id, quota["period_start"], quota["period_end"])
+            return
         for window in quota.get("windows") or []:
             if window.get("label") == "Monthly" and window.get("reset_at"):
                 db.record_monthly_reset(account_id, window["reset_at"])
                 break
     except Exception:  # noqa: BLE001 持久化失败不影响配额返回
         pass
-
-
-def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str) -> dict[str, Any]:
-    slot = _quota_cache.setdefault(account_id, {"at": 0.0, "data": None})
-    now = time.time()
-    if slot["data"] and now - slot["at"] < QUOTA_CACHE_TTL:
-        return slot["data"]
-    result = fetch_quota(token, workspace_hint)
-    slot["at"] = now
-    slot["data"] = result.to_dict()
-    _record_monthly_reset(account_id, slot["data"])
-    return slot["data"]
 
 
 def _ensure_quota_async(account_id: Optional[int] = None) -> None:
@@ -135,7 +150,7 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
         return
     if aid in _quota_refreshing:
         return  # 该账号已有刷新线程在跑
-    token, workspace_hint = db.get_account_credentials(aid)
+    token, workspace_hint, provider = db.get_account_credentials(aid)
     if not token:
         return
     _quota_refreshing.add(aid)
@@ -143,7 +158,7 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
     def worker() -> None:
         try:
             # 失败也写入缓存 (None), TTL 内不再重试, 避免前端无限刷新
-            _fetch_quota_with_cache(aid, token, workspace_hint)
+            _fetch_quota_with_cache(aid, token, workspace_hint, provider)
         except Exception:  # noqa: BLE001
             _quota_cache.setdefault(aid, {"at": 0.0, "data": None})
             _quota_cache[aid]["at"] = time.time()
@@ -157,7 +172,7 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
 def _fetch_usage_batch(
     token: str, workspace_id: str, pages: list[int]
 ) -> dict[int, Any]:
-    """并发拉取多页, 返回 {page: records | Exception}."""
+    """并发拉取多页 (opencode 页式), 返回 {page: records | Exception}."""
     results: dict[int, Any] = {}
     with ThreadPoolExecutor(max_workers=FETCH_BATCH) as executor:
         futures = {
@@ -176,20 +191,26 @@ def _fetch_usage_batch(
 def _sync_one_account(
     account_id: int, name: str, mode: str, window_days: Optional[int]
 ) -> dict[str, Any]:
-    """同步单个账号的用量记录 (原单账号逻辑, 显式传入账号上下文)."""
-    token = db.get_db().execute(
-        "SELECT token, workspace_id, resolved_workspace_id FROM accounts WHERE id = ?",
+    """同步单个账号的用量记录 (显式传入账号上下文, 按 provider 分流)."""
+    row = db.get_db().execute(
+        "SELECT token, workspace_id, resolved_workspace_id, provider FROM accounts WHERE id = ?",
         (account_id,),
     ).fetchone()
-    if token is None or not token["token"].strip():
+    if row is None or not (row["token"] or "").strip():
         return {"ok": False, "error": "未登录"}
-    token_str = token["token"].strip()
-    workspace_id = token["resolved_workspace_id"] or token["workspace_id"] or "Default"
+    token_str = row["token"].strip()
+    provider = row["provider"] or PROVIDER_OPENCODE
+    workspace_id = row["resolved_workspace_id"] or row["workspace_id"] or "Default"
 
     with _sync_lock:
         _sync_state.update(account=name)
 
     try:
+        # commandcode: 无 workspace 概念, 游标翻页; opencode: 页式 + workspace 解析
+        if provider == PROVIDER_COMMANDCODE:
+            return _sync_one_cc_account(account_id, name, token_str, mode, window_days)
+
+        # ---------- opencode: 原有逻辑 ----------
         # 确保工作区 ID 已解析
         try:
             resolved = resolve_workspace_id(workspace_id, token_str)
@@ -295,6 +316,85 @@ def _sync_one_account(
         return {"ok": False, "error": str(exc)}
 
 
+def _sync_one_cc_account(
+    account_id: int, name: str, token: str, mode: str, window_days: Optional[int]
+) -> dict[str, Any]:
+    """同步单个 Command Code 账号 (游标翻页, 单页即一页, 无需并发页号)."""
+    total_inserted = 0
+    pages = 0
+    cursor: Optional[str] = None
+    empty_batches = 0
+    failed = False
+    window_boundary_reached = False
+    from datetime import datetime, timedelta, timezone
+
+    max_pages = MAX_FULL_PAGES if mode == "full" else INCREMENTAL_PAGES
+    try:
+        while pages < max_pages:
+            with _sync_lock:
+                _sync_state["page"] = pages
+            try:
+                records, next_cursor = cc_fetch_usage_page(token, cursor, PAGE_SIZE)
+            except (CCAuthError, CommandCodeAPIError) as exc:
+                if mode == "incremental":
+                    _set_phase("error", f"[{name}] 第 {pages + 1} 页拉取失败: {exc}")
+                    db.update_sync_state("error", str(exc), total_inserted, account_id)
+                    return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
+                failed = True
+                break
+            if not records:
+                break  # 没有更多数据
+
+            if mode == "full" and window_days is not None:
+                earliest = min((r.created_at for r in records), default="")
+                if earliest:
+                    try:
+                        et = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
+                        boundary = datetime.now(timezone.utc) - timedelta(days=window_days)
+                        if et < boundary:
+                            window_boundary_reached = True
+                    except (ValueError, TypeError):
+                        pass
+
+            inserted = db.insert_usage_records(
+                [r.to_db_dict() for r in records], account_id
+            )
+            total_inserted += inserted
+            pages += 1
+            with _sync_lock:
+                _sync_state["inserted"] = total_inserted
+
+            if window_boundary_reached:
+                break
+            # 游标翻页: 无 next_cursor 即到底
+            if not next_cursor:
+                break
+            # 增量模式: 连续两批 0 新增 (全是旧数据) → 停止
+            if mode == "incremental" and inserted == 0:
+                empty_batches += 1
+                if empty_batches >= 2:
+                    break
+            else:
+                empty_batches = 0
+            cursor = next_cursor
+
+        # 按同步范围裁剪窗口外记录
+        if window_days is not None:
+            db.prune_old_records(window_days, account_id)
+
+        # commandcode 无 key 名称概念, 不需要 fetch_key_names
+
+        if failed:
+            msg = "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
+            db.update_sync_state("partial", msg, total_inserted, account_id)
+            return {"ok": True, "partial": True, "inserted": total_inserted, "pages": pages}
+        db.update_sync_state("ok", None, total_inserted, account_id)
+        return {"ok": True, "inserted": total_inserted, "pages": pages}
+    except Exception as exc:  # noqa: BLE001
+        db.update_sync_state("error", str(exc), total_inserted, account_id)
+        return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
+
+
 def sync_usage(mode: str = "incremental") -> dict[str, Any]:
     """同步用量记录.
 
@@ -367,7 +467,7 @@ def sync_all_async(mode: str) -> None:
 # HTTP 服务
 # ---------------------------------------------------------------------------
 
-_on_open_login: Optional[Callable[[str], None]] = None
+_on_open_login: Optional[Callable[[str, str], None]] = None
 _server: Optional[ThreadingHTTPServer] = None
 
 # 半自动更新下载状态机: idle -> checking -> downloading -> done/no_update/no_asset/error
@@ -388,10 +488,11 @@ def _update_download_worker() -> None:
         _update_download.update({"state": "error", "error": str(exc)[:300]})
 
 
-def set_login_callback(callback: Callable[[str], None]) -> None:
+def set_login_callback(callback: Callable[[str, str], None]) -> None:
     """由 main.py 注册: 前端请求登录时触发窗口跳转.
 
-    回调契约: callback(mode), mode 为 "add" (添加新用户) 或 "relogin" (重新登录当前用户).
+    回调契约: callback(mode, provider), mode 为 "add" (添加新用户) 或
+    "relogin" (重新登录当前用户), provider 为 "opencode" / "commandcode".
     """
     global _on_open_login
     _on_open_login = callback
@@ -547,8 +648,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         return
 
     if route == "/api/relogin" and method == "POST":
+        provider = (query.get("provider") or ["opencode"])[0]
+        if provider not in (PROVIDER_OPENCODE, PROVIDER_COMMANDCODE):
+            provider = PROVIDER_OPENCODE
         if _on_open_login:
-            _on_open_login("relogin")
+            _on_open_login("relogin", provider)
         _json_response(handler, {"ok": True})
         return
 
@@ -584,6 +688,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                     "name": acc["name"],
                     "logged_in": True,
                     "active": aid == active_id,
+                    "provider": acc.get("provider") or PROVIDER_OPENCODE,
                     "quota": quota,
                     "today": db.totals("today", aid),
                     "today_trend": db.today_trend(aid),
@@ -657,11 +762,44 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             return
 
         if action == "add":
-            # 触发登录窗口 (add 模式); 无窗口环境 (纯浏览器/冒烟) 时返回未打开状态
+            # 触发登录窗口 (add 模式, 带 provider); 无窗口环境 (纯浏览器/冒烟) 时返回未打开状态
+            provider = str(body.get("provider") or PROVIDER_OPENCODE)
+            if provider not in (PROVIDER_OPENCODE, PROVIDER_COMMANDCODE):
+                provider = PROVIDER_OPENCODE
             opened = bool(_on_open_login)
             if opened:
-                _on_open_login("add")
+                _on_open_login("add", provider)
             _json_response(handler, {"ok": True, "opened": opened})
+            return
+
+        if action == "add-token":
+            # 手动粘贴 token/cookie 登录 (commandcode 内嵌登录窗不可用时的兜底,
+            # opencode 也可用). 先校验有效性再落库.
+            provider = str(body.get("provider") or PROVIDER_OPENCODE)
+            if provider not in (PROVIDER_OPENCODE, PROVIDER_COMMANDCODE):
+                provider = PROVIDER_OPENCODE
+            token = str(body.get("token") or "").strip()
+            if not token:
+                _json_response(handler, {"ok": False, "error": "token 为空"}, 400)
+                return
+            try:
+                # 校验: 拉一次配额确认凭证可用
+                if provider == PROVIDER_COMMANDCODE:
+                    result = cc_fetch_quota(token)
+                else:
+                    result = fetch_quota(token, "Default")
+                if not result.success:
+                    _json_response(handler, {"ok": False, "error": result.error or "凭证无效"}, 400)
+                    return
+            except Exception as exc:  # noqa: BLE001
+                _json_response(handler, {"ok": False, "error": str(exc)}, 400)
+                return
+            try:
+                aid = db.add_account(token, "", switch=True, provider=provider)
+            except Exception as exc:  # noqa: BLE001
+                _json_response(handler, {"ok": False, "error": str(exc)}, 500)
+                return
+            _json_response(handler, {"ok": True, "id": aid, "provider": provider})
             return
 
         _json_response(handler, {"ok": False, "error": "未知操作"}, 404)

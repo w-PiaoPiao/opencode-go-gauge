@@ -678,10 +678,13 @@ class WindowApi:
     def set_login_callback(self, cb) -> None:
         self._on_open_login = cb
 
-    def open_login(self, mode: str = "relogin") -> bool:
+    def open_login(self, mode: str = "relogin", provider: str = "opencode") -> bool:
         """前端登录入口: 弹出独立登录窗口. mode: "add"=添加新用户 / "relogin"=重登当前用户."""
         if self._on_open_login:
-            self._on_open_login(mode if mode in ("add", "relogin") else "relogin")
+            self._on_open_login(
+                mode if mode in ("add", "relogin") else "relogin",
+                provider if provider in ("opencode", "commandcode") else "opencode",
+            )
         return True
 
     def minimize(self) -> bool:
@@ -826,7 +829,7 @@ def main() -> None:
             except Exception:  # noqa: BLE001
                 pass
         w = webview.create_window(
-            "GoGauge - OpenCode Go Login",
+            "GoGauge - Login",
             "about:blank",
             width=720,
             height=640,
@@ -857,22 +860,23 @@ def main() -> None:
 
     _bind_login_close_cleanup(login_win_ref["win"])
 
-    # 登录模式: open_login(mode) 记录意图, on_login_success 按模式落库
-    pending_mode = {"mode": "relogin"}
+    # 登录模式: open_login(mode, provider) 记录意图, on_login_success 按模式落库
+    pending_mode = {"mode": "relogin", "provider": "opencode"}
 
-    def on_login_success(auth_cookie: str, workspace_hint: str) -> None:
+    def on_login_success(auth_cookie: str, workspace_hint: str, provider: str = "opencode") -> None:
         """登录成功: 按模式保存 → 隐藏登录窗口 → 主窗口进入面板 → 全量同步.
 
-        - add: 新建账号 (同 token 自动去重为既有账号) 并切换为活跃
-        - relogin: 更新当前活跃账号凭证
+        - add: 新建账号 (同 provider+token 自动去重为既有账号) 并切换为活跃
+        - relogin: 更新当前活跃账号凭证 (含 provider)
         """
         mode = pending_mode.get("mode", "relogin")
-        _mlog(f"on_login_success: ws={workspace_hint} mode={mode}")
+        provider = provider if provider in ("opencode", "commandcode") else "opencode"
+        _mlog(f"on_login_success: ws={workspace_hint} mode={mode} provider={provider}")
         try:
             if mode == "add":
-                db.add_account(auth_cookie, workspace_hint, switch=True)
+                db.add_account(auth_cookie, workspace_hint, switch=True, provider=provider)
             else:
-                db.save_token(auth_cookie, workspace_hint)
+                db.save_token(auth_cookie, workspace_hint, provider=provider)
             _mlog("  token saved")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  save_token ERROR: {exc}")
@@ -897,10 +901,10 @@ def main() -> None:
             _mlog(f"  evaluate_js ERROR: {exc}")
         server.sync_all_async("full")
 
-    def _start_watcher(lw) -> None:
+    def _start_watcher(lw, provider: str = "opencode") -> None:
         """启动登录监听: 优先等 shown 事件 (避免 hidden 窗口调用窗口方法抛内部异常);
         复用窗口 (已显示过) 直接启动; 事件不触发时 3s 兜底启动 (LoginWatcher 对未就绪窗口有重试)."""
-        w = LoginWatcher(lw, on_login_success)
+        w = LoginWatcher(lw, provider, on_login_success)
         watcher["ref"] = w
         if getattr(lw, "_gousage_shown", False):
             w.start()
@@ -925,8 +929,10 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             return False
 
-    def open_login(mode: str = "relogin") -> None:
+    def open_login(mode: str = "relogin", provider: str = "opencode") -> None:
         """弹出独立登录窗口并开始监听 (欢迎页/设置页按钮). 单飞守卫: 已有登录流程时忽略."""
+        if provider not in ("opencode", "commandcode"):
+            provider = "opencode"
         # 登录窗已被手动关闭 => 旧监听已失效: 先停旧线程再重建窗口.
         # (修复: 依赖"线程存活"的单飞守卫会把死窗口场景永久拦截, 导致再次点击无响应)
         if not _login_win_alive():
@@ -936,23 +942,25 @@ def main() -> None:
             watcher["ref"] = None
             _mlog("[main] login window gone -> recreate")
             pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
-            _recreate_login_window()
+            pending_mode["provider"] = provider
+            _recreate_login_window(provider)
             return
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher) and w._thread and w._thread.is_alive() and not w.done:
             return  # 已有登录监听进行中 (窗口存活)
         pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
+        pending_mode["provider"] = provider
         lw = login_win()
         try:
             lw.show()
-            lw.load_url(build_login_url())
+            lw.load_url(build_login_url(provider))
         except Exception as exc:  # noqa: BLE001 窗口可能被用户手动关闭, 重建
             print(f"[main] login window reopen: {exc}", flush=True)
-            _recreate_login_window()
+            _recreate_login_window(provider)
             return
-        _start_watcher(lw)
+        _start_watcher(lw, provider)
 
-    def _recreate_login_window() -> None:
+    def _recreate_login_window(provider: str = "opencode") -> None:
         """登录窗口被手动关闭后重建 (回调绑定新窗口)."""
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher):
@@ -962,8 +970,8 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             pass
         new_win = webview.create_window(
-            "GoGauge - OpenCode Go Login",
-            build_login_url(),
+            "GoGauge - Login",
+            build_login_url(provider),
             width=720,
             height=640,
             min_size=(560, 500),
@@ -971,7 +979,7 @@ def main() -> None:
         )
         login_win_ref["win"] = new_win
         _bind_login_close_cleanup(new_win)
-        _start_watcher(new_win)
+        _start_watcher(new_win, provider)
 
     api.set_login_callback(open_login)
     server.set_login_callback(open_login)  # /api/relogin 兼容 (浏览器环境/兜底)
