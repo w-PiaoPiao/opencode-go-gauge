@@ -1,11 +1,12 @@
-# GoGauge — OpenCode Go 用量仪表盘
+# GoGauge — OpenCode Go / Command Code GOAT 用量仪表盘
 
 <p align="center">
   <img src="assets/GoGauge.ico" width="64" alt="GoGauge">
 </p>
 
 <p align="center">
-  <b>本地优先的 OpenCode Go 用量统计面板</b>：配额窗口、Token 构成、模型排行、使用记录，打开即见。
+  <b>本地优先的用量统计面板</b>：配额窗口、Token 构成、模型排行、使用记录，打开即见。
+  支持 <b>OpenCode Go</b> 与 <b>Command Code GOAT</b> 套餐。
 </p>
 
 <p align="center">
@@ -51,7 +52,8 @@
 - **用量统计**：Token 构成（输入 / 输出 / 推理 / 缓存读 / 缓存写 / 会话）、模型用量环形图 + 排行、费用/请求/总 TOKEN 三线趋势
 - **会话历史**：按会话聚合请求数 / 输入 / 输出 / 推理 / 总 Token / 成本，分页浏览
 - **使用记录**：请求级明细分页浏览，支持模型筛选，含模型 / Key 名称列
-- **多账号支持**：用户管理（添加 / 切换 / 重命名 / 删除 / 重新登录），用量按账号隔离，记录与会话表显示 Key 名称列
+- **多账号支持**：用户管理（添加 / 切换 / 重命名 / 删除 / 重新登录），用量按账号隔离，记录与会话表显示 Key 名称列；账号可来自 OpenCode 或 Command Code（带来源徽标）
+- **Command Code GOAT 支持**：登录 Command Code 账号后展示 5 小时 / 每周 / 每月三窗口配额与请求级明细（来源徽标 GOAT）
 - **账户总览面板**：设置中可开关，聚合展示各账户配额三窗口、今日用量与跨账号合计 KPI、7 日费用趋势对比
 - **内置 WebView 登录**：独立登录窗口打开官方授权页，自动回填 cookie 与工作区，无需手动复制
 - **自动同步**：增量同步（1/5/15/30 分钟可选）+ 同步范围设置（30/60/90/180 天 / 所有）
@@ -116,7 +118,7 @@ build.bat
 
 ## 📊 数据说明
 
-- **数据来源**：opencode.ai 工作区用量接口（`/_server` server-fn）+ 配额页 HTML 解析
+- **数据来源**：OpenCode Go = opencode.ai 工作区用量接口（`/_server` server-fn）+ 配额页 HTML 解析；Command Code GOAT = api.commandcode.ai internal API（credits / usage）
 - **总 TOKEN** = 输入（含缓存命中）+ 输出 + 推理
 - **缓存命中率** = 命中 /（命中 + 未命中）
 - **费用**：USD 原始值，人民币按 open.er-api.com 实时汇率换算（24h 缓存）

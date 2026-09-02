@@ -1,13 +1,19 @@
 """SQLite 存储与聚合查询 (多账号版).
 
 账号模型:
-- ``accounts`` 表存放多个 OpenCode Go 账号 (各自持有 token/workspace),
+- ``accounts`` 表存放多个用量账号, 每个账号属于一个 provider
+  (``opencode`` = OpenCode Go 套餐, ``commandcode`` = Command Code GOAT 套餐),
+  各自持有 token (opencode: ``auth=...``; commandcode: ``__Secure-...session_token=...``),
   ``settings.payload`` 中的 ``active_account_id`` 指向当前活跃账号;
 - 所有用量记录通过 ``usage_records.account_id`` 归属账号;
 - 同步状态 ``usage_sync_state`` 以 account_id 为主键, 每账号一份增量游标.
 兼容约定: 历史函数名保持不变, 未显式传 account_id 时一律作用于活跃账号.
 """
 from __future__ import annotations
+
+PROVIDER_OPENCODE = "opencode"
+PROVIDER_COMMANDCODE = "commandcode"
+ALL_PROVIDERS = (PROVIDER_OPENCODE, PROVIDER_COMMANDCODE)
 
 import json
 import os
@@ -157,6 +163,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               workspace_id TEXT NOT NULL DEFAULT 'Default',
               resolved_workspace_id TEXT,
               token TEXT NOT NULL DEFAULT '',
+              provider TEXT NOT NULL DEFAULT 'opencode',
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -189,10 +196,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         if _table_exists(conn, "account"):
             empty = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"] == 0
             if empty:
-                conn.execute(
-                    """INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at)
-                       SELECT id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at FROM account"""
-                )
+                # 旧表没有 provider 列时以 opencode 回填; 若已有则原样搬运
+                acc_cols = {row["name"] for row in conn.execute("PRAGMA table_info(account)").fetchall()}
+                if "provider" in acc_cols:
+                    conn.execute(
+                        """INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)
+                           SELECT id, name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at FROM account"""
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)
+                           SELECT id, name, workspace_id, resolved_workspace_id, token, 'opencode', created_at, updated_at FROM account"""
+                    )
             conn.execute("DROP TABLE account")
             conn.commit()
 
@@ -200,8 +215,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         if conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"] == 0:
             now = _now_iso()
             conn.execute(
-                "INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, created_at, updated_at)"
-                " VALUES (1, 'Default', 'Default', NULL, '', ?, ?)",
+                "INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)"
+                " VALUES (1, 'Default', 'Default', NULL, '', 'opencode', ?, ?)",
                 (now, now),
             )
             conn.commit()
@@ -218,6 +233,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_usage_account_time ON usage_records(account_id, created_at DESC)"
         )
+
+        # 迁移 4: accounts / usage_records 补充 provider 列 (存量 opencode 账号回填 'opencode')
+        acc_cols = {row["name"] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "provider" not in acc_cols:
+            conn.execute(
+                "ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'opencode'"
+            )
+        conn.commit()
+        rec_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_records)").fetchall()}
+        if "provider" not in rec_cols:
+            conn.execute(
+                "ALTER TABLE usage_records ADD COLUMN provider TEXT"
+            )
+        conn.commit()
 
         # 迁移 3: 单行 usage_sync_state(id 主键) 重建为按账号多行 (数据无损搬运)
         ss_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_sync_state)").fetchall()}
@@ -335,6 +364,7 @@ def _account_dict(row: sqlite3.Row) -> dict[str, Any]:
         "workspace_id": row["workspace_id"],
         "resolved_workspace_id": row["resolved_workspace_id"],
         "has_token": bool(row["token"].strip()),
+        "provider": row["provider"] if "provider" in row.keys() else PROVIDER_OPENCODE,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -372,16 +402,24 @@ def _ensure_state_row(conn: sqlite3.Connection, account_id: int) -> None:
     )
 
 
-def save_token(token: str, workspace_id: str = "Default") -> None:
-    """重新登录语义: 更新活跃账号的凭证并重置其增量游标."""
+def save_token(
+    token: str, workspace_id: str = "Default", provider: str = PROVIDER_OPENCODE
+) -> None:
+    """重新登录语义: 更新活跃账号的凭证并重置其增量游标.
+
+    provider 变化时同步更新 (重新登录时用户可能切换了来源类型);
+    workspace 仅对 opencode 有意义, commandcode 恒为 "Default".
+    """
     conn = get_db()
     aid = get_active_account_id()
     if not aid:
         return
+    if provider not in ALL_PROVIDERS:
+        provider = PROVIDER_OPENCODE
     conn.execute(
         """UPDATE accounts SET token = ?, workspace_id = ?, resolved_workspace_id = NULL,
-           updated_at = ? WHERE id = ?""",
-        (token.strip(), workspace_id.strip() or "Default", _now_iso(), aid),
+           provider = ?, updated_at = ? WHERE id = ?""",
+        (token.strip(), workspace_id.strip() or "Default", provider, _now_iso(), aid),
     )
     _ensure_state_row(conn, aid)
     conn.execute(
@@ -422,29 +460,63 @@ def get_workspace_hint() -> str:
     return row["resolved_workspace_id"] or row["workspace_id"] or "Default"
 
 
-def get_account_credentials(account_id: int) -> tuple[str, str]:
-    """读取任意账号的凭证 (token, 工作区提示); 账号不存在返回 ("", "Default")."""
+def get_account_credentials(account_id: int) -> tuple[str, str, str]:
+    """读取任意账号的凭证 (token, 工作区提示, provider); 账号不存在返回 ("", "Default", "opencode")."""
     row = get_db().execute(
-        "SELECT token, workspace_id, resolved_workspace_id FROM accounts WHERE id = ?",
+        "SELECT token, workspace_id, resolved_workspace_id, provider FROM accounts WHERE id = ?",
         (int(account_id),),
     ).fetchone()
     if row is None:
-        return "", "Default"
+        return "", "Default", PROVIDER_OPENCODE
     hint = row["resolved_workspace_id"] or row["workspace_id"] or "Default"
-    return (row["token"] or "").strip(), hint
+    provider = row["provider"] or PROVIDER_OPENCODE
+    return (row["token"] or "").strip(), hint, provider
 
 
-def add_account(token: str, workspace_hint: str = "", switch: bool = True) -> int:
-    """添加新账号; 若已有完全相同的 token 则视为同一用户, 更新工作区提示后返回其 id."""
+def get_account_provider(account_id: int) -> str:
+    """读取账号的 provider; 账号不存在返回 opencode (兼容旧行为)."""
+    row = get_db().execute(
+        "SELECT provider FROM accounts WHERE id = ?", (int(account_id),)
+    ).fetchone()
+    if row is None or not row["provider"]:
+        return PROVIDER_OPENCODE
+    return row["provider"]
+
+
+def list_accounts_by_provider(provider: str) -> list[dict[str, Any]]:
+    rows = get_db().execute(
+        "SELECT * FROM accounts WHERE provider = ? ORDER BY id ASC", (provider,)
+    ).fetchall()
+    return [_account_dict(r) for r in rows]
+
+
+def count_logged_in_provider(provider: str) -> int:
+    row = get_db().execute(
+        "SELECT COUNT(*) AS c FROM accounts WHERE provider = ? AND TRIM(token) != ''",
+        (provider,),
+    ).fetchone()
+    return int(row["c"])
+
+
+def add_account(
+    token: str,
+    workspace_hint: str = "",
+    switch: bool = True,
+    provider: str = PROVIDER_OPENCODE,
+) -> int:
+    """添加新账号; 若已存在同一 provider 的相同 token 则视为同一用户, 更新工作区提示后返回其 id."""
     conn = get_db()
     token = token.strip()
     hint = (workspace_hint or "").strip()
+    if provider not in ALL_PROVIDERS:
+        provider = PROVIDER_OPENCODE
     existing = conn.execute(
-        "SELECT id FROM accounts WHERE TRIM(token) = ? ORDER BY id LIMIT 1", (token,)
+        "SELECT id FROM accounts WHERE provider = ? AND TRIM(token) = ? ORDER BY id LIMIT 1",
+        (provider, token),
     ).fetchone() if token else None
     if existing is not None:
         aid = int(existing["id"])
-        if hint:
+        if hint and provider == PROVIDER_OPENCODE:
             conn.execute(
                 "UPDATE accounts SET workspace_id = ?, updated_at = ? WHERE id = ?",
                 (hint, _now_iso(), aid),
@@ -455,12 +527,17 @@ def add_account(token: str, workspace_hint: str = "", switch: bool = True) -> in
             conn.commit()
         return aid
     nxt = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 AS n FROM accounts").fetchone()["n"]
-    name = hint[:50] if hint else f"User {nxt}"
+    if hint and provider == PROVIDER_OPENCODE:
+        name = hint[:50]
+    elif provider == PROVIDER_COMMANDCODE:
+        name = f"GOAT {nxt}"
+    else:
+        name = f"User {nxt}"
     now = _now_iso()
     cur = conn.execute(
-        """INSERT INTO accounts (name, workspace_id, resolved_workspace_id, token, created_at, updated_at)
-           VALUES (?, ?, NULL, ?, ?, ?)""",
-        (name, hint or "Default", token, now, now),
+        """INSERT INTO accounts (name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)
+           VALUES (?, ?, NULL, ?, ?, ?, ?)""",
+        (name, hint or "Default", token, provider, now, now),
     )
     aid = int(cur.lastrowid or nxt)
     _ensure_state_row(conn, aid)
@@ -533,12 +610,21 @@ def clear_account() -> None:
 
 
 def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int] = None) -> int:
-    """批量写入 (归属指定/活跃账号), 按 usg_id 去重; 返回新增条数."""
+    """批量写入 (归属指定/活跃账号), 按 usg_id 去重; 返回新增条数.
+
+    若记录 dict 带 ``provider`` 字段则一并写入 (usage_records.provider 为
+    来源快照, 查询不受影响); 不带时回填账号当前 provider.
+    """
     if not records:
         return 0
     aid = _resolve_account_id(account_id)
     conn = get_db()
     synced_at = _now_iso()
+    # 记录未显式带 provider 时, 用账号当前的 provider
+    acct_provider = None
+    row = conn.execute("SELECT provider FROM accounts WHERE id = ?", (aid,)).fetchone()
+    if row is not None:
+        acct_provider = row["provider"] or PROVIDER_OPENCODE
     stmt = (
         "INSERT INTO usage_records (usg_id, created_at, model, provider, input_tokens,"
         " output_tokens, reasoning_tokens, cache_read_tokens, cache_write_5m_tokens,"
@@ -558,6 +644,7 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
     try:
         conn.execute("BEGIN")
         for rec in records:
+            rec_provider = (rec.get("provider") or acct_provider or PROVIDER_OPENCODE)
             cur = conn.execute(
                 "SELECT 1 FROM usage_records WHERE usg_id = ?", (rec["usg_id"],)
             )
@@ -565,7 +652,7 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
             conn.execute(
                 stmt,
                 (
-                    rec["usg_id"], rec["created_at"], rec["model"], rec.get("provider"),
+                    rec["usg_id"], rec["created_at"], rec["model"], rec_provider,
                     rec["input_tokens"], rec["output_tokens"], rec["reasoning_tokens"],
                     rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
                     rec["cache_write_1h_tokens"], rec["cost_raw"], rec["cost_usd"],
@@ -856,6 +943,47 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
 _MONTHLY_PERIOD_DAYS = 30
 
 
+def record_period_bounds(account_id: Optional[int], period_start: str, period_end: str) -> None:
+    """记录账号当前计费周期的起止时间 (UTC "YYYY-MM-DD HH:MM:SS").
+
+    Command Code 套餐的账单周期来自 subscriptions.currentPeriodStart/End,
+    不再套用 opencode 的 30 天回推规则.
+    """
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return
+    start = _parse_utc_naive(period_start)
+    end = _parse_utc_naive(period_end)
+    if start is None or end is None:
+        return
+    conn = get_db()
+    data = _raw_payload(conn)
+    data[f"period_start:{aid}"] = start
+    data[f"period_end:{aid}"] = end
+    _write_payload(conn, data)
+    conn.commit()
+
+
+def _parse_utc_naive(value: str) -> Optional[str]:
+    """把 ISO/毫秒/常见格式的时间串归一化为 UTC naive "YYYY-MM-DD HH:MM:SS"."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ) if value > 1e12 else datetime.fromtimestamp(value, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    text = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def record_monthly_reset(account_id: Optional[int], reset_at_utc: str) -> None:
     """记录账号的下次月度重置时间, 供「本月」筛选推算当前周期起点."""
     aid = _resolve_account_id(account_id)
@@ -879,18 +1007,46 @@ def record_monthly_reset(account_id: Optional[int], reset_at_utc: str) -> None:
 
 
 def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
-    """当前月度重置周期起点 (UTC "YYYY-MM-DD HH:MM:SS"); 无配额记录时返回 None."""
+    """当前月度重置周期起点 (UTC "YYYY-MM-DD HH:MM:SS"); 无任何周期记录时返回 None.
+
+    - commandcode 等记录过真实周期起点的账号: 直接取 period_start;
+    - opencode 无真实起点, 由下次重置时间回推 30 天;
+    - 周期已结束 (period_end < now) 时按老规则回退/返回 None 让调用方走 30 天滚动.
+    """
     aid = _resolve_account_id(account_id)
     if not aid:
         return None
-    raw = _raw_payload(get_db()).get(f"monthly_reset:{aid}")
-    if not raw:
+    raw = _raw_payload(get_db())
+    # 真实计费周期起点 (commandcode 写入)
+    stored_start = raw.get(f"period_start:{aid}")
+    stored_end = raw.get(f"period_end:{aid}")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if stored_start:
+        try:
+            start = datetime.strptime(str(stored_start), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            start = None
+        if start is not None:
+            # 周期已过期 (配额未刷新), 以最近一个周期起点为准
+            if stored_end:
+                try:
+                    end = datetime.strptime(str(stored_end), "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    end = None
+                if end is not None:
+                    while end <= now:  # 跨过已结束的周期, 顺延整周期长度
+                        span = end - start
+                        start = end
+                        end = end + span
+            return start.strftime("%Y-%m-%d %H:%M:%S")
+    # 无真实周期: 老规则, 由重置时间回推 (opencode)
+    monthly = raw.get(f"monthly_reset:{aid}")
+    if not monthly:
         return None
     try:
-        reset = datetime.strptime(str(raw), "%Y-%m-%d %H:%M:%S")
+        reset = datetime.strptime(str(monthly), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
     if reset > now:
         reset -= timedelta(days=_MONTHLY_PERIOD_DAYS)
     return reset.strftime("%Y-%m-%d %H:%M:%S")

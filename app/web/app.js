@@ -26,7 +26,7 @@ const I18N = {
     colTime: "时间", colModel: "模型", colInput: "输入", colOutput: "输出",
     colReasoning: "推理", colCacheRead: "缓存读", colCost: "费用", colPlan: "PLAN",
     prev: "上一页", next: "下一页",
-    settingsTitle: "设置", setAccount: "OpenCode 账户", setLoginState: "登录状态",
+    settingsTitle: "设置", setAccount: "用量账户", accountCard: "用量账户", setLoginState: "登录状态",
     setWorkspace: "工作区", setLoginMethod: "登录方式",
     loginMethodDesc: "内置浏览器 (WebView2) 打开官方授权页，自动回填",
     relogin: "重新登录", setLogout: "退出登录", logoutDesc: "清除本地 token 与缓存数据", logout: "退出登录",
@@ -75,7 +75,14 @@ const I18N = {
     quotaFail: "配额获取失败", retryTip: "点击右上角刷新重试",
     syncIntervalSet: "同步间隔已设为", syncRangeUpdated: "同步范围已更新，下次全量同步生效",
     trendHint: "30 天", totalTokenHint: "含缓存命中",
-    setUsers: "用户管理", addUser: "添加用户", addUserTip: "登录新的 OpenCode Go 账号并保存到本机",
+    setUsers: "用户管理", addUser: "添加 OpenCode 账号", addGoatUser: "添加 GOAT 账号", addUserTip: "登录新的 OpenCode Go 账号并保存到本机",
+    provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
+    goatLoginNote: "打开 Command Code 登录页，完成后自动回填会话",
+    goatLoginWin: "打开内置登录窗口",
+    goatLoginOr: "或",
+    goatCookiePh: "粘贴完整 Cookie（含 __Secure-commandcode_prod_.session_token=…），可从已登录浏览器 DevTools 复制",
+    goatLoginPaste: "用粘贴的 Cookie 登录",
+    goatCookieEmpty: "请先粘贴 Cookie",
     userSwitchTip: "切换用户", userCountTip: "已登录用户数",
     switchTo: "切换", currentUserBadge: "当前", renameBtn: "重命名", deleteUser: "删除",
     renameTitle: "重命名用户", save: "保存", deleteUserTitle: "删除用户",
@@ -107,7 +114,7 @@ const I18N = {
     colTime: "Time", colModel: "Model", colInput: "Input", colOutput: "Output",
     colReasoning: "Reasoning", colCacheRead: "Cache Read", colCost: "Cost", colPlan: "PLAN",
     prev: "Prev", next: "Next",
-    settingsTitle: "Settings", setAccount: "OpenCode Account", setLoginState: "Login Status",
+    settingsTitle: "Settings", setAccount: "Usage Accounts", accountCard: "Usage Accounts", setLoginState: "Login Status",
     setWorkspace: "Workspace", setLoginMethod: "Login Method",
     loginMethodDesc: "Built-in browser (WebView2) opens the official auth page and auto-fills",
     relogin: "Re-login", setLogout: "Logout", logoutDesc: "Clear local token and cached data", logout: "Logout",
@@ -156,7 +163,14 @@ const I18N = {
     quotaFail: "Quota fetch failed", retryTip: "Click refresh in top bar to retry",
     syncIntervalSet: "Sync interval set to", syncRangeUpdated: "Sync range updated, takes effect on next full sync",
     trendHint: "30 days", totalTokenHint: "incl. cache hits",
-    setUsers: "User Management", addUser: "Add User", addUserTip: "Sign in with another OpenCode Go account",
+    setUsers: "User Management", addUser: "Add OpenCode account", addGoatUser: "Add GOAT account", addUserTip: "Sign in with another OpenCode Go account",
+    provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
+    goatLoginNote: "Opens Command Code sign-in; session is captured automatically",
+    goatLoginWin: "Open built-in login window",
+    goatLoginOr: "or",
+    goatCookiePh: "Paste full Cookie header (with __Secure-commandcode_prod_.session_token=…) from a signed-in browser DevTools",
+    goatLoginPaste: "Sign in with pasted Cookie",
+    goatCookieEmpty: "Paste a Cookie first",
     userSwitchTip: "Switch user", userCountTip: "Logged-in users",
     switchTo: "Switch", currentUserBadge: "Active", renameBtn: "Rename", deleteUser: "Delete",
     renameTitle: "Rename User", save: "Save", deleteUserTitle: "Delete User",
@@ -900,7 +914,7 @@ function renderAccountCard(a) {
   const spark = sparklineSvg((a.today_trend || []).map((d) => d.input + d.output + d.reasoning), a.color);
   return `<div class="card ov-acc">
     <div class="ov-acc-head">
-      <span class="ov-acc-name">${escapeHtml(a.name)}</span>
+      <span class="ov-acc-name">${escapeHtml(a.name)}<span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span></span>
       <span class="ov-acc-badges">${a.active ? `<span class="plan-badge">${t("activeAccount")}</span>` : ""}</span>
       <span class="ov-acc-sync">${t("lastSync")} ${fmtRelative(a.last_sync_at)}</span>
     </div>
@@ -1009,6 +1023,69 @@ function syncSettingsPills() {
    (load_url 同URL跳过 / evaluate_js 时序) 均不可靠, 用短轮询兜底保证
    账户列表/顶栏计数即时刷新. 5 分钟无变化自动停止. */
 let loginWatchTimer = null;
+
+/* 统一登录入口: mode = add (新增账号) / relogin (重登当前); provider = opencode / commandcode */
+async function startLogin(mode, provider) {
+  startLoginWatch();
+  const prov = provider === "commandcode" ? "commandcode" : "opencode";
+  const a = await pywebviewApi();
+  if (a && a.open_login) { a.open_login(mode, prov); return; }
+  try {  // 浏览器环境兜底
+    const body = JSON.stringify({ provider: prov });
+    const url = mode === "add" ? "/api/accounts/add" : "/api/relogin?provider=" + prov;
+    await api(url, { method: "POST", body: mode === "add" ? body : "{}" });
+    toast(prov === "commandcode" ? t("goatLoginNote") : t("loginNote"));
+  } catch (e) { toast(e.message || t("loadFailed"), "err"); }
+}
+
+/* GOAT 登录对话框: 内嵌登录窗 / 手动粘贴会话 Cookie (WKWebView 白屏兜底) */
+function showGoatLoginDialog() {
+  const overlay = $("modal-overlay");
+  $("modal-title").textContent = t("addGoatUser");
+  $("modal-message").innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:10px;margin:6px 0 4px">
+      <button class="btn" id="goat-win" style="width:100%">${t("goatLoginWin")}</button>
+      <div style="font-size:12px;color:var(--text3);text-align:center">${t("goatLoginOr")}</div>
+      <textarea id="goat-cookie" rows="3" placeholder="${t("goatCookiePh")}" style="width:100%;box-sizing:border-box;font-size:12px;font-family:ui-monospace,monospace"></textarea>
+      <button class="btn btn-primary" id="goat-paste" style="width:100%">${t("goatLoginPaste")}</button>
+    </div>`;
+  const icon = $("modal-icon");
+  icon.className = "modal-icon";
+  icon.textContent = "🐐";
+  $("modal-ok").hidden = true;
+  $("modal-cancel").hidden = false;
+  $("modal-cancel").textContent = t("cancel");
+  overlay.hidden = false;
+  const cleanup = () => {
+    overlay.hidden = true;
+    $("modal-cancel").onclick = null;
+    $("modal-ok").hidden = false;
+  };
+  $("modal-cancel").onclick = cleanup;
+  $("goat-win").onclick = async () => {
+    cleanup();
+    await startLogin("add", "commandcode");
+  };
+  $("goat-paste").onclick = async () => {
+    const token = $("goat-cookie").value.trim();
+    if (!token) { toast(t("goatCookieEmpty"), "err"); return; }
+    $("goat-paste").disabled = true;
+    try {
+      startLoginWatch();
+      const r = await api("/api/accounts/add-token", {
+        method: "POST", body: JSON.stringify({ token, provider: "commandcode" }),
+      });
+      cleanup();
+      toast(t("switchedAccount"));
+      await loadDashboard();
+      if (state.page === "settings") renderSettings().catch(() => {});
+      if (state.page === "overview") loadOverview(true).catch(() => {});
+    } catch (e) {
+      toast(e.message || t("loadFailed"), "err");
+      $("goat-paste").disabled = false;
+    }
+  };
+}
 function startLoginWatch() {
   stopLoginWatch();
   let baseline = "";
@@ -1046,14 +1123,20 @@ async function toggleUserMenu(force) {
     menu.hidden = false;
   } catch (e) { toast(t("loadFailed"), "err"); }
 }
+function provTag(a) {
+  return (a.provider === "commandcode") ? t("provTagGoat") : t("provTagOpencode");
+}
+function provLabel(a) {
+  return (a.provider === "commandcode") ? t("provGoat") : t("provOpencode");
+}
 function renderUserMenu(accounts, activeId) {
   const menu = $("user-menu");
   menu.innerHTML = (accounts.length ? accounts.map((a) => `
     <div class="um-item" data-id="${a.id}">
       <span class="um-check">${a.id === activeId ? "✓" : ""}</span>
       <span class="um-meta">
-        <span class="um-name">${escapeHtml(a.name)}</span>
-        <span class="um-ws">${escapeHtml(a.workspace_id || "—")}${a.has_token ? "" : " · " + t("notLoggedIn")}</span>
+        <span class="um-name">${escapeHtml(a.name)} <span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span></span>
+        <span class="um-ws">${a.provider === "commandcode" ? escapeHtml(provLabel(a)) : escapeHtml(a.workspace_id || "—")}${a.has_token ? "" : " · " + t("notLoggedIn")}</span>
       </span>
     </div>`).join("") : `<div class="um-item um-empty">${t("noUsers")}</div>`) +
     `<div class="um-item um-manage" id="um-manage"><span class="um-check">⚙</span><span class="um-meta"><span class="um-name">${t("setUsers")}</span></span></div>`;
@@ -1101,8 +1184,8 @@ function renderUsersList(accounts, activeId) {
     return `
     <div class="user-row${isActive ? " active" : ""}" data-id="${a.id}">
       <div class="ur-meta">
-        <div class="ur-name">${escapeHtml(a.name)}${isActive ? `<span class="badge ok ur-badge">${t("currentUserBadge")}</span>` : ""}</div>
-        <div class="ur-ws">${escapeHtml(a.workspace_id || "—")} · ${t("loggedIn")}</div>
+        <div class="ur-name">${escapeHtml(a.name)}<span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span>${isActive ? `<span class="badge ok ur-badge">${t("currentUserBadge")}</span>` : ""}</div>
+        <div class="ur-ws">${a.provider === "commandcode" ? escapeHtml(provLabel(a)) : escapeHtml(a.workspace_id || "—")} · ${t("loggedIn")}</div>
       </div>
       <div class="ur-actions">${actions}</div>
     </div>`;
@@ -1121,10 +1204,13 @@ async function onUserRowAction(id, act) {
   }
   if (act === "relogin") {
     startLoginWatch();
+    const accs = (await api("/api/accounts").catch(() => ({ accounts: [] }))).accounts || [];
+    const acc = accs.find((x) => x.id === id);
+    const prov = (acc && acc.provider === "commandcode") ? "commandcode" : "opencode";
     const a = await pywebviewApi();
-    if (a && a.open_login) { a.open_login("relogin"); return; }
+    if (a && a.open_login) { a.open_login("relogin", prov); return; }
     try {  // 浏览器兜底
-      await api("/api/relogin", { method: "POST", body: "{}" });
+      await api("/api/relogin?provider=" + prov, { method: "POST", body: "{}" });
       toast(t("loginNote"));
     } catch (e) { toast(e.message || t("loadFailed"), "err"); }
     return;
@@ -1368,15 +1454,9 @@ function bindEvents() {
     const menu = $("user-menu");
     if (menu && !menu.hidden && !e.target.closest(".user-switch")) toggleUserMenu(false);
   });
-  $("btn-add-user").addEventListener("click", async () => {
-    startLoginWatch();
-    const a = await pywebviewApi();
-    if (a && a.open_login) { a.open_login("add"); return; }
-    try {  // 浏览器环境兜底
-      await api("/api/accounts/add", { method: "POST", body: "{}" });
-      toast(t("loginNote"));
-    } catch (e) { toast(e.message || t("loadFailed"), "err"); }
-  });
+  $("btn-add-user").addEventListener("click", async () => { startLogin("add", "opencode"); });
+  $("btn-add-goat").addEventListener("click", () => { showGoatLoginDialog(); });
+  $("btn-login-goat").addEventListener("click", () => { showGoatLoginDialog(); });
   $("users-list").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-act]");
     if (!btn) return;
@@ -1384,15 +1464,7 @@ function bindEvents() {
     if (!row) return;
     onUserRowAction(Number(row.dataset.id), btn.dataset.act).catch((err) => toast(String(err.message || err), "err"));
   });
-  $("btn-login").addEventListener("click", async () => {
-    startLoginWatch();
-    const a = await pywebviewApi();
-    if (a && a.open_login) { a.open_login(); return; }  // 弹出独立登录窗口
-    // 浏览器环境兜底: 跳转授权页
-    $("btn-login").disabled = true;
-    $("btn-login").textContent = t("loginBtn") + "…";
-    await api("/api/relogin", { method: "POST" });
-  });
+  $("btn-login").addEventListener("click", async () => { startLogin("relogin", "opencode"); });
   $("btn-quit-app").addEventListener("click", async () => {
     const a = await pywebviewApi();
     if (a) a.quit();
