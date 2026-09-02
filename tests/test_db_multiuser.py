@@ -329,3 +329,70 @@ def test_monthly_reset_per_account(tmp_db):
     _assert_cycle_start(db.monthly_cycle_start(), 5)
     db.set_active_account(1)
     _assert_cycle_start(db.monthly_cycle_start(), 5)
+
+
+# ---------------------------------------------------------------------------
+# 每日聚合: 无记录的天补 0 (折线图数据源不得缺天跳线)
+# ---------------------------------------------------------------------------
+
+
+def _iso_utc_noon(days_offset: int) -> str:
+    """本地「今天 - N 天」中午 12 点的 UTC ISO 串.
+
+    用本地时区中午构造, 避免 UTC/本地日期边界翻转干扰 daily_stats 的
+    按本地日期分组断言.
+    """
+    local = (datetime.now().astimezone() - timedelta(days=days_offset)).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
+    return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_daily_stats_fills_zero_days(tmp_db):
+    """有记录的日子取真实聚合值, 无记录的日子全部补 0, 日期严格连续."""
+    today = datetime.now().astimezone().date()
+    db.insert_usage_records(
+        [
+            _rec("u-today", created=_iso_utc_noon(0), inp=100, outp=50, cost_usd=1.5),
+            _rec("u-3d", created=_iso_utc_noon(3), inp=10, outp=20, cost_usd=0.5),
+        ]
+    )
+    stats = db.daily_stats(7)
+    # 窗口 = [今天-7, 今天] 共 8 天, 首尾对齐 SQL 过滤口径
+    assert len(stats) == 8
+    dates = [s["date"] for s in stats]
+    assert dates[0] == (today - timedelta(days=7)).isoformat()
+    assert dates[-1] == today.isoformat()
+    # 日期严格连续无重复
+    assert dates == sorted(set(dates))
+    assert all(
+        datetime.strptime(a, "%Y-%m-%d").date() + timedelta(days=1)
+        == datetime.strptime(b, "%Y-%m-%d").date()
+        for a, b in zip(dates, dates[1:])
+    )
+    by_date = {s["date"]: s for s in stats}
+    # 有记录的两天: 数值正确 (u-today 落在今天, u-3d 落在今天-3)
+    assert by_date[today.isoformat()]["request_count"] == 1
+    assert by_date[today.isoformat()]["total_input_tokens"] == 100
+    assert by_date[today.isoformat()]["total_output_tokens"] == 50
+    assert by_date[today.isoformat()]["total_cost_usd"] == 1.5
+    assert by_date[(today - timedelta(days=3)).isoformat()]["request_count"] == 1
+    # 无记录的天: 全字段为 0
+    for d in set(dates) - {today.isoformat(), (today - timedelta(days=3)).isoformat()}:
+        s = by_date[d]
+        assert s["request_count"] == 0
+        assert s["total_input_tokens"] == 0
+        assert s["uncached_input_tokens"] == 0
+        assert s["total_output_tokens"] == 0
+        assert s["total_reasoning_tokens"] == 0
+        assert s["cache_hit_tokens"] == 0
+        assert s["cache_write_tokens"] == 0
+        assert s["total_cost_usd"] == 0.0
+        assert s["hit_rate"] == 0.0
+
+
+def test_daily_stats_empty_returns_zero_series(tmp_db):
+    """窗口内完全没有记录时返回全 0 的连续日期序列 (而非空列表)."""
+    stats = db.daily_stats(30)
+    assert len(stats) == 31
+    assert all(s["request_count"] == 0 and s["total_cost_usd"] == 0.0 for s in stats)
