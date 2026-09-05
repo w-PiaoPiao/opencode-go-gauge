@@ -11,8 +11,12 @@ import { I18n } from '../../common/i18n/I18n'
 import { Theme } from '../theme/Theme'
 import { AccountInfo, AppSettings } from '../../common/model/Models'
 import { SectionCard } from '../components/Cards'
+import BuildProfile from 'BuildProfile'
 
 const APP_VERSION = '1.0.0'
+// 调试工具 (注入/清除模拟数据) 仅 debug 构建显示: release 混入 360 条假记录
+// 会污染真实统计且此前无清除入口
+const SHOW_DEBUG_TOOLS: boolean = BuildProfile.DEBUG
 
 @Component
 export struct SettingsPage {
@@ -338,22 +342,33 @@ export struct SettingsPage {
           .fontColor(Theme.sub())
         Divider()
           .color(Theme.divider())
-        Row() {
-          Text('注入模拟数据 (调试)')
-            .fontSize(12)
-            .fontColor(Theme.sub())
-          Blank()
-          Button('注入 360 条')
-            .fontSize(11)
-            .height(28)
-            .backgroundColor(Theme.surfaceSoft())
-            .fontColor(Theme.accent())
-            .onClick(async () => {
-              const n = await Repo.get().injectSampleData()
-              this.updateMsg = `已注入 ${n} 条模拟记录`
-            })
+        if (SHOW_DEBUG_TOOLS) {
+          Row() {
+            Text('注入模拟数据 (调试)')
+              .fontSize(12)
+              .fontColor(Theme.sub())
+            Blank()
+            Button('清除模拟数据')
+              .fontSize(11)
+              .height(28)
+              .backgroundColor(Theme.surfaceSoft())
+              .fontColor(Theme.accent())
+              .onClick(async () => {
+                const n = await Repo.get().clearSampleData()
+                this.updateMsg = `已清除 ${n} 条模拟记录`
+              })
+            Button('注入 360 条')
+              .fontSize(11)
+              .height(28)
+              .backgroundColor(Theme.surfaceSoft())
+              .fontColor(Theme.accent())
+              .onClick(async () => {
+                const n = await Repo.get().injectSampleData()
+                this.updateMsg = `已注入 ${n} 条模拟记录`
+              })
+          }
+          .width('100%')
         }
-        .width('100%')
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)

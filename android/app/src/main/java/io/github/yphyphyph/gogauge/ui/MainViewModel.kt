@@ -18,6 +18,7 @@ import io.github.yphyphyph.gogauge.data.model.SyncProgress
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
 import io.github.yphyphyph.gogauge.data.repository.DashboardRepository
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApiException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -241,6 +242,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // (30s cache + re-entry guard inside ensureQuota).
                 repo.ensureQuotaAsync(scope)
                 dashboard = repo.loadDashboard(range)
+            } catch (e: CancellationException) {
+                throw e // viewModelScope 取消时正常退出, 不当加载失败记录
             } catch (e: Exception) {
                 android.util.Log.e("GoGauge", "loadDashboard failed range=$range", e)
             } finally {
@@ -283,6 +286,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         if (seq == ovSeq && overviewVisible) loadOverview(true)
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 android.util.Log.e("GoGauge", "loadOverview failed", e)
             }

@@ -28,6 +28,10 @@ from typing import Any, Optional
 # sqlite3_stmt 交替 reset/step, 导致原生内存损坏 (SIGSEGV) 或挂起.
 _db_local = threading.local()
 _schema_lock = threading.Lock()
+# 已完成建表/迁移的库文件路径: 进程内对同一库只执行一次 _init_schema.
+# HTTP 服务是每请求一线程, 不做此去重会导致每个请求都重跑整套 DDL/迁移检查.
+# 以路径为键而非全局布尔: 测试/数据目录切换后连接新库时仍会正确初始化.
+_schema_init_path: Optional[str] = None
 # settings payload 是整包 JSON 读-改-写: 多线程 (quota/sync/HTTP) 并发改不同键时
 # 无锁会互相覆盖丢键 (active_account_id 回退 / key_names 丢失). 写侧全走此锁.
 _payload_lock = threading.RLock()
@@ -81,6 +85,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """同一库文件进程内只建表/迁移一次 (路径变化时重跑, 供测试/数据目录切换).
+
+    不在此处持 _schema_lock: _init_schema 内部自会串行化, 外层再持同一把
+    非重入锁会死锁. 快路径检查仅为省锁开销, 竞态下多跑一次幂等 DDL 无害.
+    """
+    global _schema_init_path
+    path = db_path()
+    if _schema_init_path == path:
+        return
+    _init_schema(conn)
+    _schema_init_path = path
+
+
 def get_db() -> sqlite3.Connection:
     """返回当前线程的 SQLite 连接 (首次调用时创建)."""
     conn = getattr(_db_local, "conn", None)
@@ -93,7 +111,7 @@ def get_db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
-    _init_schema(conn)
+    _ensure_schema(conn)
     _db_local.conn = conn
     return conn
 

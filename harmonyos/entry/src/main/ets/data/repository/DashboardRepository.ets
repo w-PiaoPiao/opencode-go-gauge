@@ -32,6 +32,7 @@ export class DashboardRepository {
   private quotaCache: Map<number, QuotaCacheSlot> = new Map()
   private quotaRefreshing: Set<number> = new Set()
   private exchangeCache: ExchangeCache = { at: 0, usdCny: DashboardRepository.DEFAULT_USD_CNY }
+  private exchangeFetching: boolean = false
 
   private usageDao: UsageDao = AppDb.usageDao()
   private syncDao: SyncDao = AppDb.syncDao()
@@ -123,12 +124,14 @@ export class DashboardRepository {
     if (this.quotaRefreshing.has(accountId)) {
       return
     }
-    const token = await this.syncDao.getTokenFor(accountId)
-    if (token.length === 0) {
-      return
-    }
+    // 同步占位后再 await: 检查与置位之间不留异步点, 否则并发双进会绕过防重入
+    // (desktop _quota_gate / android quotaMutex parity)
     this.quotaRefreshing.add(accountId)
     try {
+      const token = await this.syncDao.getTokenFor(accountId)
+      if (token.length === 0) {
+        return
+      }
       const target: QuotaCacheSlot = this.quotaCache.get(accountId) ?? { at: 0, data: null }
       const hint = await this.syncDao.getWorkspaceHintFor(accountId)
       target.at = Date.now() / 1000
@@ -154,6 +157,11 @@ export class DashboardRepository {
     if (now - this.exchangeCache.at < DashboardRepository.EXCHANGE_TTL) {
       return this.exchangeCache.usdCny
     }
+    if (this.exchangeFetching) {
+      return this.exchangeCache.usdCny
+    }
+    // 同步占位后再 await, 防并发重复请求 (desktop _exchange_refreshing parity)
+    this.exchangeFetching = true
     try {
       const rate = await ExchangeApi.fetchUsdCny()
       if (rate > 0) {
@@ -161,8 +169,11 @@ export class DashboardRepository {
       }
     } catch (e) {
       // 失败保留旧值 (server.py parity)
+    } finally {
+      // 无论成败都推进时间戳: 失败时避免后续每次请求都立刻重打汇率接口
+      this.exchangeCache.at = Date.now() / 1000
+      this.exchangeFetching = false
     }
-    this.exchangeCache.at = Date.now() / 1000
     return this.exchangeCache.usdCny
   }
 
@@ -215,7 +226,6 @@ export class DashboardRepository {
   async syncUsage(mode: string): Promise<SyncResult> {
     // incremental 轮询所有已登录账号; full 仅作用于活跃账号 (desktop parity)
     const targets: Array<[number, string]> = []
-    let windowDays: number | null = null
     if (mode === 'full') {
       const aid = await this.syncDao.getActiveAccountId()
       const acct = aid !== 0 ? await this.syncDao.getTokenFor(aid) : ''
@@ -237,11 +247,12 @@ export class DashboardRepository {
     if (this._progress.running) {
       return { ok: false, error: '已有同步任务进行中', inserted: 0, pages: 0, partial: false, failedPages: 0 }
     }
+    // 同步占位必须在任何 await 之前: 否则前台定时器与后台 WorkScheduler 并发触发时
+    // 会双双通过 running 检查, 互踩进度状态 (desktop _sync_lock / android syncMutex parity)
+    this._progress = { running: true, mode: mode, page: 0, inserted: 0, phase: 'usage', message: '', account: '' }
 
     const settings = await AppDb.settingsDao().getSettings()
-    windowDays = settings.windowDays
-
-    this._progress = { running: true, mode: mode, page: 0, inserted: 0, phase: 'usage', message: '', account: '' }
+    const windowDays: number | null = settings.windowDays
 
     try {
       let totalInserted = 0
@@ -519,6 +530,19 @@ export class DashboardRepository {
   /** 退出登录当前活跃账号 (清其数据, 保留账号行)。 */
   async logout(): Promise<void> {
     return this.syncDao.clearAccount()
+  }
+
+  /** 清除 injectSampleData 注入的调试记录 (debug 构建设置页入口), 返回删除条数。 */
+  async clearSampleData(): Promise<number> {
+    const deleted = await this.usageDao.clearSampleData()
+    if (deleted > 0) {
+      // 刷新同步统计口径, 使明细总数与新记录集一致
+      const aid = await this.syncDao.getActiveAccountId()
+      if (aid !== 0) {
+        await this.syncDao.updateSyncStateAndTotals(aid, 'ok', null, 0)
+      }
+    }
+    return deleted
   }
 
   /**

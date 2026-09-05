@@ -246,9 +246,6 @@ def check_update() -> dict[str, Any]:
     }
 
 
-_ASSET_NAME = "gogauge-macos.zip"  # release 资产的标准文件名 (小写比较)
-
-
 def fetch_asset_url(tag: str) -> str:
     """取指定 release 中本平台分发包的下载直链.
 

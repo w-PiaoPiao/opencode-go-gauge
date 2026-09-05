@@ -60,6 +60,17 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `idx_usage_account_time` ON `usage_records` (`account_id`, `created_at`)"
                 )
+                // 补 provider 列 (记录来源快照): 部分历史 v1 建表已含该列,
+                // 以 PRAGMA 幂等判断, 两种形态都安全 (desktop db._init_schema 迁移 4 parity)
+                var hasProviderColumn = false
+                db.query("PRAGMA table_info(usage_records)").use { cursor ->
+                    while (cursor.moveToNext()) {
+                        if (cursor.getString(1) == "provider") hasProviderColumn = true
+                    }
+                }
+                if (!hasProviderColumn) {
+                    db.execSQL("ALTER TABLE `usage_records` ADD COLUMN `provider` TEXT")
+                }
                 db.execSQL("ALTER TABLE `usage_sync_state` RENAME TO `usage_sync_state_legacy`")
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `usage_sync_state` (" +

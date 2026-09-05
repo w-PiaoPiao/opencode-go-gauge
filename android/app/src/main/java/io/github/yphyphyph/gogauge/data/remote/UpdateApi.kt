@@ -37,9 +37,14 @@ class UpdateApi(
     companion object {
         // fork 发布仓库: 安卓 APK 由本 fork 的 release 分发, 更新检查指向 fork
         const val REPO = "w-PiaoPiao/opencode-go-gauge"
-        const val RELEASES_URL = "https://api.github.com/repos/$REPO/releases/latest"
+        // 列表接口而非 /releases/latest: 仓库 Latest 是全平台共享的一个标记,
+        // 其他平台 (-macos/-windows) 发布后占据 Latest 会把安卓更新判断带偏
+        // (tag 后缀被剥掉后版本比较失真). 这里只认 -android 条目 — desktop updater.py parity.
+        const val RELEASES_URL = "https://api.github.com/repos/$REPO/releases?per_page=30"
         const val ATOM_URL = "https://github.com/$REPO/releases.atom"
         const val RELEASE_PAGE_URL = "https://github.com/$REPO/releases/latest"
+        // 平台 tag 后缀: 更新检查只认带此后缀且版本前缀合法的 release 条目
+        private const val PLATFORM_SUFFIX = "-android"
         // 境内直连 GitHub 间歇性 502/超时/重置, 自动重试提高成功率 (desktop parity)
         private const val MAX_ATTEMPTS = 3
         private const val RETRY_SLEEP_MS = 800L
@@ -71,6 +76,12 @@ class UpdateApi(
             m.groupValues[3].toInt(),
             letterRank,
         )
+    }
+
+    /** tag 是否为本平台 release (如 v2.1.0-android): 版本前缀合法且带 -android 后缀. */
+    private fun isPlatformTag(tag: String): Boolean {
+        val t = tag.trim().lowercase()
+        return t.endsWith(PLATFORM_SUFFIX) && parseVersion(t) != null
     }
 
     private fun isNewer(latest: List<Int>, current: List<Int>): Boolean {
@@ -112,30 +123,39 @@ class UpdateApi(
         return t.trim()
     }
 
-    /** 从 Releases Atom 流解析最新 release (desktop _fetch_latest_atom parity). */
+    /** 从 Releases Atom 流解析最新的本平台 (-android) release (desktop _fetch_latest_atom parity). */
     private fun parseAtom(text: String): Triple<String, String, String> {
         val factory = DocumentBuilderFactory.newInstance()
         factory.isNamespaceAware = true
         val doc = factory.newDocumentBuilder().parse(ByteArrayInputStream(text.toByteArray()))
-        val entry = doc.getElementsByTagNameNS(ATOM_NS, "entry").item(0) as? Element
-            ?: throw OpenCodeApiException("GitHub Releases 订阅流为空，未获取到版本信息")
-
-        val idEl = entry.getElementsByTagNameNS(ATOM_NS, "id").item(0) as? Element
-        val tag = idEl?.textContent?.trim()?.substringAfterLast('/') ?: ""
-
-        var releaseUrl = RELEASE_PAGE_URL
-        val links = entry.getElementsByTagNameNS(ATOM_NS, "link")
-        for (i in 0 until links.length) {
-            val el = links.item(i) as? Element ?: continue
-            if (el.getAttribute("rel") == "alternate" && "/releases/tag/" in (el.getAttribute("href") ?: "")) {
-                releaseUrl = el.getAttribute("href")
-                break
-            }
+        val entries = doc.getElementsByTagNameNS(ATOM_NS, "entry")
+        if (entries.length == 0) {
+            throw OpenCodeApiException("GitHub Releases 订阅流为空，未获取到版本信息")
         }
 
-        val contentEl = entry.getElementsByTagNameNS(ATOM_NS, "content").item(0) as? Element
-        val notes = contentEl?.textContent?.let { stripHtml(it) } ?: ""
-        return Triple(tag, releaseUrl, notes)
+        // 流内混排各平台 release, 逐条过滤, 首个本平台条目即最新
+        for (i in 0 until entries.length) {
+            val entry = entries.item(i) as? Element ?: continue
+
+            val idEl = entry.getElementsByTagNameNS(ATOM_NS, "id").item(0) as? Element
+            val tag = idEl?.textContent?.trim()?.substringAfterLast('/') ?: ""
+            if (!isPlatformTag(tag)) continue
+
+            var releaseUrl = RELEASE_PAGE_URL
+            val links = entry.getElementsByTagNameNS(ATOM_NS, "link")
+            for (j in 0 until links.length) {
+                val el = links.item(j) as? Element ?: continue
+                if (el.getAttribute("rel") == "alternate" && "/releases/tag/" in (el.getAttribute("href") ?: "")) {
+                    releaseUrl = el.getAttribute("href")
+                    break
+                }
+            }
+
+            val contentEl = entry.getElementsByTagNameNS(ATOM_NS, "content").item(0) as? Element
+            val notes = contentEl?.textContent?.let { stripHtml(it) } ?: ""
+            return Triple(tag, releaseUrl, notes)
+        }
+        throw OpenCodeApiException("Releases 订阅流中暂无 $PLATFORM_SUFFIX 版本")
     }
 
     /** Check latest release vs local version. Throws on network/parse failure. */
@@ -147,12 +167,17 @@ class UpdateApi(
         var notes = ""
 
         try {
-            val data = json.decodeFromString<ReleaseResponse>(
+            // API 按创建时间倒序返回, 首个本平台 (-android) 条目即最新 (desktop parity)
+            val data = json.decodeFromString<List<ReleaseResponse>>(
                 fetchText(RELEASES_URL, "application/vnd.github+json", ua)
             )
-            tag = data.tagName
-            releaseUrl = data.htmlUrl
-            notes = (data.body ?: "").trim().take(600)
+            for (rel in data) {
+                if (!isPlatformTag(rel.tagName)) continue
+                tag = rel.tagName
+                releaseUrl = rel.htmlUrl
+                notes = (rel.body ?: "").trim().take(600)
+                break
+            }
         } catch (e: Exception) {
             // 首次失败仅记录, 交由 Atom 兜底 (desktop parity)
             errors.add(e.message ?: e.toString())

@@ -485,4 +485,23 @@ export class UsageDao {
     reader.close()
     return out
   }
+
+  /** 清除 injectSampleData 注入的调试记录 (debug 构建的设置页入口), 返回删除条数。 */
+  async clearSampleData(): Promise<number> {
+    const store = this.store()
+    const rs = await store.querySql(
+      "SELECT COUNT(*) AS count FROM usage_records WHERE usg_id LIKE 'usg_sample_%'",
+    )
+    const reader = new RowReader(rs)
+    let count = 0
+    if (reader.next()) {
+      count = reader.getLong('count')
+    }
+    reader.close()
+    if (count === 0) {
+      return 0
+    }
+    await store.executeSql("DELETE FROM usage_records WHERE usg_id LIKE 'usg_sample_%'")
+    return count
+  }
 }
