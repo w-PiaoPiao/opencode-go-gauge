@@ -89,6 +89,7 @@ export class SettingsDao {
     patch: AppSettings | null,
     keyNames: Map<string, string>,
     activeAccountId: number | null,
+    extra: Record<string, Object | null> | null = null,
   ): string {
     const out: Record<string, Object | null> = {}
     const keys = Object.keys(base)
@@ -106,6 +107,12 @@ export class SettingsDao {
       kn[k] = v
     })
     out['key_names'] = kn
+    if (extra !== null) {
+      const ek = Object.keys(extra)
+      for (const k of ek) {
+        out[k] = extra[k]
+      }
+    }
     return JSON.stringify(out)
   }
 
@@ -189,6 +196,30 @@ export class SettingsDao {
       const current = SettingsDao.decode(raw)
       const payload = SettingsDao.buildPayload(
         SettingsDao.parsePayload(raw), null, current.keyNames, null)
+      await this.writePayload(payload)
+    })
+  }
+
+  /** 读取账号的下次月度重置时间 (desktop settings 键 monthly_reset:{aid} parity)。 */
+  async getMonthlyReset(accountId: number): Promise<string | null> {
+    const obj = SettingsDao.parsePayload(await this.rawPayload())
+    const v = obj[`monthly_reset:${accountId}`]
+    return typeof v === 'string' ? v : null
+  }
+
+  /** 持久化账号的下次月度重置时间, UTC "yyyy-MM-dd HH:mm:ss" (desktop db.record_monthly_reset parity)。 */
+  async saveMonthlyReset(accountId: number, resetUtc: string | null): Promise<void> {
+    if (resetUtc === null || resetUtc.length === 0) {
+      return
+    }
+    const key = `monthly_reset:${accountId}`
+    await this.enqueueWrite(async () => {
+      const raw = await this.rawPayload()
+      const current = SettingsDao.decode(raw)
+      const extra: Record<string, Object | null> = {}
+      extra[key] = resetUtc
+      const payload = SettingsDao.buildPayload(
+        SettingsDao.parsePayload(raw), null, current.keyNames, current.activeAccountId, extra)
       await this.writePayload(payload)
     })
   }

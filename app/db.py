@@ -15,6 +15,8 @@ PROVIDER_OPENCODE = "opencode"
 PROVIDER_COMMANDCODE = "commandcode"
 ALL_PROVIDERS = (PROVIDER_OPENCODE, PROVIDER_COMMANDCODE)
 
+import base64
+import hashlib
 import json
 import os
 import sqlite3
@@ -79,6 +81,168 @@ def data_dir() -> str:
 
 def db_path() -> str:
     return os.path.join(data_dir(), "gousage.db")
+
+
+# ---------------------------------------------------------------------------
+# 凭证静态加密 (at-rest): 打包版 (frozen) 在 Windows 用 DPAPI、macOS 用登录
+# 钥匙串保护登录 token; 源码运行/其他平台回退明文 (本地 SQLite 同属用户沙盒,
+# 明文回退保证任何加密失败都不影响登录流程, 仅记录日志).
+#
+# accounts.token 的存储形态:
+#   ""                      未登录
+#   "enc:v1:<base64>"       DPAPI 密文 (仅 Windows frozen)
+#   "kc:"                   凭证在钥匙串 (service=_KC_SERVICE, account=<账号 id>)
+#   其他                    历史明文 (读取兼容, 下次登录时被加密形态覆盖)
+#
+# 账号去重不能直接比较 token (密文非确定性 / 钥匙串形态不在库内),
+# 改用 token_fp = SHA-256(token) 等值比较; 旧库迁移时对存量明文回填指纹.
+# ---------------------------------------------------------------------------
+
+_KC_SERVICE = "GoGauge"
+_ENC_PREFIX = "enc:v1:"
+_KC_PREFIX = "kc:"
+
+
+def _frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _dpapi_protect(data: bytes) -> Optional[bytes]:
+    """Windows DPAPI CryptProtectData (用户作用域), 失败返回 None."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_char_p)]
+
+        buf = ctypes.create_string_buffer(bytes(data), len(data))
+        pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_char_p))
+        pout = _BLOB(0, None)
+        # CRYPTPROTECT_UI_FORBIDDEN = 0x01
+        ok = ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(pin), None, None, None, None, 0x01, ctypes.byref(pout))
+        if not ok:
+            return None
+        try:
+            return ctypes.string_at(pout.pbData, pout.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(pout.pbData)
+    except Exception:  # noqa: BLE001 加密失败走明文回退
+        return None
+
+
+def _dpapi_unprotect(data: bytes) -> Optional[bytes]:
+    """Windows DPAPI CryptUnprotectData, 失败返回 None."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_char_p)]
+
+        buf = ctypes.create_string_buffer(bytes(data), len(data))
+        pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_char_p))
+        pout = _BLOB(0, None)
+        ok = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(pin), None, None, None, None, 0x01, ctypes.byref(pout))
+        if not ok:
+            return None
+        try:
+            return ctypes.string_at(pout.pbData, pout.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(pout.pbData)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _keychain_set(aid: int, secret: str) -> bool:
+    """macOS 登录钥匙串写入/更新 (add-generic-password -U)."""
+    try:
+        import subprocess
+
+        rc = subprocess.run(
+            ["/usr/bin/security", "add-generic-password", "-U",
+             "-s", _KC_SERVICE, "-a", str(aid), "-w", secret],
+            capture_output=True, timeout=10)
+        return rc.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _keychain_get(aid: int) -> str:
+    try:
+        import subprocess
+
+        rc = subprocess.run(
+            ["/usr/bin/security", "find-generic-password",
+             "-s", _KC_SERVICE, "-a", str(aid), "-w"],
+            capture_output=True, timeout=10)
+        if rc.returncode == 0:
+            return rc.stdout.decode("utf-8", errors="replace").strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _keychain_delete(aid: int) -> None:
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["/usr/bin/security", "delete-generic-password",
+             "-s", _KC_SERVICE, "-a", str(aid)],
+            capture_output=True, timeout=10)
+    except Exception:  # noqa: BLE001 钥匙串残留无害
+        pass
+
+
+def _storage_encode(aid: int, token: str) -> str:
+    """明文 token -> 库内存储值; 加密失败时静默回退明文 (保登录可用)."""
+    token = token.strip()
+    if not token:
+        return ""
+    if _frozen() and sys.platform == "win32":
+        blob = _dpapi_protect(token.encode("utf-8"))
+        if blob is not None:
+            return _ENC_PREFIX + base64.b64encode(blob).decode("ascii")
+    elif _frozen() and sys.platform == "darwin":
+        if _keychain_set(aid, token):
+            return _KC_PREFIX
+    return token
+
+
+def _storage_decode(aid: int, stored: str) -> str:
+    """库内存储值 -> 明文 token (历史明文原样返回)."""
+    stored = stored or ""
+    if not stored:
+        return ""
+    if stored.startswith(_KC_PREFIX):
+        return _keychain_get(aid)
+    if stored.startswith(_ENC_PREFIX):
+        try:
+            blob = base64.b64decode(stored[len(_ENC_PREFIX):])
+            plain = _dpapi_unprotect(blob)
+            if plain is not None:
+                return plain.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+    return stored
+
+
+def _keychain_cleanup(aid: int) -> None:
+    """账号删除/登出时清掉钥匙串条目 (仅 frozen mac 存在该形态)."""
+    if _frozen() and sys.platform == "darwin":
+        _keychain_delete(aid)
+
+
+def _token_fp(token: str) -> str:
+    """token 明文的 SHA-256 指纹 (去重用); 空串返回空串."""
+    token = (token or "").strip()
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _now_iso() -> str:
@@ -196,6 +360,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               workspace_id TEXT NOT NULL DEFAULT 'Default',
               resolved_workspace_id TEXT,
               token TEXT NOT NULL DEFAULT '',
+              token_fp TEXT,
               provider TEXT NOT NULL DEFAULT 'opencode',
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -302,6 +467,22 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE usage_records ADD COLUMN provider TEXT"
             )
+        conn.commit()
+
+        # 迁移 5: accounts 补 token_fp (凭证去重指纹, SHA-256(token)); 存量明文回填.
+        # 加密形态 (enc:/kc:) 的行总是由新代码连同指纹一起写入, 无需也无法在此回填.
+        if "token_fp" not in acc_cols:
+            conn.execute("ALTER TABLE accounts ADD COLUMN token_fp TEXT")
+        for row in conn.execute(
+            "SELECT id, token FROM accounts WHERE token_fp IS NULL AND TRIM(token) != ''"
+        ).fetchall():
+            fp = _token_fp(row["token"] or "")
+            if fp:
+                conn.execute("UPDATE accounts SET token_fp = ? WHERE id = ?", (fp, row["id"]))
+        # 未登录行 (token 为空) 直接置空指纹, 避免每次启动重复扫描
+        conn.execute(
+            "UPDATE accounts SET token_fp = '' WHERE token_fp IS NULL AND TRIM(token) = ''"
+        )
         conn.commit()
 
         # 迁移 3: 单行 usage_sync_state(id 主键) 重建为按账号多行 (数据无损搬运)
@@ -477,9 +658,10 @@ def save_token(
     if provider not in ALL_PROVIDERS:
         provider = PROVIDER_OPENCODE
     conn.execute(
-        """UPDATE accounts SET token = ?, workspace_id = ?, resolved_workspace_id = NULL,
+        """UPDATE accounts SET token = ?, token_fp = ?, workspace_id = ?, resolved_workspace_id = NULL,
            provider = ?, updated_at = ? WHERE id = ?""",
-        (token.strip(), workspace_id.strip() or "Default", provider, _now_iso(), aid),
+        (_storage_encode(aid, token.strip()), _token_fp(token),
+         workspace_id.strip() or "Default", provider, _now_iso(), aid),
     )
     _ensure_state_row(conn, aid)
     conn.execute(
@@ -505,7 +687,7 @@ def get_token() -> str:
     if not aid:
         return ""
     row = get_db().execute("SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
-    return row["token"] if row else ""
+    return _storage_decode(aid, row["token"]) if row else ""
 
 
 def get_workspace_hint() -> str:
@@ -530,7 +712,7 @@ def get_account_credentials(account_id: int) -> tuple[str, str, str]:
         return "", "Default", PROVIDER_OPENCODE
     hint = row["resolved_workspace_id"] or row["workspace_id"] or "Default"
     provider = row["provider"] or PROVIDER_OPENCODE
-    return (row["token"] or "").strip(), hint, provider
+    return _storage_decode(int(account_id), row["token"] or "").strip(), hint, provider
 
 
 def get_account_provider(account_id: int) -> str:
@@ -564,15 +746,19 @@ def add_account(
     switch: bool = True,
     provider: str = PROVIDER_OPENCODE,
 ) -> int:
-    """添加新账号; 若已存在同一 provider 的相同 token 则视为同一用户, 更新工作区提示后返回其 id."""
+    """添加新账号; 若已存在同一 provider 的相同 token 则视为同一用户, 更新工作区提示后返回其 id.
+
+    去重按 token_fp (SHA-256 指纹) 比较: token 库内可能为加密形态, 无法直接等值比较.
+    """
     conn = get_db()
     token = token.strip()
     hint = (workspace_hint or "").strip()
     if provider not in ALL_PROVIDERS:
         provider = PROVIDER_OPENCODE
+    fp = _token_fp(token)
     existing = conn.execute(
-        "SELECT id FROM accounts WHERE provider = ? AND TRIM(token) = ? ORDER BY id LIMIT 1",
-        (provider, token),
+        "SELECT id FROM accounts WHERE provider = ? AND token_fp = ? ORDER BY id LIMIT 1",
+        (provider, fp),
     ).fetchone() if token else None
     if existing is not None:
         aid = int(existing["id"])
@@ -594,12 +780,17 @@ def add_account(
     else:
         name = f"User {nxt}"
     now = _now_iso()
+    # 两步写入: 先插行拿自增 id, 再按 id 写入加密凭证 (mac 钥匙串需要 id 作 account)
     cur = conn.execute(
         """INSERT INTO accounts (name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)
-           VALUES (?, ?, NULL, ?, ?, ?, ?)""",
-        (name, hint or "Default", token, provider, now, now),
+           VALUES (?, ?, NULL, '', ?, ?, ?)""",
+        (name, hint or "Default", provider, now, now),
     )
     aid = int(cur.lastrowid or nxt)
+    conn.execute(
+        "UPDATE accounts SET token = ?, token_fp = ? WHERE id = ?",
+        (_storage_encode(aid, token), fp, aid),
+    )
     _ensure_state_row(conn, aid)
     if switch:
         _persist_active(conn, aid)
@@ -641,7 +832,18 @@ def delete_account(account_id: int) -> int:
                 data.pop("active_account_id", None)
                 _write_payload(conn, data)
                 conn.commit()
+        # 清理该账号残留的周期/月度重置键 (账号已删, 键无主)
+        data = _raw_payload(conn)
+        orphan_keys = [
+            k for k in data
+            if k in (f"period_start:{aid}", f"period_end:{aid}", f"monthly_reset:{aid}")
+        ]
+        if orphan_keys:
+            for k in orphan_keys:
+                data.pop(k, None)
+            _write_payload(conn, data)
     conn.commit()
+    _keychain_cleanup(aid)
     return remaining
 
 
@@ -654,7 +856,7 @@ def clear_account() -> None:
     conn.execute("DELETE FROM usage_records WHERE account_id = ?", (aid,))
     conn.execute("DELETE FROM usage_charts WHERE account_id = ?", (aid,))
     conn.execute(
-        "UPDATE accounts SET token = '', resolved_workspace_id = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE accounts SET token = '', token_fp = '', resolved_workspace_id = NULL, updated_at = ? WHERE id = ?",
         (_now_iso(), aid),
     )
     _ensure_state_row(conn, aid)
@@ -665,6 +867,7 @@ def clear_account() -> None:
         (aid,),
     )
     conn.commit()
+    _keychain_cleanup(aid)
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ export class OpenCodeApi {
   static readonly WORKSPACE_SERVER_ID = 'def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f'
   static readonly DEFAULT_USAGE_SERVER_ID = 'bfd684bfc2e4eed05cd0b518f5e4eafd3f3376e3938abb9e536e7c03df831e5c'
   static readonly USER_AGENT =
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0'
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:148.0) Gecko/20100101 Firefox/148.0'
 
   private static readonly WORKSPACE_ID_RE = /wrk_[A-Za-z0-9]+/
   private static readonly WORKSPACE_ENTRY_RE =
@@ -115,6 +115,9 @@ export class OpenCodeApi {
     const text = await HttpFetch.fetch(url, headers)
     const refs: Array<[string, string]> = []
     const seen: Set<string> = new Set()
+    // 带 /g 标志的静态正则跨调用共享 lastIndex: 异常中断后状态可能残留,
+    // 与 fetchKeyNames 同样在每轮使用前显式归零
+    OpenCodeApi.WORKSPACE_ENTRY_RE.lastIndex = 0
     let m: RegExpExecArray | null
     while ((m = OpenCodeApi.WORKSPACE_ENTRY_RE.exec(text)) !== null) {
       const workspaceId = m[1]

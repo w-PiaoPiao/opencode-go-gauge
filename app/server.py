@@ -207,15 +207,11 @@ def _sync_one_account(
     account_id: int, name: str, mode: str, window_days: Optional[int]
 ) -> dict[str, Any]:
     """同步单个账号的用量记录 (显式传入账号上下文, 按 provider 分流)."""
-    row = db.get_db().execute(
-        "SELECT token, workspace_id, resolved_workspace_id, provider FROM accounts WHERE id = ?",
-        (account_id,),
-    ).fetchone()
-    if row is None or not (row["token"] or "").strip():
+    # 凭证经 _storage_decode 解出 (frozen 下库内为加密形态)
+    token_str, workspace_hint, provider = db.get_account_credentials(account_id)
+    if not token_str:
         return {"ok": False, "error": "未登录"}
-    token_str = row["token"].strip()
-    provider = row["provider"] or PROVIDER_OPENCODE
-    workspace_id = row["resolved_workspace_id"] or row["workspace_id"] or "Default"
+    workspace_id = workspace_hint
 
     with _sync_lock:
         _sync_state.update(account=name)

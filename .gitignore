@@ -14,10 +14,13 @@ tests/evidence/
 .venv/
 venv/
 
-# 编辑器
+# 编辑器 / AI 工具
 .vscode/
 .idea/
 *.swp
+.claude/
+.omo/
+.zcode/
 
 # 日志
 *.log
