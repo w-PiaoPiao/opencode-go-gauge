@@ -58,6 +58,7 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
 
     var confirmDialog by remember { mutableStateOf<ConfirmAction?>(null) }
     var renameTarget by remember { mutableStateOf<AccountInfo?>(null) }
+    var addProviderOpen by remember { mutableStateOf(false) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
@@ -79,10 +80,10 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
     ) {
         Text(s.settingsTitle, style = MaterialTheme.typography.titleLarge)
 
-        // ---- account: 用户管理 (desktop 设置页用户列表 parity) ----
+        // ---- account: 用户管理 (desktop 设置页用户列表 parity, 双来源) ----
         GgCard {
             CardHeader(s.setAccount, trailing = {
-                TextButton(onClick = { vm.startLogin("add") }) {
+                TextButton(onClick = { addProviderOpen = true }) {
                     Text(s.addUser, fontSize = 13.sp)
                 }
             })
@@ -105,7 +106,7 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                                 vm.switchAccount(acc.id)
                                 toast(s.switchedAccount)
                             },
-                            onRelogin = { confirmDialog = ConfirmAction.Relogin },
+                            onRelogin = { confirmDialog = ConfirmAction.Relogin(acc.provider) },
                             onRename = { renameTarget = acc },
                             onLogout = { confirmDialog = ConfirmAction.LogoutUser(acc.id, acc.name) },
                             onDelete = { confirmDialog = ConfirmAction.DeleteUser(acc.id, acc.name) },
@@ -315,9 +316,33 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
         )
     }
 
+    // ---- add account: 来源选择 (desktop /api/accounts/add provider parity) ----
+    if (addProviderOpen) {
+        AlertDialog(
+            onDismissRequest = { addProviderOpen = false },
+            title = { Text(s.chooseProvider) },
+            text = {
+                Column {
+                    TextButton(onClick = {
+                        addProviderOpen = false
+                        vm.startLogin("add", "opencode")
+                    }) { Text("OpenCode Go") }
+                    TextButton(onClick = {
+                        addProviderOpen = false
+                        vm.startLogin("add", "commandcode")
+                    }) { Text("Command Code GOAT") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { addProviderOpen = false }) { Text(s.cancel) }
+            },
+        )
+    }
+
     confirmDialog?.let { action ->
         val (title, message, okText, danger) = when (action) {
-            ConfirmAction.Relogin -> Quad(s.relogin, s.reloginConfirm, s.goLogin, false)
+            is ConfirmAction.Relogin -> Quad(s.relogin, s.reloginConfirm, s.goLogin, false)
             is ConfirmAction.LogoutUser ->
                 Quad(s.logout, s.logoutUserConfirm.replace("{name}", action.name), s.ok, true)
             is ConfirmAction.DeleteUser ->
@@ -332,7 +357,7 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 TextButton(onClick = {
                     confirmDialog = null
                     when (action) {
-                        ConfirmAction.Relogin -> vm.startLogin("relogin")
+                        is ConfirmAction.Relogin -> vm.startLogin("relogin", action.provider)
                         is ConfirmAction.LogoutUser -> {
                             vm.logoutActive()
                             toast(s.loggedOut)
@@ -355,7 +380,7 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
 }
 
 private sealed interface ConfirmAction {
-    data object Relogin : ConfirmAction
+    data class Relogin(val provider: String) : ConfirmAction
     data class LogoutUser(val id: Int, val name: String) : ConfirmAction
     data class DeleteUser(val id: Int, val name: String) : ConfirmAction
     data object FullSync : ConfirmAction
@@ -385,6 +410,21 @@ private fun UserRow(
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(acc.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                // 来源徽标 (desktop 带来源徽标 parity): GOAT 账号标 Command Code
+                if (acc.provider == "commandcode") {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "GOAT",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .background(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                RoundedCornerShape(6.dp),
+                            )
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                    )
+                }
                 if (isActive) {
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -401,7 +441,8 @@ private fun UserRow(
                 }
             }
             Text(
-                "${acc.workspaceId} · ${s.loggedIn}",
+                if (acc.provider == "commandcode") "GOAT · ${s.loggedIn}"
+                else "${acc.workspaceId} · ${s.loggedIn}",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

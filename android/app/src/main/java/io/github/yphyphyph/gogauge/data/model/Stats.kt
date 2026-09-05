@@ -102,13 +102,14 @@ data class DashboardData(
     val serverTime: String,
 )
 
-/** Account info — mirrors db._account_dict (desktop v2.0.0). */
+/** Account info — mirrors db._account_dict (desktop v2.0.0 + provider v2.1.0). */
 data class AccountInfo(
     val id: Int = 0,
     val name: String,
     val workspaceId: String,
     val resolvedWorkspaceId: String?,
     val hasToken: Boolean,
+    val provider: String = PROVIDER_OPENCODE,
 )
 
 /** 单账号总览卡片数据 — mirrors server.py /api/accounts/overview 的 accounts[i] (desktop v2.1.0). */

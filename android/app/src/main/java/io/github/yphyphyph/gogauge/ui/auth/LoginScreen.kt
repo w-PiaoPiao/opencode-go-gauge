@@ -68,22 +68,33 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
     // Try to capture the auth cookie from the current page. Returns true once captured.
     fun tryCapture(wv: WebView): Boolean {
         val url = wv.url ?: return false
-        if (!Login.isOnOpencodeDomain(url)) return false
-        // Check every opencode.ai host: the site may land on www.opencode.ai etc.
-        val cookie = listOf(
-            "https://opencode.ai",
-            "https://www.opencode.ai",
-            "https://auth.opencode.ai",
-        ).mapNotNull { CookieManager.getInstance().getCookie(it) }
-            .joinToString(";")
-        val auth = Login.extractAuthCookie(cookie)
-        if (auth != null) {
-            val workspace = Login.extractWorkspaceHint(url)
-            Log.i("GoGauge", "login cookie captured, ws=$workspace url=$url")
+        // provider 感知: commandcode (GOAT) 与 opencode 的目标域/cookie 名不同
+        val provider = Login.normalizeProvider(vm.pendingLoginProvider)
+        val isCC = provider == Login.PROVIDER_COMMANDCODE
+        if (isCC) {
+            if (!Login.isOnCommandcodeDomain(url)) return false
+        } else if (!Login.isOnOpencodeDomain(url)) {
+            return false
+        }
+        val cookie = if (isCC) {
+            CookieManager.getInstance().getCookie("https://commandcode.ai")
+        } else {
+            // Check every opencode.ai host: the site may land on www.opencode.ai etc.
+            listOf(
+                "https://opencode.ai",
+                "https://www.opencode.ai",
+                "https://auth.opencode.ai",
+            ).mapNotNull { CookieManager.getInstance().getCookie(it) }
+                .joinToString(";")
+        }
+        val token = if (isCC) Login.extractSessionCookie(cookie) else Login.extractAuthCookie(cookie)
+        if (token != null) {
+            val workspace = if (isCC) "Default" else Login.extractWorkspaceHint(url)
+            Log.i("GoGauge", "login cookie captured, provider=$provider ws=$workspace url=$url")
             // 登录完成即清空 WebView cookie: OAuth/会话 cookie 不留在本地 cookie 库
             CookieManager.getInstance().removeAllCookies(null)
             CookieManager.getInstance().flush()
-            vm.completeLogin(auth, workspace)
+            vm.completeLogin(token, workspace)
             return true
         }
         return false
@@ -151,7 +162,7 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                                 return true
                             }
                         }
-                        loadUrl(Login.buildLoginUrl())
+                        loadUrl(Login.buildLoginUrl(vm.pendingLoginProvider))
                     }.also { wvRef.value = it }
                 },
                 // Tear the WebView down when this composable leaves composition so we

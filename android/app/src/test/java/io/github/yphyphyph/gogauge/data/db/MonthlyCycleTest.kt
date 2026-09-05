@@ -44,4 +44,60 @@ class MonthlyCycleTest {
         assertEquals(' ', nowUtc[10])
         assertEquals(':', nowUtc[13])
     }
+
+    // ------------------------------------------------------------------
+    // startWithPeriod: 真实计费周期 (commandcode) — desktop monthly_cycle_start parity
+    // ------------------------------------------------------------------
+
+    // 2026-08-29 12:00:00 UTC = 上方 now 字符串的毫秒值
+    private val nowMs = java.time.LocalDateTime.parse(now, FMT)
+        .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+
+    @Test
+    fun `active period - start used directly`() {
+        assertEquals(
+            "2026-09-02 01:03:43",
+            MonthlyCycle.startWithPeriod(
+                "2026-09-02 01:03:43", "2026-10-02 01:03:43", null, nowMs,
+            ),
+        )
+    }
+
+    @Test
+    fun `expired period - rolls forward by span`() {
+        // 周期 8/1-8/15 (跨度 14 天), now 已在 8/29: 顺延到覆盖 now 的最近周期起点
+        assertEquals(
+            "2026-08-29 12:00:00",
+            MonthlyCycle.startWithPeriod(
+                "2026-08-01 12:00:00", "2026-08-15 12:00:00", null, nowMs,
+            ),
+        )
+    }
+
+    @Test
+    fun `inverted period - falls back to null`() {
+        // end <= start: 数据非法 → null (调用方回退滚动 30 天)
+        assertNull(
+            MonthlyCycle.startWithPeriod(
+                "2026-09-01 00:00:00", "2026-08-01 00:00:00", null, nowMs,
+            ),
+        )
+    }
+
+    @Test
+    fun `no period bounds - falls back to monthly reset rule`() {
+        assertEquals(
+            "2026-08-24 12:00:00",
+            MonthlyCycle.startWithPeriod(null, null, "2026-09-23 12:00:00", nowMs),
+        )
+    }
+
+    @Test
+    fun `nothing recorded - returns null`() {
+        assertNull(MonthlyCycle.startWithPeriod(null, null, null, nowMs))
+    }
+
+    companion object {
+        private val FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    }
 }

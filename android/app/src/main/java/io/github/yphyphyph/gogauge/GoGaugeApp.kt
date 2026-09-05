@@ -9,6 +9,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import io.github.yphyphyph.gogauge.data.db.AppDatabase
 import io.github.yphyphyph.gogauge.data.db.ensureSeedRows
+import io.github.yphyphyph.gogauge.data.remote.CommandCodeApi
 import io.github.yphyphyph.gogauge.data.remote.ExchangeApi
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApi
 import io.github.yphyphyph.gogauge.data.remote.UpdateApi
@@ -35,6 +36,7 @@ class GoGaugeApp : Application() {
         repository = DashboardRepository(
             db = database,
             api = OpenCodeApi(),
+            ccApi = CommandCodeApi(),
             exchangeApi = ExchangeApi(),
             updateApi = UpdateApi(),
         )

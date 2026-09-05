@@ -1,6 +1,8 @@
 package io.github.yphyphyph.gogauge.data.repository
 
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_OPENCODE
 import io.github.yphyphyph.gogauge.data.model.AccountOverview
 import io.github.yphyphyph.gogauge.data.model.AccountsOverviewData
 import io.github.yphyphyph.gogauge.data.model.DashboardData
@@ -11,15 +13,19 @@ import io.github.yphyphyph.gogauge.data.model.SyncProgress
 import io.github.yphyphyph.gogauge.data.model.SyncState
 import io.github.yphyphyph.gogauge.data.model.UsageRecord
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
+import io.github.yphyphyph.gogauge.data.model.UsageChartBucket
 import io.github.yphyphyph.gogauge.data.remote.AuthException
+import io.github.yphyphyph.gogauge.data.remote.CommandCodeApi
 import io.github.yphyphyph.gogauge.data.remote.ExchangeApi
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApi
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApiException
 import io.github.yphyphyph.gogauge.data.remote.UpdateApi
 import io.github.yphyphyph.gogauge.data.remote.UpdateInfo
 import io.github.yphyphyph.gogauge.data.db.AppDatabase
+import io.github.yphyphyph.gogauge.data.db.ChartDao
 import io.github.yphyphyph.gogauge.data.db.MonthlyCycle
 import io.github.yphyphyph.gogauge.data.db.SyncDao
+import io.github.yphyphyph.gogauge.data.db.UsageChartEntity
 import io.github.yphyphyph.gogauge.data.db.UsageDao
 import io.github.yphyphyph.gogauge.data.model.AppSettings
 import kotlinx.coroutines.CancellationException
@@ -56,11 +62,13 @@ data class SyncResult(
 class DashboardRepository(
     private val db: AppDatabase,
     private val api: OpenCodeApi,
+    private val ccApi: CommandCodeApi,
     private val exchangeApi: ExchangeApi,
     private val updateApi: UpdateApi,
 ) {
     private val usageDao: UsageDao get() = db.usageDao()
     private val syncDao: SyncDao get() = db.syncDao()
+    private val chartDao: ChartDao get() = db.chartDao()
 
     // ------------------------------------------------------------------
     // Caches (server.py parity — quota 按账号分槽)
@@ -133,10 +141,10 @@ class DashboardRepository(
         return remaining
     }
 
-    /** 登录成功按模式落库: add=新建账号(同 token 去重)并切换; relogin=更新活跃账号凭证. */
-    suspend fun loginSuccess(token: String, workspaceHint: String, mode: String) {
-        if (mode == "add") syncDao.addAccount(token, workspaceHint, switch = true)
-        else syncDao.saveToken(token, workspaceHint.trim().ifEmpty { "Default" })
+    /** 登录成功按模式落库: add=新建账号(同 provider+token 去重)并切换; relogin=更新活跃账号凭证。 */
+    suspend fun loginSuccess(token: String, workspaceHint: String, mode: String, provider: String = PROVIDER_OPENCODE) {
+        if (mode == "add") syncDao.addAccount(token, workspaceHint, switch = true, provider = provider)
+        else syncDao.saveToken(token, workspaceHint.trim().ifEmpty { "Default" }, provider)
         _quota.value = null
     }
 
@@ -173,9 +181,11 @@ class DashboardRepository(
             val target = synchronized(quotaCache) { quotaCache.getOrPut(accountId) { QuotaCache() } }
             val token = syncDao.getTokenFor(accountId)
             val hint = syncDao.getWorkspaceHintFor(accountId)
+            val provider = syncDao.getAccountProvider(accountId)
             target.at = System.currentTimeMillis() / 1000.0
             target.data = try {
-                api.fetchQuota(token, hint)
+                if (provider == PROVIDER_COMMANDCODE) ccApi.fetchQuota(token)
+                else api.fetchQuota(token, hint)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -190,6 +200,14 @@ class DashboardRepository(
                     db.settingsDao().saveMonthlyReset(accountId, formatResetUtc(w.resetAt))
                 } catch (e: Exception) {
                     android.util.Log.w("GoGauge", "saveMonthlyReset failed", e)
+                }
+            }
+            // commandcode: 额外记录真实计费周期起止 (desktop record_period_bounds parity)
+            target.data?.takeIf { it.success && provider == PROVIDER_COMMANDCODE }?.let { q ->
+                try {
+                    db.settingsDao().savePeriodBounds(accountId, q.periodStart, q.periodEnd)
+                } catch (e: Exception) {
+                    android.util.Log.w("GoGauge", "savePeriodBounds failed", e)
                 }
             }
             android.util.Log.i(
@@ -238,19 +256,27 @@ class DashboardRepository(
         val quota = if (token.isNotEmpty()) _quota.value else null
         val now = java.time.LocalDateTime.now()
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-        // 「本月」= 当前月度重置周期: 从持久化的下次月度重置时间推算周期起点 (desktop parity);
-        // 无配额记录时为 null, DAO 层回退滚动 30 天.
+        // 统计口径: commandcode 且已有聚合数据时走 usage_charts 全周期口径
+        // (明细接口仅 24h/100 条, desktop _use_charts_stats parity)
+        val chartsFirst = syncDao.getAccountProvider(aid) == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null
+        // 「本月」= 当前月度重置周期: commandcode 用真实计费周期, opencode 用
+        // 下次重置时间回推 30 天 (desktop monthly_cycle_start parity);
+        // 都没有时为 null, DAO 层回退滚动 30 天.
         val cycleStart = if (range == "month") {
-            MonthlyCycle.start(db.settingsDao().getMonthlyReset(aid), MonthlyCycle.nowUtc())
+            val bounds = db.settingsDao().getPeriodBounds(aid)
+            MonthlyCycle.startWithPeriod(
+                bounds.first, bounds.second,
+                db.settingsDao().getMonthlyReset(aid), System.currentTimeMillis(),
+            )
         } else null
         // Run the independent DB/exchange queries concurrently to cut first-paint latency.
         return coroutineScope {
-            val totalsDeferred = async { usageDao.totals(range, aid, cycleStart) }
-            val todayDeferred = async { usageDao.totals("today", aid) }
-            val dailyDeferred = async { usageDao.dailyStats(7, aid) }
-            val trendDeferred = async { usageDao.dailyStats(30, aid) }
-            val todayTrendDeferred = async { usageDao.todayTrend(aid) }
-            val modelsDeferred = async { usageDao.modelStats(range, aid, cycleStart) }
+            val totalsDeferred = async { if (chartsFirst) chartDao.totals(range, aid, cycleStart) else usageDao.totals(range, aid, cycleStart) }
+            val todayDeferred = async { if (chartsFirst) chartDao.totals("today", aid) else usageDao.totals("today", aid) }
+            val dailyDeferred = async { if (chartsFirst) chartDao.dailyStats(7, aid) else usageDao.dailyStats(7, aid) }
+            val trendDeferred = async { if (chartsFirst) chartDao.dailyStats(30, aid) else usageDao.dailyStats(30, aid) }
+            val todayTrendDeferred = async { if (chartsFirst) chartDao.todayTrend(aid) else usageDao.todayTrend(aid) }
+            val modelsDeferred = async { if (chartsFirst) chartDao.modelStats(range, aid, cycleStart) else usageDao.modelStats(range, aid, cycleStart) }
             val syncDeferred = async { syncDao.getSyncStateFor(aid) }
             val usdCnyDeferred = async { usdCny() }
             DashboardData(
@@ -374,7 +400,7 @@ class DashboardRepository(
 
     /**
      * 同步单个账号的用量记录 (原单账号逻辑, 显式传入账号上下文) —
-     * desktop server._sync_one_account parity.
+     * desktop server._sync_one_account parity; commandcode 走独立游标翻页路径。
      */
     private suspend fun syncOneAccount(
         accountId: Int,
@@ -384,6 +410,9 @@ class DashboardRepository(
     ): SyncResult {
         val token = syncDao.getTokenFor(accountId)
         if (token.isEmpty()) return SyncResult(ok = false, error = "未登录")
+        if (syncDao.getAccountProvider(accountId) == PROVIDER_COMMANDCODE) {
+            return ccSyncOneAccount(accountId, name, mode, windowDays, token)
+        }
         var workspaceId = syncDao.getWorkspaceHintFor(accountId)
 
         try {
@@ -517,6 +546,134 @@ class DashboardRepository(
         setProgress { it.copy(phase = "error", message = phaseMsg) }
     }
 
+    /**
+     * 同步单个 commandcode 账号 — desktop server._sync_one_cc_account parity:
+     * 明细游标翻页 + charts 全周期聚合落库 (无 workspace/key 概念)。
+     */
+    private suspend fun ccSyncOneAccount(
+        accountId: Int,
+        name: String,
+        mode: String,
+        windowDays: Int?,
+        token: String,
+    ): SyncResult {
+        var totalInserted = 0
+        var pages = 0
+        var cursor: String? = null
+        var emptyBatches = 0
+        var failed = false
+        var windowBoundaryReached = false
+
+        try {
+            val maxPages = if (mode == "full") 2000 else 5
+            while (pages < maxPages) {
+                setProgress { it.copy(page = pages) }
+                val (records, nextCursor) = try {
+                    ccApi.fetchUsagePage(token, cursor)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (mode == "incremental") {
+                        val msg = "[$name] 第 ${pages + 1} 页拉取失败: ${e.message}"
+                        syncDao.updateSyncStateAndTotals(accountId, "error", msg, totalInserted)
+                        setProgress { it.copy(phase = "error", message = msg) }
+                        return SyncResult(ok = false, error = e.message, inserted = totalInserted)
+                    }
+                    failed = true
+                    break
+                }
+                if (records.isEmpty()) break // 没有更多数据
+
+                if (mode == "full" && windowDays != null) {
+                    val earliest = records.minOfOrNull { it.createdAt } ?: ""
+                    if (earliest.isNotEmpty()) {
+                        try {
+                            val et = Instant.parse(earliest)
+                            val boundary = Instant.now().minus(windowDays.toLong(), ChronoUnit.DAYS)
+                            if (et.isBefore(boundary)) windowBoundaryReached = true
+                        } catch (e: Exception) {
+                            // ignore unparseable dates (desktop parity)
+                        }
+                    }
+                }
+
+                val inserted = usageDao.insertUsageRecords(
+                    records.map { r ->
+                        r.toEntity(Instant.now().toString()).copy(accountId = accountId)
+                    },
+                    accountId,
+                )
+                totalInserted += inserted
+                pages++
+                setProgress { it.copy(inserted = totalInserted) }
+
+                if (windowBoundaryReached) break
+                if (nextCursor == null) break // 游标翻页: 无 next_cursor 即到底
+                // 增量模式: 连续两批 0 新增 (全是旧数据) → 停止
+                if (mode == "incremental" && inserted == 0) {
+                    emptyBatches++
+                    if (emptyBatches >= 2) break
+                } else {
+                    emptyBatches = 0
+                }
+                cursor = nextCursor
+            }
+
+            // 按同步范围裁剪窗口外记录
+            if (windowDays != null) {
+                usageDao.pruneOldRecords("-${windowDays} days", accountId)
+            }
+
+            // charts 全周期聚合 (模型×5min 桶): 补全明细接口 24h/100 条之外的历史统计。
+            // 独立容错: 失败仅标记 partial, 不影响已落库明细, 下次同步自动重试。
+            var chartsOk = true
+            try {
+                val rows = ccApi.fetchUsageCharts(token)
+                db.chartDao().upsertAll(
+                    rows.map { b ->
+                        UsageChartEntity(
+                            accountId = accountId,
+                            model = b.model,
+                            provider = b.provider,
+                            timeBucket = b.timeBucket,
+                            requests = b.requests,
+                            inputCost = b.inputCost,
+                            outputCost = b.outputCost,
+                            cacheCost = b.cacheCost,
+                            totalCost = b.totalCost,
+                            creditsTotal = b.creditsTotal,
+                            tokensIn = b.tokensIn,
+                            tokensOut = b.tokensOut,
+                            tokensTotal = b.tokensTotal,
+                            cacheReadTokens = b.cacheReadTokens,
+                            cacheCreationTokens = b.cacheCreationTokens,
+                            syncedAt = Instant.now().toString(),
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("GoGauge", "fetchUsageCharts failed", e)
+                chartsOk = false
+            }
+
+            if (failed || !chartsOk) {
+                val msg = if (failed) "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
+                else "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
+                syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
+                return SyncResult(ok = true, partial = true, inserted = totalInserted, pages = pages)
+            }
+            syncDao.updateSyncStateAndTotals(accountId, "ok", null, totalInserted)
+            return SyncResult(ok = true, inserted = totalInserted, pages = pages)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0)
+            return SyncResult(ok = false, error = e.message)
+        }
+    }
+
     /** Concurrently fetch up to 5 pages; null = failed page. */
     private suspend fun fetchBatch(
         token: String,
@@ -577,7 +734,15 @@ class DashboardRepository(
         return PageResult(enriched, total)
     }
 
-    suspend fun listModels(): List<String> = usageDao.listModels(activeAccountId())
+    suspend fun listModels(): List<String> {
+        val aid = activeAccountId()
+        // commandcode: charts 聚合的全周期模型并入筛选列表 (desktop db.list_models parity)
+        return if (syncDao.getAccountProvider(aid) == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null) {
+            chartDao.listModelsUnionRecords(aid)
+        } else {
+            usageDao.listModels(aid)
+        }
+    }
 
     /** Persisted sync progress/state (desktop get_sync_state parity). */
     suspend fun syncState(): SyncState = syncDao.getSyncState()
