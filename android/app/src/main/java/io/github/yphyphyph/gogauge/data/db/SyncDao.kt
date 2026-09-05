@@ -6,6 +6,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
 import io.github.yphyphyph.gogauge.data.model.SyncState
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -98,9 +99,11 @@ abstract class SyncDao {
         }
 
     private suspend fun persistPayload(transform: (MutableMap<String, kotlinx.serialization.json.JsonElement>) -> Unit) {
-        val data = parsePayload(rawPayload())
-        transform(data)
-        writePayload(kotlinx.serialization.json.JsonObject(data).toString(), Instant.now().toString())
+        PayloadLock.mutex.withLock {
+            val data = parsePayload(rawPayload())
+            transform(data)
+            writePayload(kotlinx.serialization.json.JsonObject(data).toString(), Instant.now().toString())
+        }
     }
 
     suspend fun readStoredActiveId(): Int? =

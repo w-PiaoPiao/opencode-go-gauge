@@ -22,6 +22,7 @@ import io.github.yphyphyph.gogauge.data.db.MonthlyCycle
 import io.github.yphyphyph.gogauge.data.db.SyncDao
 import io.github.yphyphyph.gogauge.data.db.UsageDao
 import io.github.yphyphyph.gogauge.data.model.AppSettings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -175,6 +176,8 @@ class DashboardRepository(
             target.at = System.currentTimeMillis() / 1000.0
             target.data = try {
                 api.fetchQuota(token, hint)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 android.util.Log.e("GoGauge", "quota refresh failed", e)
                 null
@@ -359,6 +362,8 @@ class DashboardRepository(
                 setProgress { it.copy(phase = "done", message = msg) }
                 SyncResult(ok = true, inserted = totalInserted, pages = pages)
             }
+        } catch (e: CancellationException) {
+            throw e // 结构化并发取消必须穿透, 不能当作同步失败吞掉
         } catch (e: Exception) {
             failSync(e.message ?: "同步失败", e.message)
             return SyncResult(ok = false, error = e.message)
@@ -500,6 +505,8 @@ class DashboardRepository(
             }
             syncDao.updateSyncStateAndTotals(accountId, "ok", null, totalInserted)
             return SyncResult(ok = true, inserted = totalInserted, pages = page)
+        } catch (e: CancellationException) {
+            throw e // 协程取消穿透 (WorkManager 停止 / 页面销毁), 不写成 error 同步状态
         } catch (e: Exception) {
             syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0)
             return SyncResult(ok = false, error = e.message)
@@ -520,6 +527,8 @@ class DashboardRepository(
             async {
                 try {
                     p to api.fetchUsagePage(token, workspaceId, p)
+                } catch (e: CancellationException) {
+                    throw e // 协程取消穿透, 不把该页标记为失败
                 } catch (e: Exception) {
                     p to null
                 }

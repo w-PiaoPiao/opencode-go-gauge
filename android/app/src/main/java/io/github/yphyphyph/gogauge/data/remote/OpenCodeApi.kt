@@ -85,21 +85,7 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
                         if (declared > MAX_BODY_BYTES) {
                             throw OpenCodeApiException("响应过大 ($declared 字节, 上限 $MAX_BODY_BYTES)")
                         }
-                        val body = resp.body?.byteStream()?.use { input ->
-                            val buf = java.io.ByteArrayOutputStream()
-                            val chunk = ByteArray(64 * 1024)
-                            var total = 0
-                            while (true) {
-                                val n = input.read(chunk)
-                                if (n < 0) break
-                                total += n
-                                if (total > MAX_BODY_BYTES) {
-                                    throw OpenCodeApiException("响应过大 (超过 $MAX_BODY_BYTES 字节)")
-                                }
-                                buf.write(chunk, 0, n)
-                            }
-                            buf.toString("UTF-8")
-                        } ?: ""
+                        val body = readBounded(resp)
                         when {
                             status == 401 || status == 403 ->
                                 throw AuthException("认证失败 (HTTP $status)，请重新登录")
@@ -122,6 +108,24 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
             }
             throw OpenCodeApiException("网络错误: $lastExc")
         }
+
+    /** 流式读取响应体, 超 MAX_BODY_BYTES 即中止 (防止先整读内存再截断). */
+    private fun readBounded(resp: okhttp3.Response): String =
+        resp.body?.byteStream()?.use { input ->
+            val buf = java.io.ByteArrayOutputStream()
+            val chunk = ByteArray(64 * 1024)
+            var total = 0
+            while (true) {
+                val n = input.read(chunk)
+                if (n < 0) break
+                total += n
+                if (total > MAX_BODY_BYTES) {
+                    throw OpenCodeApiException("响应过大 (超过 $MAX_BODY_BYTES 字节)")
+                }
+                buf.write(chunk, 0, n)
+            }
+            buf.toString("UTF-8")
+        } ?: ""
 
     private suspend fun serverCall(serverId: String, args: List<Any?>, refererPath: String, token: String): String {
         val cookie = buildCookieHeader(token)
@@ -243,14 +247,14 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
                     try {
                         val rb = Request.Builder().url(url)
                         for ((k, v) in headers) rb.header(k, v)
-                        val result = client.newCall(rb.build()).execute().use { resp ->
-                            when (resp.code) {
-                                401, 403 -> throw AuthException("认证失败 (HTTP ${resp.code})，请重新登录")
-                                404 -> throw OpenCodeApiException("工作区不存在 (HTTP 404)")
-                            }
-                            if (resp.code !in 200..299) throw OpenCodeApiException("请求返回 HTTP ${resp.code}")
-                            resp.body?.string()?.take(MAX_BODY_BYTES) ?: ""
+                    val result = client.newCall(rb.build()).execute().use { resp ->
+                        when (resp.code) {
+                            401, 403 -> throw AuthException("认证失败 (HTTP ${resp.code})，请重新登录")
+                            404 -> throw OpenCodeApiException("工作区不存在 (HTTP 404)")
                         }
+                        if (resp.code !in 200..299) throw OpenCodeApiException("请求返回 HTTP ${resp.code}")
+                        readBounded(resp)
+                    }
                         return@withContext result
                     } catch (e: IOException) {
                         last = e

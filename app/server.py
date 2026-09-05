@@ -927,8 +927,9 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
     if route == "/api/settings" and method == "PUT":
         try:
-            length = int(handler.headers.get("Content-Length") or 0)
-            body = json.loads(handler.rfile.read(length).decode("utf-8", errors="replace"))
+            body = _read_json_body(handler)
+            if not isinstance(body, dict):
+                raise ValueError
         except Exception:  # noqa: BLE001
             _json_response(handler, {"ok": False, "error": "无效请求体"}, 400)
             return

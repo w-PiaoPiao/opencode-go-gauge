@@ -3,6 +3,7 @@ package io.github.yphyphyph.gogauge.data.db
 import androidx.room.Dao
 import androidx.room.Query
 import io.github.yphyphyph.gogauge.data.model.AppSettings
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -44,7 +45,6 @@ abstract class SettingsDao {
     }
 
     suspend fun saveSettings(patch: AppSettings): AppSettings {
-        val current = getSettings()
         val merged = AppSettings(
             syncIntervalSec = patch.syncIntervalSec.coerceIn(30, 3600),
             windowDays = patch.windowDays?.coerceIn(1, 3650),
@@ -53,21 +53,23 @@ abstract class SettingsDao {
         )
         // 保存时在既有 payload 上合并覆盖 (与桌面 db.save_settings 的整行 JSON 覆盖不同,
         // 安卓端 settings 行还承载 active_account_id 等运行时键, 不能整包丢弃)
-        val base = try {
-            json.parseToJsonElement(payload() ?: "{}").jsonObject
-        } catch (e: Exception) {
-            buildJsonObject {}
+        PayloadLock.mutex.withLock {
+            val base = try {
+                json.parseToJsonElement(payload() ?: "{}").jsonObject
+            } catch (e: Exception) {
+                buildJsonObject {}
+            }
+            val keyNames = getKeyNames()
+            val payload = buildJsonObject {
+                for ((k, v) in base) put(k, v)
+                put("sync_interval_sec", JsonPrimitive(merged.syncIntervalSec))
+                put("window_days", merged.windowDays?.let { JsonPrimitive(it) } ?: JsonNull)
+                put("auto_sync", JsonPrimitive(merged.autoSync))
+                put("show_accounts_panel", JsonPrimitive(merged.showAccountsPanel))
+                put("key_names", buildJsonObject { for ((k, v) in keyNames) put(k, JsonPrimitive(v)) })
+            }.toString()
+            savePayload(payload, java.time.Instant.now().toString())
         }
-        val keyNames = getKeyNames()
-        val payload = buildJsonObject {
-            for ((k, v) in base) put(k, v)
-            put("sync_interval_sec", JsonPrimitive(merged.syncIntervalSec))
-            put("window_days", merged.windowDays?.let { JsonPrimitive(it) } ?: JsonNull)
-            put("auto_sync", JsonPrimitive(merged.autoSync))
-            put("show_accounts_panel", JsonPrimitive(merged.showAccountsPanel))
-            put("key_names", buildJsonObject { for ((k, v) in keyNames) put(k, JsonPrimitive(v)) })
-        }.toString()
-        savePayload(payload, java.time.Instant.now().toString())
         return merged
     }
 
@@ -86,17 +88,18 @@ abstract class SettingsDao {
     /** 持久化 key_id -> 显示名称 映射到 settings payload (desktop db.save_key_names parity). */
     suspend fun saveKeyNames(names: Map<String, String>) {
         val filtered = names.filter { it.key.isNotEmpty() && it.value.isNotEmpty() }
-        val raw = payload() ?: "{}"
-        val base = try {
-            json.parseToJsonElement(raw).jsonObject
-        } catch (e: Exception) {
-            buildJsonObject {}
+        PayloadLock.mutex.withLock {
+            val base = try {
+                json.parseToJsonElement(payload() ?: "{}").jsonObject
+            } catch (e: Exception) {
+                buildJsonObject {}
+            }
+            val merged = buildJsonObject {
+                for ((k, v) in base) put(k, v)
+                put("key_names", buildJsonObject { for ((k, v) in filtered) put(k, JsonPrimitive(v)) })
+            }
+            savePayload(merged.toString(), java.time.Instant.now().toString())
         }
-        val merged = buildJsonObject {
-            for ((k, v) in base) put(k, v)
-            put("key_names", buildJsonObject { for ((k, v) in filtered) put(k, JsonPrimitive(v)) })
-        }
-        savePayload(merged.toString(), java.time.Instant.now().toString())
     }
 
     private fun kotlinx.serialization.json.JsonElement.contentOrNull(): String? {
@@ -118,17 +121,18 @@ abstract class SettingsDao {
     /** 持久化账号的下次月度重置时间, UTC "yyyy-MM-dd HH:mm:ss" (desktop db.record_monthly_reset parity). */
     suspend fun saveMonthlyReset(accountId: Int, resetUtc: String?) {
         if (resetUtc.isNullOrBlank()) return
-        val raw = payload() ?: "{}"
-        val base = try {
-            json.parseToJsonElement(raw).jsonObject
-        } catch (e: Exception) {
-            buildJsonObject {}
+        PayloadLock.mutex.withLock {
+            val base = try {
+                json.parseToJsonElement(payload() ?: "{}").jsonObject
+            } catch (e: Exception) {
+                buildJsonObject {}
+            }
+            val merged = buildJsonObject {
+                for ((k, v) in base) put(k, v)
+                put("monthly_reset:$accountId", JsonPrimitive(resetUtc))
+            }
+            savePayload(merged.toString(), java.time.Instant.now().toString())
         }
-        val merged = buildJsonObject {
-            for ((k, v) in base) put(k, v)
-            put("monthly_reset:$accountId", JsonPrimitive(resetUtc))
-        }
-        savePayload(merged.toString(), java.time.Instant.now().toString())
     }
 }
 
