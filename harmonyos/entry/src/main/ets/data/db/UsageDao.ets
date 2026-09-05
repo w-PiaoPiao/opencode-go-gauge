@@ -5,6 +5,7 @@
 import { relationalStore } from '@kit.ArkData'
 import { AppDb } from './AppDb'
 import { RowReader } from './RowReader'
+import { MonthlyCycle } from '../../common/util/MonthlyCycle'
 import { DailyStat, HourStat, ModelStat, SessionStat, Totals, UsageRecordRow } from '../../common/model/Models'
 
 export interface UsageRecordEntity {
@@ -119,12 +120,19 @@ export class UsageDao {
   // Aggregations
   // ------------------------------------------------------------------
 
-  private static periodClause(period: string): [string | null, Array<string>] {
+  private static periodClause(period: string, cycleStart: string | null = null): [string | null, Array<string>] {
     switch (period) {
       case '5h':
         return [`datetime(created_at) >= datetime('now', '-5 hours')`, []]
       case 'today':
         return [`substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')`, []]
+      case 'month':
+        // 「本月」= 当前月度重置周期起点 (desktop db._period_where parity);
+        // 无周期记录 (配额从未拉到) 时回退滚动 30 天, 与 "30d" 口径一致
+        if (cycleStart !== null && cycleStart.length > 0) {
+          return [`datetime(created_at) >= datetime(?)`, [cycleStart]]
+        }
+        return [`datetime(created_at) >= datetime('now', ?)`, [`-${MonthlyCycle.PERIOD_DAYS} days`]]
       case 'all':
         return [null, []]
       default: {
@@ -141,8 +149,8 @@ export class UsageDao {
     }
   }
 
-  private static buildWhere(period: string, accountId: number): [string, Array<string>] {
-    const pc = UsageDao.periodClause(period)
+  private static buildWhere(period: string, accountId: number, cycleStart: string | null = null): [string, Array<string>] {
+    const pc = UsageDao.periodClause(period, cycleStart)
     const clause = pc[0]
     const args = pc[1]
     const allArgs: Array<string> = [accountId.toString()]
@@ -169,8 +177,8 @@ export class UsageDao {
             ${where}`
   }
 
-  async totals(period: string, accountId: number): Promise<Totals> {
-    const bw = UsageDao.buildWhere(period, accountId)
+  async totals(period: string, accountId: number, cycleStart: string | null = null): Promise<Totals> {
+    const bw = UsageDao.buildWhere(period, accountId, cycleStart)
     const where = bw[0]
     const args = bw[1]
     const rs = await this.store().querySql(UsageDao.totalsSql(where), args)
@@ -285,8 +293,8 @@ export class UsageDao {
   }
 
   /** 单模型聚合 —— db.model_stats (按账号)。 */
-  async modelStats(period: string, accountId: number): Promise<ModelStat[]> {
-    const bw = UsageDao.buildWhere(period, accountId)
+  async modelStats(period: string, accountId: number, cycleStart: string | null = null): Promise<ModelStat[]> {
+    const bw = UsageDao.buildWhere(period, accountId, cycleStart)
     const where = bw[0]
     const args = bw[1]
     const rs = await this.store().querySql(

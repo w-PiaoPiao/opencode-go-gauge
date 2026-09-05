@@ -7,6 +7,7 @@ API 受未认证限流(403)/502/超时影响时, 自动降级到 Releases Atom �
 from __future__ import annotations
 
 import html as _html
+import hashlib
 import json
 import os
 import re
@@ -246,32 +247,48 @@ def check_update() -> dict[str, Any]:
     }
 
 
-def fetch_asset_url(tag: str) -> str:
-    """取指定 release 中本平台分发包的下载直链.
+def fetch_asset_info(tag: str) -> tuple[str, str]:
+    """取指定 release 中本平台分发包的下载直链与官方摘要.
 
     优先精确匹配标准资产名, 否则回退任一本平台扩展名的资产.
+    GitHub API 的 assets[].digest 形如 "sha256:<hex>" (无摘要时为空串).
 
     Returns:
-        browser_download_url; 找不到返回空串
+        (browser_download_url, digest); 找不到资产时 url 为空串
     """
     try:
         data = _fetch_json(f"https://api.github.com/repos/{REPO}/releases/tags/{tag}")
     except Exception:  # noqa: BLE001
-        return ""
-    fallback = ""
+        return "", ""
+    fallback = ("", "")
     for asset in data.get("assets") or []:
         name = str(asset.get("name") or "").strip().lower()
         url = str(asset.get("browser_download_url") or "")
+        digest = str(asset.get("digest") or "").strip().lower()
         if not url:
             continue
         if name == _ASSET_NAME:
-            return url
-        if not fallback and (
+            return url, digest
+        if not fallback[0] and (
             name.endswith(_PLATFORM_SUFFIX + _ASSET_EXT)
             or (not _IS_WIN and name.endswith(".zip"))
         ):
-            fallback = url
+            fallback = (url, digest)
     return fallback
+
+
+def _verify_digest(path: str, digest: str) -> None:
+    """对下载文件校验 GitHub 官方 SHA-256 摘要 (digest 形如 "sha256:<hex>")."""
+    if not digest.startswith("sha256:"):
+        return  # release 未提供摘要: 退回 zip CRC / PE 头自检
+    expected = digest.split(":", 1)[1].strip().lower()
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
+    if actual != expected:
+        raise RuntimeError(f"下载包校验失败 (SHA-256 不匹配): {actual[:16]}…")
 
 
 def download_update(dest_dir: str) -> dict[str, Any]:
@@ -288,7 +305,7 @@ def download_update(dest_dir: str) -> dict[str, Any]:
         if not info.get("has_update"):
             result["state"] = "no_update"
             return result
-        url = fetch_asset_url(result["latest"])
+        url, digest = fetch_asset_info(result["latest"])
         if not url:
             result["state"] = "no_asset"
             result["error"] = f"release {result['latest']} 中未找到 {_ASSET_NAME}"
@@ -304,8 +321,9 @@ def download_update(dest_dir: str) -> dict[str, Any]:
                     if not chunk:
                         break
                     fh.write(chunk)
-        # 完整性自检 (HTTPS 之外的第二道防线): zip 验 CRC, exe 至少验 PE 头,
-        # 防半截/损坏/被替换的文件在 os.replace 后被用户直接安装
+        # 完整性校验: 优先比对 GitHub 官方 SHA-256 摘要 (HTTPS 之外的供应链防线),
+        # release 未提供摘要时退回 zip CRC / exe PE 头自检, 防半截/损坏文件被直接安装
+        _verify_digest(dest + ".part", digest)
         if _ASSET_EXT == ".zip":
             import zipfile
             with zipfile.ZipFile(dest + ".part") as zf:

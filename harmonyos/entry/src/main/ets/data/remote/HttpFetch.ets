@@ -18,7 +18,7 @@ export class AuthHttpError extends HttpError {
 
 export class HttpFetch {
   static readonly USER_AGENT =
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0'
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:148.0) Gecko/20100101 Firefox/148.0'
   static readonly MAX_BODY_BYTES = 4 * 1024 * 1024
   static readonly CONNECT_TIMEOUT_MS = 10_000
   static readonly READ_TIMEOUT_MS = 15_000

@@ -17,7 +17,8 @@ export class AppDb {
     }
     const config: relationalStore.StoreConfig = {
       name: 'gousage.db',
-      securityLevel: relationalStore.SecurityLevel.S1,
+      // S2: 库内含登录凭证相关数据, 按敏感度要求取中档 (S1 面向公开数据)
+      securityLevel: relationalStore.SecurityLevel.S2,
     }
     const store = await relationalStore.getRdbStore(context, config)
     await AppDb.createSchema(store)

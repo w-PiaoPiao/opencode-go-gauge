@@ -9,9 +9,11 @@ import { UsageDao, UsageRecordEntity } from '../db/UsageDao'
 import { SyncDao } from '../db/SyncDao'
 import { OpenCodeApi } from '../remote/OpenCodeApi'
 import { ExchangeApi } from '../remote/ExchangeApi'
+import { MonthlyCycle } from '../../common/util/MonthlyCycle'
 import {
   AccountInfo, AppSettings, DashboardData, DailyStat, HourStat, ModelStat, PageResult, QuotaResult,
-  SessionStat, SyncProgress, SyncResult, SyncState, Totals, UsageRecord, UsageRecordRow, emptySyncProgress,
+  QuotaWindow, SessionStat, SyncProgress, SyncResult, SyncState, Totals, UsageRecord, UsageRecordRow,
+  emptySyncProgress,
 } from '../../common/model/Models'
 
 interface QuotaCacheSlot {
@@ -141,9 +143,34 @@ export class DashboardRepository {
         target.data = null
       }
       this.quotaCache.set(accountId, target)
+      // 配额拉取成功后持久化月度窗口的重置时间 (供「本月」筛选推算周期起点,
+      // desktop server._record_monthly_reset parity); 失败不影响配额返回
+      const quota = target.data
+      if (quota !== null && quota.success) {
+        const monthly = quota.windows.find((w: QuotaWindow): boolean => w.label === 'Monthly')
+        if (monthly !== undefined && monthly.resetAt.length > 0) {
+          const resetUtc = DashboardRepository.formatResetUtc(monthly.resetAt)
+          if (resetUtc !== null) {
+            try {
+              await AppDb.settingsDao().saveMonthlyReset(accountId, resetUtc)
+            } catch (e) {
+              // 持久化失败不影响配额返回
+            }
+          }
+        }
+      }
     } finally {
       this.quotaRefreshing.delete(accountId)
     }
+  }
+
+  /**
+   * Quota resetAt (Instant ISO) -> UTC "yyyy-MM-dd HH:mm:ss" —
+   * desktop record_monthly_reset 存储格式 parity; 解析失败返回 null (不落库)。
+   */
+  private static formatResetUtc(resetAt: string): string | null {
+    const ms = Date.parse(resetAt)
+    return Number.isNaN(ms) ? null : MonthlyCycle.fmtUtc(ms)
   }
 
   async currentQuota(): Promise<QuotaResult | null> {
@@ -190,14 +217,24 @@ export class DashboardRepository {
   async loadDashboard(range: string): Promise<DashboardData> {
     const aid = await this.syncDao.getActiveAccountId()
     const token = await this.syncDao.getTokenFor(aid)
+    // 「本月」= 当前月度重置周期起点 (desktop parity); 无配额记录时为 null,
+    // UsageDao 回退滚动 30 天
+    let cycleStart: string | null = null
+    if (range === 'month') {
+      try {
+        cycleStart = MonthlyCycle.start(await AppDb.settingsDao().getMonthlyReset(aid), Date.now())
+      } catch (e) {
+        cycleStart = null
+      }
+    }
     // 并发跑相互独立的 DB/汇率查询
     const parts = await Promise.all([
-      this.usageDao.totals(range, aid),
+      this.usageDao.totals(range, aid, cycleStart),
       this.usageDao.totals('today', aid),
       this.usageDao.dailyStats(7, aid),
       this.usageDao.dailyStats(30, aid),
       this.usageDao.todayTrend(aid),
-      this.usageDao.modelStats(range, aid),
+      this.usageDao.modelStats(range, aid, cycleStart),
       this.syncDao.getSyncStateFor(aid),
       this.usdCny(),
       this.currentQuota(),
