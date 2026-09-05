@@ -14,7 +14,7 @@ data class QuotaWindow(
     val resetInSec: Int,
 )
 
-/** Quota fetch result — mirrors opencode_api.QuotaResult (desktop). */
+/** Quota fetch result — mirrors opencode_api/commandcode_api QuotaResult (desktop). */
 @Serializable
 data class QuotaResult(
     val name: String,
@@ -23,4 +23,8 @@ data class QuotaResult(
     val updatedAt: String,
     val windows: List<QuotaWindow> = emptyList(),
     val error: String? = null,
+    // commandcode 附加字段 (desktop commandcode_api.QuotaResult parity)
+    val plan: String? = null,
+    val periodStart: String? = null,   // ISO, 订阅计费周期起点
+    val periodEnd: String? = null,     // ISO, 订阅计费周期终点 (= 月度窗口重置)
 )

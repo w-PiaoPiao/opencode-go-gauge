@@ -1,6 +1,6 @@
 package io.github.yphyphyph.gogauge.data.model
 
-/** One usage record — mirrors opencode_api.UsageRecord (desktop). */
+/** One usage record — mirrors opencode_api/commandcode_api UsageRecord (desktop). */
 data class UsageRecord(
     val usgId: String,
     val createdAt: String,
@@ -16,9 +16,33 @@ data class UsageRecord(
     val keyId: String,
     val sessionId: String,
     val plan: String? = null,
+    // commandcode: meta.totalCost 已是 USD (costRaw 占位 0), 直接覆盖 costUsd
+    val costUsdOverride: Double? = null,
 ) {
-    val costUsd: Double get() = costRaw / 100_000_000.0
+    val costUsd: Double
+        get() = costUsdOverride ?: costRaw / 100_000_000.0
 }
+
+/**
+ * One aggregated chart bucket — mirrors commandcode_api.UsageChartBucket (desktop).
+ * 对应 /internal/usage/charts 的 (模型 × 5min 时间桶) 全周期聚合; tokens_in 已含缓存读。
+ */
+data class UsageChartBucket(
+    val model: String,
+    val provider: String,
+    val timeBucket: String,    // UTC "yyyy-MM-dd HH:mm:ss"
+    val requests: Int,
+    val inputCost: Double,
+    val outputCost: Double,
+    val cacheCost: Double,
+    val totalCost: Double,
+    val creditsTotal: Double,
+    val tokensIn: Int,
+    val tokensOut: Int,
+    val tokensTotal: Int,
+    val cacheReadTokens: Int,
+    val cacheCreationTokens: Int,
+)
 
 /** Row for the usage-records list — mirrors db.usage_records_page output (desktop). */
 data class UsageRecordRow(

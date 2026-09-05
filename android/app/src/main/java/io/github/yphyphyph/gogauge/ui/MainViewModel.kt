@@ -51,6 +51,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 登录流程意图: "add"=添加新用户 / "relogin"=重登当前用户 (desktop open_login(mode) parity). */
     var pendingLoginMode by mutableStateOf("relogin")
         private set
+
+    /** 登录流程来源: "opencode" / "commandcode" (desktop open_login(provider) parity). */
+    var pendingLoginProvider by mutableStateOf("opencode")
+        private set
     var loggedIn by mutableStateOf(false)
         private set
     var dashboard by mutableStateOf<DashboardData?>(null)
@@ -155,18 +159,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun startLogin(mode: String) {
+    fun startLogin(mode: String, provider: String = "opencode") {
         pendingLoginMode = if (mode in listOf("add", "relogin")) mode else "relogin"
+        pendingLoginProvider = provider
         showLogin = true
     }
 
     /**
      * 登录成功按模式落库 (desktop on_login_success):
-     * add=新建账号(同 token 去重为既有账号)并切换; relogin=更新当前活跃账号凭证.
+     * add=新建账号(同 provider+token 去重为既有账号)并切换; relogin=更新当前活跃账号凭证.
      */
     fun completeLogin(token: String, workspaceHint: String) {
         scope.launch {
-            repo.loginSuccess(token, workspaceHint, pendingLoginMode)
+            repo.loginSuccess(token, workspaceHint, pendingLoginMode, pendingLoginProvider)
             loggedIn = true
             showLogin = false
             checkState()

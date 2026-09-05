@@ -121,6 +121,30 @@ abstract class SettingsDao {
     /** 持久化账号的下次月度重置时间, UTC "yyyy-MM-dd HH:mm:ss" (desktop db.record_monthly_reset parity). */
     suspend fun saveMonthlyReset(accountId: Int, resetUtc: String?) {
         if (resetUtc.isNullOrBlank()) return
+        savePayloadKey("monthly_reset:$accountId", resetUtc)
+    }
+
+    /** 记录账号当前计费周期起止 (desktop db.record_period_bounds parity, commandcode 真实周期)。 */
+    suspend fun savePeriodBounds(accountId: Int, startUtc: String?, endUtc: String?) {
+        if (startUtc.isNullOrBlank() || endUtc.isNullOrBlank()) return
+        savePayloadKey("period_start:$accountId", startUtc)
+        savePayloadKey("period_end:$accountId", endUtc)
+    }
+
+    /** 读取账号的计费周期起止 (无记录返回 null 对)。 */
+    suspend fun getPeriodBounds(accountId: Int): Pair<String?, String?> {
+        val obj = try {
+            json.parseToJsonElement(payload() ?: "{}").jsonObject
+        } catch (e: Exception) {
+            return null to null
+        }
+        val start = obj["period_start:$accountId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+        val end = obj["period_end:$accountId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+        return start to end
+    }
+
+    /** 单键写入: 整包读改写互斥, 保留其余键 (PayloadLock 串行)。 */
+    private suspend fun savePayloadKey(key: String, value: String) {
         PayloadLock.mutex.withLock {
             val base = try {
                 json.parseToJsonElement(payload() ?: "{}").jsonObject
@@ -129,7 +153,7 @@ abstract class SettingsDao {
             }
             val merged = buildJsonObject {
                 for ((k, v) in base) put(k, v)
-                put("monthly_reset:$accountId", JsonPrimitive(resetUtc))
+                put(key, JsonPrimitive(value))
             }
             savePayload(merged.toString(), java.time.Instant.now().toString())
         }
@@ -139,13 +163,16 @@ abstract class SettingsDao {
 /**
  * 月度重置周期策略 — mirrors desktop db.monthly_cycle_start.
  *
- * OpenCode Go $10 月度套餐按 30 天滚动周期重置, 官方接口只暴露下次重置时间, 周期起点
- * 以 "下次重置 - 30 天" 推算; 若记录的重置时刻已过去 (重置已发生而配额未刷新),
- * 该时刻即本周期开始的精确边界. 无记录或格式异常时返回 null (调用方回退滚动 30 天).
+ * - commandcode 等记录过真实计费周期的账号: 直接取 period_start; 周期已过期
+ *   (配额未刷新) 时按周期跨度顺延到覆盖当前时刻的最近周期 (上限 1200 次防死循环,
+ *   span<=0 视为非法数据回退); 无周期记录时为 null (调用方回退滚动 30 天).
+ * - opencode 无真实起点: 由下次重置时间回推 30 天 ("重置-30天" 规则).
+ * 时间统一为 UTC "yyyy-MM-dd HH:mm:ss" 字符串, 与持久化格式一致.
  */
 object MonthlyCycle {
     const val PERIOD_DAYS = 30
     private val FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    private const val MAX_PERIOD_ROLLS = 1200
 
     /** 推导当前周期起点 (UTC "yyyy-MM-dd HH:mm:ss"); resetUtc 为存储的下次重置时间. */
     fun start(resetUtc: String?, nowUtc: String): String? {
@@ -160,6 +187,43 @@ object MonthlyCycle {
         }
     }
 
-    /** 当前 UTC 时间 (与存储格式一致), 供 [start] 使用. */
-    fun nowUtc(): String = java.time.LocalDateTime.now(java.time.ZoneOffset.UTC).format(FMT)
+    /**
+     * 统一入口: 优先真实计费周期 (commandcode), 无记录回退 monthly_reset 推算
+     * (opencode), 两者皆无返回 null (调用方回退滚动 30 天).
+     */
+    fun startWithPeriod(periodStart: String?, periodEnd: String?, monthlyReset: String?, nowMs: Long): String? {
+        if (!periodStart.isNullOrBlank()) {
+            return try {
+                var start = java.time.LocalDateTime.parse(periodStart, FMT)
+                    .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+                if (!periodEnd.isNullOrBlank()) {
+                    var end = java.time.LocalDateTime.parse(periodEnd, FMT)
+                        .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+                    var rolled = 0
+                    // 顺延跨周期覆盖当前时刻; 上限兜底防异常数据死循环 (desktop parity:
+                    // 达到上限取最后起点, 仅 end<=start 非法数据回退 null)
+                    while (end <= nowMs && rolled < MAX_PERIOD_ROLLS) {
+                        val span = end - start
+                        if (span <= 0) return null
+                        start = end
+                        end += span
+                        rolled++
+                    }
+                }
+                fmtUtc(start)
+            } catch (e: Exception) {
+                null
+            }
+        }
+        return start(monthlyReset, nowUtcString(nowMs))
+    }
+
+    /** 当前 UTC 时间 (与存储格式一致)。 */
+    fun nowUtc(): String = nowUtcString(System.currentTimeMillis())
+
+    private fun nowUtcString(nowMs: Long): String =
+        java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(nowMs), java.time.ZoneOffset.UTC).format(FMT)
+
+    private fun fmtUtc(ms: Long): String =
+        java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(ms), java.time.ZoneOffset.UTC).format(FMT)
 }

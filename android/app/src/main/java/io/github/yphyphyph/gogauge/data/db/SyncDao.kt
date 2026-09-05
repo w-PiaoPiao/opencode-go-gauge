@@ -5,7 +5,10 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Transaction
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_OPENCODE
 import io.github.yphyphyph.gogauge.data.model.SyncState
+import io.github.yphyphyph.gogauge.data.model.accountDisplayName
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -55,9 +58,15 @@ abstract class SyncDao {
 
     @Query(
         "UPDATE accounts SET token = :token, workspace_id = :workspaceId," +
-            " resolved_workspace_id = NULL, updated_at = :updatedAt WHERE id = :id"
+            " resolved_workspace_id = NULL, provider = :provider, updated_at = :updatedAt WHERE id = :id"
     )
-    abstract suspend fun updateCredential(id: Int, token: String, workspaceId: String, updatedAt: String)
+    abstract suspend fun updateCredential(
+        id: Int,
+        token: String,
+        workspaceId: String,
+        provider: String,
+        updatedAt: String,
+    )
 
     @Query(
         "UPDATE accounts SET workspace_id = :workspaceId, updated_at = :updatedAt WHERE id = :id"
@@ -164,6 +173,7 @@ abstract class SyncDao {
         workspaceId = workspaceId,
         resolvedWorkspaceId = resolvedWorkspaceId,
         hasToken = hasToken,
+        provider = provider,
     )
 
     /** 活跃账号摘要; 无账号返回 null (desktop get_account 空 dict 口径由仓库层转换). */
@@ -176,18 +186,27 @@ abstract class SyncDao {
     suspend fun countLoggedInAccounts(): Int = countLoggedInAccountsRaw()
 
     /**
-     * 添加新账号; 若已有完全相同的 token 则视为同一用户, 更新工作区提示后返回其 id
-     * (desktop db.add_account).
+     * 添加新账号; 若已有同一 provider 的相同 token 则视为同一用户, 更新工作区提示后返回其 id
+     * (desktop db.add_account: 按 (provider, token) 去重; GOAT 账号命名 GOAT N)。
      */
     @Transaction
-    open suspend fun addAccount(token: String, workspaceHint: String = "", switch: Boolean = true): Int {
+    open suspend fun addAccount(
+        token: String,
+        workspaceHint: String = "",
+        switch: Boolean = true,
+        provider: String = PROVIDER_OPENCODE,
+    ): Int {
         val trimmed = token.trim()
         val hint = workspaceHint.trim()
         val now = Instant.now().toString()
         if (trimmed.isNotEmpty()) {
-            val existing = listAccountRows().firstOrNull { it.token.trim() == trimmed }
+            val existing = listAccountRows()
+                .firstOrNull { it.provider == provider && it.token.trim() == trimmed }
             if (existing != null) {
-                if (hint.isNotEmpty()) updateWorkspaceHint(existing.id, hint, now)
+                // workspace 提示仅对 opencode 有意义 (desktop parity)
+                if (hint.isNotEmpty() && provider == PROVIDER_OPENCODE) {
+                    updateWorkspaceHint(existing.id, hint, now)
+                }
                 if (switch) writeStoredActiveId(existing.id)
                 return existing.id
             }
@@ -196,9 +215,10 @@ abstract class SyncDao {
         insertAccountRow(
             AccountEntity(
                 id = newId,
-                name = hint.take(50).ifEmpty { "User $newId" },
+                name = accountDisplayName(provider, hint, newId),
                 workspaceId = hint.ifEmpty { "Default" },
                 token = trimmed,
+                provider = provider,
                 createdAt = now,
                 updatedAt = now,
             ),
@@ -247,15 +267,19 @@ abstract class SyncDao {
         resetSyncStateForAccount(aid)
     }
 
-    /** 重新登录语义: 更新活跃账号凭证并重置其增量游标 (desktop db.save_token). */
+    /** 重新登录语义: 更新活跃账号凭证与 provider, 并重置其增量游标 (desktop db.save_token). */
     @Transaction
-    open suspend fun saveToken(token: String, workspaceId: String) {
+    open suspend fun saveToken(token: String, workspaceId: String, provider: String = PROVIDER_OPENCODE) {
         val aid = requireActiveId()
         if (aid == 0) return
-        updateCredential(aid, token.trim(), workspaceId.trim().ifEmpty { "Default" }, Instant.now().toString())
+        updateCredential(aid, token.trim(), workspaceId.trim().ifEmpty { "Default" }, provider, Instant.now().toString())
         ensureStateRow(aid)
         resetCursorForAccount(aid)
     }
+
+    /** 读取账号的 provider; 账号不存在回退 opencode (desktop db.get_account_provider parity)。 */
+    suspend fun getAccountProvider(accountId: Int): String =
+        accountRowById(accountId)?.provider?.takeIf { it.isNotBlank() } ?: PROVIDER_OPENCODE
 
     // ------------------------------------------------------------------
     // 同步状态 (desktop db.py usage_sync_state 访问, 按账号)
