@@ -255,11 +255,15 @@ def fetch_asset_info(tag: str) -> tuple[str, str]:
 
     Returns:
         (browser_download_url, digest); 找不到资产时 url 为空串
+
+    Raises:
+        RuntimeError: API 不可达/响应异常 —— 与「资产不存在」区分开, 避免更新
+            失败被误报为 "release 中未找到资产" 而掩盖真实原因.
     """
     try:
         data = _fetch_json(f"https://api.github.com/repos/{REPO}/releases/tags/{tag}")
-    except Exception:  # noqa: BLE001
-        return "", ""
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"无法获取 release {tag} 的资产信息: {exc}") from exc
     fallback = ("", "")
     for asset in data.get("assets") or []:
         name = str(asset.get("name") or "").strip().lower()
@@ -278,10 +282,24 @@ def fetch_asset_info(tag: str) -> tuple[str, str]:
 
 
 def _verify_digest(path: str, digest: str) -> None:
-    """对下载文件校验 GitHub 官方 SHA-256 摘要 (digest 形如 "sha256:<hex>")."""
+    """对下载文件校验 GitHub 官方 SHA-256 摘要 (digest 形如 "sha256:<hex>").
+
+    fail-closed: 摘要缺失或算法不受支持时直接拒绝. 先前的实现遇到空摘要会
+    ``return`` 跳过校验, 只剩 zip CRC / 2 字节 PE 头自检 —— 那样一个被篡改或
+    拼错的资产仍能通过并进入安装流程. GitHub 对本仓库全部资产都返回
+    "sha256:<hex>", 故严格要求不会影响正常更新.
+    确需跳过 (自建 release 无摘要) 时显式设置 GOGauge_ALLOW_UNVERIFIED_UPDATE=1.
+    """
     if not digest.startswith("sha256:"):
-        return  # release 未提供摘要: 退回 zip CRC / PE 头自检
+        if os.environ.get("GOGauge_ALLOW_UNVERIFIED_UPDATE") == "1":
+            return
+        raise RuntimeError(
+            "下载包缺少官方 SHA-256 摘要, 已阻止安装 (如为自建 release 可设 "
+            "GOGauge_ALLOW_UNVERIFIED_UPDATE=1 跳过此检查)"
+        )
     expected = digest.split(":", 1)[1].strip().lower()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise RuntimeError("下载包摘要格式非法, 已阻止安装")
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
@@ -311,7 +329,10 @@ def download_update(dest_dir: str) -> dict[str, Any]:
             result["error"] = f"release {result['latest']} 中未找到 {_ASSET_NAME}"
             return result
         os.makedirs(dest_dir, exist_ok=True)
-        dest = os.path.join(dest_dir, f"GoGauge-{result['latest']}{_PLATFORM_SUFFIX}{_ASSET_EXT}")
+        # tag 来自远端 API, 仅做白名单字符过滤后再拼路径: _TAG_RE 的尾部
+        # (?:[-+].*)? 允许 "/" 与 "..", 直接拼接可写到 dest_dir 之外.
+        safe_tag = re.sub(r"[^A-Za-z0-9._-]", "_", result["latest"]).strip(".") or "update"
+        dest = os.path.join(dest_dir, f"GoGauge-{safe_tag}{_PLATFORM_SUFFIX}{_ASSET_EXT}")
         req = urllib.request.Request(
             url, headers={"User-Agent": f"GoGauge/{__version__}"})
         with urllib.request.urlopen(req, timeout=60) as resp:

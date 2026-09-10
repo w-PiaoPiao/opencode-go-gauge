@@ -256,8 +256,9 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .mr-name { flex: 1; font-weight: 600; display: flex; align-items: center; gap: 6px; overflow: hidden; }
 .mr-name .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mr-name img, .model-cell img { width: 16px; height: 16px; }
-.mr-sub { color: var(--text3); font-size: 11px; font-variant-numeric: tabular-nums; }
-.mr-cost { color: var(--text2); font-variant-numeric: tabular-nums; }
+.mr-sub { color: var(--text3); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 排行数值列 (成本=金额, 输入/输出=Token 简写): 右对齐 + 定宽, 避免长短不一抖动 */
+.mr-val, .mr-cost { color: var(--text2); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; min-width: 58px; }
 .usage-trend { padding-bottom: 10px; }
 .records { margin-bottom: 0; padding-bottom: 4px; }
 

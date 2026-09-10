@@ -22,6 +22,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -38,6 +39,20 @@ _schema_init_path: Optional[str] = None
 # 无锁会互相覆盖丢键 (active_account_id 回退 / key_names 丢失). 写侧全走此锁.
 _payload_lock = threading.RLock()
 _data_dir_override: Optional[str] = None
+# 凭证缓存: 避免账户总览在每个请求线程上重复派生 keychain/DPAPI 解密.
+# 仅登录/登出/删除/改 provider 等写路径失效, 见 _invalidate_cred_cache.
+_cred_lock = threading.Lock()
+_cred_cache: dict[int, tuple[float, tuple[str, str, str]]] = {}
+_CRED_CACHE_TTL = 60.0
+
+
+def _invalidate_cred_cache(account_id: Optional[int] = None) -> None:
+    """凭证变更后失效缓存 (account_id 为 None 时清空全部)."""
+    with _cred_lock:
+        if account_id is None:
+            _cred_cache.clear()
+        else:
+            _cred_cache.pop(int(account_id), None)
 
 
 def set_data_dir(path: str) -> None:
@@ -276,8 +291,25 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     _ensure_schema(conn)
+    _harden_db_perms(path)
     _db_local.conn = conn
     return conn
+
+
+def _harden_db_perms(path: str) -> None:
+    """库文件与 WAL/SHM 收窄到 0600 (仅属主可读写).
+
+    非冻结版 / Linux 下凭证可能是明文 (DPAPI 与钥匙串只在对应平台的打包版可用),
+    而 sqlite3 按进程 umask 创建文件 (通常 0644), 同机其他用户可读走 session token.
+    失败不致命 (Windows 无 POSIX 权限位; 某些文件系统不支持).
+    """
+    if os.name == "nt":
+        return
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(path + suffix, 0o600)
+        except OSError:
+            pass  # 文件可能尚未创建 (WAL/SHM 首次写入才出现)
 
 
 def close_db() -> None:
@@ -349,7 +381,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               session_id TEXT,
               plan TEXT,
               synced_at TEXT NOT NULL,
-              account_id INTEGER NOT NULL DEFAULT 1
+              account_id INTEGER NOT NULL DEFAULT 1,
+              local_date TEXT  -- 本地日 "YYYY-MM-DD"; 见 _init_schema 迁移说明
             );
 
             CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at DESC);
@@ -395,6 +428,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               cache_read_tokens INTEGER NOT NULL DEFAULT 0,
               cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
               synced_at TEXT NOT NULL,
+              local_date TEXT,  -- 本地日 "YYYY-MM-DD"; 见 _init_schema 迁移说明
               PRIMARY KEY (account_id, model, time_bucket)
             );
 
@@ -505,6 +539,44 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             )
         conn.commit()
 
+        # 迁移 6: 本地日列 + 确定性索引 (取代 WHERE 中的 datetime()/localtime 表达式).
+        #
+        # 时间过滤原先写作 datetime(created_at) 与 substr(datetime(created_at,'localtime'),1,10),
+        # 函数包裹索引列使 SQLite 无法范围扫描, 每个周期查询都退化为按账号全表扫描
+        # (dashboard 一次刷新要跑 6 条). 但 localtime 是非确定性函数, SQLite 直接拒绝
+        # 建表达式索引 ("non-deterministic use of datetime() in an index"), 故改为在写入
+        # 时落一列 local_date, 并建 (account_id, local_date) / (account_id, created_at) 索引.
+        rec_cols2 = {row["name"] for row in conn.execute("PRAGMA table_info(usage_records)").fetchall()}
+        if "local_date" not in rec_cols2:
+            conn.execute("ALTER TABLE usage_records ADD COLUMN local_date TEXT")
+        ch_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_charts)").fetchall()}
+        if "local_date" not in ch_cols:
+            conn.execute("ALTER TABLE usage_charts ADD COLUMN local_date TEXT")
+        # 存量回填 (仅未回填行; 幂等)
+        conn.execute(
+            "UPDATE usage_records SET local_date = date(created_at, 'localtime')"
+            " WHERE local_date IS NULL"
+        )
+        conn.execute(
+            "UPDATE usage_charts SET local_date = date(time_bucket, 'localtime')"
+            " WHERE local_date IS NULL"
+        )
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_usage_account_localdate
+              ON usage_records(account_id, local_date);
+            CREATE INDEX IF NOT EXISTS idx_usage_account_model
+              ON usage_records(account_id, model);
+            CREATE INDEX IF NOT EXISTS idx_charts_account_localdate
+              ON usage_charts(account_id, local_date);
+            -- get_sync_state 每次轮询都要取 SUM(requests) 与 MAX(synced_at);
+            -- 带上 requests 使其成为覆盖索引 (仅扫索引不回表).
+            CREATE INDEX IF NOT EXISTS idx_charts_account_synced
+              ON usage_charts(account_id, synced_at, requests);
+            """
+        )
+        conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # settings payload 底层读写 (key_names 与 active_account_id 等共用一个 JSON)
@@ -595,13 +667,19 @@ def set_active_account(account_id: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_ACCOUNT_COLS = (
+    "id, name, workspace_id, resolved_workspace_id, provider, created_at, updated_at,"
+    " (TRIM(token) != '') AS has_token"
+)
+
+
 def _account_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "name": row["name"],
         "workspace_id": row["workspace_id"],
         "resolved_workspace_id": row["resolved_workspace_id"],
-        "has_token": bool(row["token"].strip()),
+        "has_token": bool(row["has_token"]),
         "provider": row["provider"] if "provider" in row.keys() else PROVIDER_OPENCODE,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -613,12 +691,18 @@ def get_account() -> dict[str, Any]:
     aid = get_active_account_id()
     if not aid:
         return {}
-    row = get_db().execute("SELECT * FROM accounts WHERE id = ?", (aid,)).fetchone()
+    row = get_db().execute(
+        f"SELECT {_ACCOUNT_COLS} FROM accounts WHERE id = ?", (aid,)
+    ).fetchone()
     return _account_dict(row) if row else {}
 
 
 def list_accounts() -> list[dict[str, Any]]:
-    rows = get_db().execute("SELECT * FROM accounts ORDER BY id ASC").fetchall()
+    # 不取 token 明文/密文本身: 调用方只需要存在性, 避免凭证无谓地进入进程内存与
+    # 可能的日志/异常回溯.
+    rows = get_db().execute(
+        f"SELECT {_ACCOUNT_COLS} FROM accounts ORDER BY id ASC"
+    ).fetchall()
     return [_account_dict(r) for r in rows]
 
 
@@ -668,6 +752,7 @@ def save_token(
         "UPDATE usage_sync_state SET deepest_page_fetched = -1 WHERE account_id = ?", (aid,)
     )
     conn.commit()
+    _invalidate_cred_cache(aid)
 
 
 def save_resolved_workspace(workspace_id: str, account_id: Optional[int] = None) -> None:
@@ -680,6 +765,7 @@ def save_resolved_workspace(workspace_id: str, account_id: Optional[int] = None)
         (workspace_id, _now_iso(), aid),
     )
     conn.commit()
+    _invalidate_cred_cache(aid)
 
 
 def get_token() -> str:
@@ -703,16 +789,31 @@ def get_workspace_hint() -> str:
 
 
 def get_account_credentials(account_id: int) -> tuple[str, str, str]:
-    """读取任意账号的凭证 (token, 工作区提示, provider); 账号不存在返回 ("", "Default", "opencode")."""
+    """读取任意账号的凭证 (token, 工作区提示, provider); 账号不存在返回 ("", "Default", "opencode").
+
+    带进程内短期缓存: 冻结版 macOS 下解密要走 ``/usr/bin/security`` 子进程 (超时
+    10s), 账户总览面板逐账号调用会在请求线程上反复派生进程. 凭证只在登录/登出/
+    删除时变化, 由下列写路径调用 ``_invalidate_cred_cache`` 主动失效.
+    """
+    aid = int(account_id)
+    now = time.time()
+    with _cred_lock:
+        hit = _cred_cache.get(aid)
+        if hit is not None and now - hit[0] < _CRED_CACHE_TTL:
+            return hit[1]
     row = get_db().execute(
         "SELECT token, workspace_id, resolved_workspace_id, provider FROM accounts WHERE id = ?",
-        (int(account_id),),
+        (aid,),
     ).fetchone()
     if row is None:
-        return "", "Default", PROVIDER_OPENCODE
-    hint = row["resolved_workspace_id"] or row["workspace_id"] or "Default"
-    provider = row["provider"] or PROVIDER_OPENCODE
-    return _storage_decode(int(account_id), row["token"] or "").strip(), hint, provider
+        result = ("", "Default", PROVIDER_OPENCODE)
+    else:
+        hint = row["resolved_workspace_id"] or row["workspace_id"] or "Default"
+        provider = row["provider"] or PROVIDER_OPENCODE
+        result = (_storage_decode(aid, row["token"] or "").strip(), hint, provider)
+    with _cred_lock:
+        _cred_cache[aid] = (now, result)
+    return result
 
 
 def get_account_provider(account_id: int) -> str:
@@ -727,7 +828,7 @@ def get_account_provider(account_id: int) -> str:
 
 def list_accounts_by_provider(provider: str) -> list[dict[str, Any]]:
     rows = get_db().execute(
-        "SELECT * FROM accounts WHERE provider = ? ORDER BY id ASC", (provider,)
+        f"SELECT {_ACCOUNT_COLS} FROM accounts WHERE provider = ? ORDER BY id ASC", (provider,)
     ).fetchall()
     return [_account_dict(r) for r in rows]
 
@@ -771,6 +872,7 @@ def add_account(
             _persist_active(conn, aid)
         else:
             conn.commit()
+        _invalidate_cred_cache(aid)
         return aid
     nxt = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 AS n FROM accounts").fetchone()["n"]
     if hint and provider == PROVIDER_OPENCODE:
@@ -796,6 +898,7 @@ def add_account(
         _persist_active(conn, aid)
     else:
         conn.commit()
+    _invalidate_cred_cache(aid)
     return aid
 
 
@@ -844,6 +947,7 @@ def delete_account(account_id: int) -> int:
             _write_payload(conn, data)
     conn.commit()
     _keychain_cleanup(aid)
+    _invalidate_cred_cache(aid)
     return remaining
 
 
@@ -868,6 +972,7 @@ def clear_account() -> None:
     )
     conn.commit()
     _keychain_cleanup(aid)
+    _invalidate_cred_cache(aid)
 
 
 # ---------------------------------------------------------------------------
@@ -894,8 +999,9 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
     stmt = (
         "INSERT INTO usage_records (usg_id, created_at, model, provider, input_tokens,"
         " output_tokens, reasoning_tokens, cache_read_tokens, cache_write_5m_tokens,"
-        " cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id, plan, synced_at, account_id)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id, plan, synced_at,"
+        " account_id, local_date)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date(?, 'localtime'))"
         " ON CONFLICT(usg_id) DO UPDATE SET"
         " created_at = excluded.created_at, model = excluded.model,"
         " provider = excluded.provider,"
@@ -907,31 +1013,44 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " cache_write_1h_tokens = excluded.cache_write_1h_tokens,"
         " cost_raw = excluded.cost_raw, cost_usd = excluded.cost_usd,"
         " key_id = excluded.key_id, session_id = excluded.session_id, plan = excluded.plan,"
-        " account_id = excluded.account_id, synced_at = excluded.synced_at"
+        " account_id = excluded.account_id, synced_at = excluded.synced_at,"
+        " local_date = excluded.local_date"
     )
     inserted = 0
     try:
         conn.execute("BEGIN")
-        for rec in records:
-            rec_provider = (rec.get("provider") or acct_provider or PROVIDER_OPENCODE)
-            cur = conn.execute(
-                "SELECT 1 FROM usage_records WHERE usg_id = ?", (rec["usg_id"],)
+        rows = [
+            (
+                rec["usg_id"], rec["created_at"], rec["model"],
+                rec.get("provider") or acct_provider or PROVIDER_OPENCODE,
+                rec["input_tokens"], rec["output_tokens"], rec["reasoning_tokens"],
+                rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
+                rec["cache_write_1h_tokens"], rec["cost_raw"], rec["cost_usd"],
+                rec.get("key_id"), rec.get("session_id"), rec.get("plan"),
+                synced_at, aid,
+                # local_date 由 SQLite 按本地时区从 created_at 派生 (末位绑定)
+                rec["created_at"],
             )
-            existed = cur.fetchone() is not None
-            conn.execute(
-                stmt,
-                (
-                    rec["usg_id"], rec["created_at"], rec["model"], rec_provider,
-                    rec["input_tokens"], rec["output_tokens"], rec["reasoning_tokens"],
-                    rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
-                    rec["cache_write_1h_tokens"], rec["cost_raw"], rec["cost_usd"],
-                    rec.get("key_id"), rec.get("session_id"), rec.get("plan"),
-                    synced_at, aid,
-                ),
+            for rec in records
+        ]
+        # 新增数 = 批内去重后不在库中的 usg_id 数 (与旧逐条实现的计数语义一致:
+        # 批内重复的 id 只有首次计入).
+        ids = {r[0] for r in rows}
+        existing: set[str] = set()
+        id_list = list(ids)
+        # SQLITE_MAX_VARIABLE_NUMBER 老版本为 999 — 分片查询避免超限
+        for start in range(0, len(id_list), 500):
+            chunk = id_list[start:start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            existing.update(
+                row["usg_id"]
+                for row in conn.execute(
+                    f"SELECT usg_id FROM usage_records WHERE usg_id IN ({placeholders})", chunk
+                )
             )
-            if not existed:
-                inserted += 1
+        conn.executemany(stmt, rows)
         conn.commit()
+        inserted = len(ids - existing)
     except Exception:
         conn.rollback()
         raise
@@ -954,8 +1073,9 @@ def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = 
     stmt = (
         "INSERT INTO usage_charts (account_id, model, provider, time_bucket, requests,"
         " input_cost, output_cost, cache_cost, total_cost, credits_total,"
-        " tokens_in, tokens_out, tokens_total, cache_read_tokens, cache_creation_tokens, synced_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " tokens_in, tokens_out, tokens_total, cache_read_tokens, cache_creation_tokens,"
+        " synced_at, local_date)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date(?, 'localtime'))"
         " ON CONFLICT(account_id, model, time_bucket) DO UPDATE SET"
         " provider = excluded.provider, requests = excluded.requests,"
         " input_cost = excluded.input_cost, output_cost = excluded.output_cost,"
@@ -964,13 +1084,13 @@ def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = 
         " tokens_out = excluded.tokens_out, tokens_total = excluded.tokens_total,"
         " cache_read_tokens = excluded.cache_read_tokens,"
         " cache_creation_tokens = excluded.cache_creation_tokens,"
-        " synced_at = excluded.synced_at"
+        " synced_at = excluded.synced_at, local_date = excluded.local_date"
     )
     try:
         conn.execute("BEGIN")
-        for r in rows:
-            conn.execute(
-                stmt,
+        conn.executemany(
+            stmt,
+            [
                 (
                     aid, r["model"], r.get("provider") or "", r["time_bucket"],
                     r.get("requests") or 0, r.get("input_cost") or 0,
@@ -979,8 +1099,12 @@ def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = 
                     r.get("tokens_in") or 0, r.get("tokens_out") or 0,
                     r.get("tokens_total") or 0, r.get("cache_read_tokens") or 0,
                     r.get("cache_creation_tokens") or 0, synced_at,
-                ),
-            )
+                    # local_date 由 SQLite 从 time_bucket 按本地时区派生 (末位绑定)
+                    r["time_bucket"],
+                )
+                for r in rows
+            ],
+        )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1417,8 +1541,10 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
 
 
 _PERIOD_CLAUSES = {
+    # local_date 为写入时落库的本地日 (见 _init_schema 迁移 6), 可直接走
+    # idx_usage_account_localdate; 原先的 substr(datetime(...,'localtime')) 无法用索引.
     "5h": "datetime(created_at) >= datetime('now', '-5 hours')",
-    "today": "substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')",
+    "today": "local_date = date('now', 'localtime')",
 }
 
 
@@ -1473,9 +1599,7 @@ def _charts_period_where(period: str, account_id: int) -> tuple[str, list[Any]]:
     if period == "5h":
         clauses.append("datetime(time_bucket) >= datetime('now', '-5 hours')")
     elif period == "today":
-        clauses.append(
-            "substr(datetime(time_bucket, 'localtime'), 1, 10) = date('now', 'localtime')"
-        )
+        clauses.append("local_date = date('now', 'localtime')")
     elif period == "month":
         start = monthly_cycle_start(account_id)
         if start:
@@ -1626,7 +1750,7 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
     if _use_charts_stats(aid):
         rows = get_db().execute(
             """
-            SELECT substr(datetime(time_bucket, 'localtime'), 1, 10) AS date,
+            SELECT local_date AS date,
                    SUM(tokens_in) AS total_input_tokens,
                    SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
                    0 AS total_reasoning_tokens,
@@ -1637,8 +1761,8 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
                    SUM(requests) AS request_count
             FROM usage_charts
             WHERE account_id = ?
-              AND substr(datetime(time_bucket, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
-            GROUP BY substr(datetime(time_bucket, 'localtime'), 1, 10)
+              AND local_date >= date('now', 'localtime', ?)
+            GROUP BY local_date
             ORDER BY date ASC
             """,
             (aid, f"-{days} days"),
@@ -1646,7 +1770,7 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
     else:
         rows = get_db().execute(
             """
-            SELECT substr(datetime(created_at, 'localtime'), 1, 10) AS date,
+            SELECT local_date AS date,
                    SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
                    SUM(input_tokens) AS uncached_input_tokens,
                    SUM(reasoning_tokens) AS total_reasoning_tokens,
@@ -1657,8 +1781,8 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
                    COUNT(*) AS request_count
             FROM usage_records
             WHERE account_id = ?
-              AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
-            GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
+              AND local_date >= date('now', 'localtime', ?)
+            GROUP BY local_date
             ORDER BY date ASC
             """,
             (aid, f"-{days} days"),
@@ -1716,6 +1840,8 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
 def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """今日 24 小时趋势: 每小时 输入/输出/推理 (本地时区, 无数据补 0)."""
     aid = _resolve_account_id(account_id)
+    # 日界过滤走 local_date 索引; 小时分组仍需对时间列取 strftime (无法索引, 但
+    # 行数已被 local_date 收敛到当天).
     if _use_charts_stats(aid):
         rows = get_db().execute(
             """
@@ -1725,7 +1851,7 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
                    0 AS reasoning
             FROM usage_charts
             WHERE account_id = ?
-              AND substr(datetime(time_bucket, 'localtime'), 1, 10) = date('now', 'localtime')
+              AND local_date = date('now', 'localtime')
             GROUP BY h
             """,
             (aid,),
@@ -1739,7 +1865,7 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
                    SUM(reasoning_tokens) AS reasoning
             FROM usage_records
             WHERE account_id = ?
-              AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
+              AND local_date = date('now', 'localtime')
             GROUP BY h
             """,
             (aid,),
