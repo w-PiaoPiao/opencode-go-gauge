@@ -1,5 +1,11 @@
 # macOS 双架构自动构建: 推送 v*-macos tag 时触发, 构建产物自动附到同名 release.
-# arm64 = Apple Silicon (macos-14), x86_64 = Intel (macos-13).
+# arm64 = Apple Silicon (macos-14), x86_64 = Intel (macos-15-intel).
+#
+# 注: Intel 构建原用 macos-13, 该镜像已从 GitHub 退役 —— 标签失效后 job 会
+# 一直排队等 runner 直到 24h 上限被取消, 导致 release 步骤从不执行、
+# 整个 macOS release 静默缺失 (v2.1.0b/v2.1.0c 均只发出 arm64 包)。
+# 改为 macos-15-intel; 并显式设置 timeout-minutes, 让未来的标签失效在
+# 45 分钟内失败而不是挂满 24h。
 name: release-macos
 
 on:
@@ -17,9 +23,10 @@ jobs:
         include:
           - os: macos-14
             arch: arm64
-          - os: macos-13
+          - os: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +50,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -54,8 +62,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          # v1.0.3-macos -> 资产命名 GoGauge-v1.0.3-macos-arm64.zip / -x86_64.zip
+          # v2.1.0d-macos -> 资产命名 GoGauge-v2.1.0d-macos-arm64.zip / -x86_64.zip
           VER="${TAG#v}"; VER="${VER%-macos}"
+          # 双架构缺一不可: 某个 arch 构建失败时在此显式报错, 避免再次发出
+          # 只有 arm64 的"半成品" release 而无人察觉
+          for a in arm64 x86_64; do
+            [ -f "GoGauge-$a.zip" ] || { echo "::error::缺少 $a 构建产物"; exit 1; }
+          done
           mv GoGauge-arm64.zip   "GoGauge-v${VER}-macos-arm64.zip"
           mv GoGauge-x86_64.zip  "GoGauge-v${VER}-macos-x86_64.zip"
           ls -l
