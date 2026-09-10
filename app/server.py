@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from email import utils as email_utils
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -107,10 +109,13 @@ def _sync_progress_snapshot() -> dict[str, Any]:
 
 
 def _set_phase(phase: str, message: str = "") -> None:
+    # 只有用量同步参与 running 状态机. 配额刷新 (见 _ensure_quota_async) 是独立的
+    # 非阻塞后台线程, 刻意不改 _sync_state: 否则会与 sync_usage 的锁语义打架,
+    # 让 UI 误以为同步一直在跑.
     with _sync_lock:
         _sync_state["phase"] = phase
         _sync_state["message"] = message
-        _sync_state["running"] = phase in ("quota", "usage")
+        _sync_state["running"] = phase == "usage"
 
 
 # ---------------------------------------------------------------------------
@@ -187,20 +192,106 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
 def _fetch_usage_batch(
     token: str, workspace_id: str, pages: list[int]
 ) -> dict[int, Any]:
-    """并发拉取多页 (opencode 页式), 返回 {page: records | Exception}."""
+    """并发拉取多页 (opencode 页式), 返回 {page: records | Exception}.
+
+    复用模块级线程池: 旧实现每批新建 ThreadPoolExecutor, 全量同步最多 400 批,
+    线程反复创建/销毁的开销可观. 池按需惰性创建, 并在进程退出时由
+    _shutdown_fetch_pool 关闭 (非守护线程会阻塞解释器退出).
+    """
     results: dict[int, Any] = {}
-    with ThreadPoolExecutor(max_workers=FETCH_BATCH) as executor:
-        futures = {
-            executor.submit(fetch_usage_page, token, workspace_id, p): p
-            for p in pages
-        }
-        for future in as_completed(futures):
-            page = futures[future]
-            try:
-                results[page] = future.result()
-            except Exception as exc:  # noqa: BLE001
-                results[page] = exc
+    executor = _get_fetch_pool()
+    futures = {
+        executor.submit(fetch_usage_page, token, workspace_id, p): p
+        for p in pages
+    }
+    for future in as_completed(futures):
+        page = futures[future]
+        try:
+            results[page] = future.result()
+        except Exception as exc:  # noqa: BLE001
+            results[page] = exc
     return results
+
+
+_fetch_pool: Optional[ThreadPoolExecutor] = None
+_fetch_pool_lock = threading.Lock()
+
+
+def _get_fetch_pool() -> ThreadPoolExecutor:
+    global _fetch_pool
+    with _fetch_pool_lock:
+        if _fetch_pool is None:
+            _fetch_pool = ThreadPoolExecutor(
+                max_workers=FETCH_BATCH, thread_name_prefix="gousage-fetch"
+            )
+        return _fetch_pool
+
+
+def _shutdown_fetch_pool() -> None:
+    global _fetch_pool
+    with _fetch_pool_lock:
+        if _fetch_pool is not None:
+            _fetch_pool.shutdown(wait=False, cancel_futures=True)
+            _fetch_pool = None
+
+
+def _max_pages_for(mode: str) -> int:
+    """全量/增量的页数上限 (两种 provider 共用, 避免各自定义漂移)."""
+    return MAX_FULL_PAGES if mode == "full" else INCREMENTAL_PAGES
+
+
+def _window_boundary_hit(records: Any, mode: str, window_days: Optional[int]) -> bool:
+    """全量同步时判断本页是否已越过同步范围边界 (最早记录早于 今天-window_days).
+
+    该页整页保留后再停止: 保证边界附近不丢数据, 又不继续向更早翻页.
+    """
+    if mode != "full" or window_days is None:
+        return False
+    earliest = min((r.created_at for r in records), default="")
+    if not earliest:
+        return False
+    try:
+        et = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    return et < datetime.now(timezone.utc) - timedelta(days=window_days)
+
+
+def _incremental_done(inserted: int, empty_batches: int, mode: str) -> tuple[bool, int]:
+    """增量模式的停止判定: 连续两批 0 新增 (全是旧数据) 即认为已追平.
+
+    Returns: (是否停止, 更新后的 empty_batches 计数)
+    """
+    if mode == "incremental" and inserted == 0:
+        empty_batches += 1
+        return empty_batches >= 2, empty_batches
+    return False, 0
+
+
+def _finish_sync(
+    account_id: int,
+    total_inserted: int,
+    pages: int,
+    *,
+    failed_pages: int = 0,
+    charts_ok: bool = True,
+) -> dict[str, Any]:
+    """两种 provider 共用的收尾: 按失败维度写状态并构造返回体.
+
+    统一 partial 语义 (此前 opencode 报 partial, commandcode 分支另有措辞,
+    且失败信息不一致), 保证前端看到同一种状态形状.
+    """
+    if failed_pages:
+        msg = f"完成, 但 {failed_pages} 页拉取失败 (数据不完整, 可再次全量同步补全)"
+        db.update_sync_state("partial", msg, total_inserted, account_id)
+        return {"ok": True, "partial": True, "failed_pages": failed_pages,
+                "inserted": total_inserted, "pages": pages}
+    if not charts_ok:
+        msg = "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
+        db.update_sync_state("partial", msg, total_inserted, account_id)
+        return {"ok": True, "partial": True, "inserted": total_inserted, "pages": pages}
+    db.update_sync_state("ok", None, total_inserted, account_id)
+    return {"ok": True, "inserted": total_inserted, "pages": pages}
 
 
 def _sync_one_account(
@@ -234,7 +325,7 @@ def _sync_one_account(
             return {"ok": False, "error": str(exc)}
 
         total_inserted = 0
-        max_pages = MAX_FULL_PAGES if mode == "full" else INCREMENTAL_PAGES
+        max_pages = _max_pages_for(mode)
         page = 0
         empty_batches = 0
         failed_pages = 0
@@ -246,9 +337,9 @@ def _sync_one_account(
                 _sync_state["page"] = page
             results = _fetch_usage_batch(token_str, workspace_id, batch_pages)
 
-            batch_inserted = 0
             batch_full_pages = 0
             batch_failed = 0
+            batch_inserted = 0
             for p in sorted(results):
                 result = results[p]
                 if isinstance(result, Exception):
@@ -256,18 +347,8 @@ def _sync_one_account(
                     continue
                 if not result:
                     continue  # 空页: 数据到底
-                # 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 → 该页整页保留后停止
-                if mode == "full" and window_days is not None:
-                    earliest = min((r.created_at for r in result), default="")
-                    if earliest:
-                        try:
-                            from datetime import datetime, timedelta, timezone
-                            et = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
-                            boundary = datetime.now(timezone.utc) - timedelta(days=window_days)
-                            if et < boundary:
-                                window_boundary_reached = True
-                        except (ValueError, TypeError):
-                            pass
+                if _window_boundary_hit(result, mode, window_days):
+                    window_boundary_reached = True
                 inserted = db.insert_usage_records(
                     [r.to_db_dict() for r in result], account_id
                 )
@@ -285,7 +366,9 @@ def _sync_one_account(
             if batch_failed:
                 failed_pages += batch_failed
                 if mode == "incremental":
-                    msg = "网络请求失败 (IncompleteRead/超时)"
+                    # 增量模式下一页失败即中止 (下次同步续拉); 全量模式只记 partial,
+                    # 继续翻页尽量补齐
+                    msg = f"{batch_failed} 页请求失败"
                     _set_phase("error", f"[{name}] 第 {page - FETCH_BATCH + 1} 页拉取失败: {msg}")
                     db.update_sync_state("error", msg, total_inserted, account_id)
                     return {"ok": False, "error": msg, "partial_inserted": total_inserted}
@@ -293,13 +376,9 @@ def _sync_one_account(
             # 本批没有任何满页 → 到底了
             if batch_full_pages == 0:
                 break
-            # 增量模式: 连续两批全部是旧数据 (插入 0 条) → 停止
-            if mode == "incremental" and batch_inserted == 0:
-                empty_batches += 1
-                if empty_batches >= 2:
-                    break
-            else:
-                empty_batches = 0
+            stop, empty_batches = _incremental_done(batch_inserted, empty_batches, mode)
+            if stop:
+                break
 
         # 按同步范围裁剪窗口外记录 (与本次新增数独立)
         if window_days is not None:
@@ -315,13 +394,7 @@ def _sync_one_account(
         except Exception:  # noqa: BLE001
             pass
 
-        if failed_pages:
-            msg = f"完成, 但 {failed_pages} 页拉取失败 (数据不完整, 可再次全量同步补全)"
-            db.update_sync_state("partial", msg, total_inserted, account_id)
-            return {"ok": True, "partial": True, "failed_pages": failed_pages,
-                    "inserted": total_inserted, "pages": page}
-        db.update_sync_state("ok", None, total_inserted, account_id)
-        return {"ok": True, "inserted": total_inserted, "pages": page}
+        return _finish_sync(account_id, total_inserted, page, failed_pages=failed_pages)
     except Exception as exc:  # noqa: BLE001
         db.update_sync_state("error", str(exc), 0, account_id)
         return {"ok": False, "error": str(exc)}
@@ -335,11 +408,10 @@ def _sync_one_cc_account(
     pages = 0
     cursor: Optional[str] = None
     empty_batches = 0
-    failed = False
+    failed_pages = 0
     window_boundary_reached = False
-    from datetime import datetime, timedelta, timezone
 
-    max_pages = MAX_FULL_PAGES if mode == "full" else INCREMENTAL_PAGES
+    max_pages = _max_pages_for(mode)
     try:
         while pages < max_pages:
             with _sync_lock:
@@ -351,21 +423,13 @@ def _sync_one_cc_account(
                     _set_phase("error", f"[{name}] 第 {pages + 1} 页拉取失败: {exc}")
                     db.update_sync_state("error", str(exc), total_inserted, account_id)
                     return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
-                failed = True
+                failed_pages += 1
                 break
             if not records:
                 break  # 没有更多数据
 
-            if mode == "full" and window_days is not None:
-                earliest = min((r.created_at for r in records), default="")
-                if earliest:
-                    try:
-                        et = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
-                        boundary = datetime.now(timezone.utc) - timedelta(days=window_days)
-                        if et < boundary:
-                            window_boundary_reached = True
-                    except (ValueError, TypeError):
-                        pass
+            if _window_boundary_hit(records, mode, window_days):
+                window_boundary_reached = True
 
             inserted = db.insert_usage_records(
                 [r.to_db_dict() for r in records], account_id
@@ -380,13 +444,9 @@ def _sync_one_cc_account(
             # 游标翻页: 无 next_cursor 即到底
             if not next_cursor:
                 break
-            # 增量模式: 连续两批 0 新增 (全是旧数据) → 停止
-            if mode == "incremental" and inserted == 0:
-                empty_batches += 1
-                if empty_batches >= 2:
-                    break
-            else:
-                empty_batches = 0
+            stop, empty_batches = _incremental_done(inserted, empty_batches, mode)
+            if stop:
+                break
             cursor = next_cursor
 
         # 按同步范围裁剪窗口外记录
@@ -405,16 +465,10 @@ def _sync_one_cc_account(
         except Exception:  # noqa: BLE001
             charts_ok = False
 
-        if failed or not charts_ok:
-            msg = (
-                "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
-                if failed
-                else "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
-            )
-            db.update_sync_state("partial", msg, total_inserted, account_id)
-            return {"ok": True, "partial": True, "inserted": total_inserted, "pages": pages}
-        db.update_sync_state("ok", None, total_inserted, account_id)
-        return {"ok": True, "inserted": total_inserted, "pages": pages}
+        return _finish_sync(
+            account_id, total_inserted, pages,
+            failed_pages=failed_pages, charts_ok=charts_ok,
+        )
     except Exception as exc:  # noqa: BLE001
         db.update_sync_state("error", str(exc), total_inserted, account_id)
         return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
@@ -446,25 +500,32 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
 
     try:
         total_inserted = 0
-        any_error = ""
+        errors: list[str] = []
         partial = False
         pages = 0
+        # 单账号失败不中断整轮同步: 此前 incremental 直接 return, 导致首个
+        # token 过期的账号会永久阻塞其后所有账号的自动同步 (定时器每轮撞同一处).
         for aid, name in targets:
             result = _sync_one_account(aid, name, mode, window_days)
             total_inserted += int(result.get("inserted") or 0)
             pages += int(result.get("pages") or 0)
             if not result.get("ok"):
-                any_error = result.get("error") or "同步失败"
-                if mode == "incremental":
-                    _set_phase("error", f"[{name}] {any_error}")
-                    return {"ok": False, "error": any_error, "partial_inserted": total_inserted}
+                errors.append(f"[{name}] {result.get('error') or '同步失败'}")
             if result.get("partial"):
                 partial = True
 
-        if partial or (mode != "incremental" and any_error):
-            msg = "部分账号同步异常" if any_error else "完成, 但部分页面拉取失败"
+        any_error = "; ".join(errors)
+        # 全部账号都失败才算整轮失败; 任一成功即为 partial (前端展示警告但不报错)
+        if errors and len(errors) == len(targets):
+            _set_phase("error", any_error)
+            return {"ok": False, "error": any_error, "partial_inserted": total_inserted}
+        if partial or errors:
+            msg = "部分账号同步异常" if errors else "完成, 但部分页面拉取失败"
             _set_phase("done", msg)
-            return {"ok": True, "partial": True, "inserted": total_inserted, "pages": pages}
+            return {
+                "ok": True, "partial": True, "inserted": total_inserted,
+                "pages": pages, "errors": errors,
+            }
         _set_phase("done", f"同步完成, 新增 {total_inserted} 条")
         return {"ok": True, "inserted": total_inserted, "pages": pages}
     except Exception as exc:  # noqa: BLE001
@@ -568,6 +629,32 @@ def _static_response(handler: BaseHTTPRequestHandler, rel: str) -> None:
         return
     ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
     try:
+        st = os.stat(path)
+    except OSError:
+        handler.send_error(404)
+        return
+    # 弱校验: 大小 + mtime 纳秒 (文件极小概率同刻变更, 对本地静态资源足够).
+    # 原先恒定 no-cache 且无校验器, 每次窗口刷新都要重下 app.js/图表库.
+    etag = f'W/"{st.st_size:x}-{st.st_mtime_ns:x}"'
+    last_modified = email_utils.formatdate(st.st_mtime, usegmt=True)
+    if handler.headers.get("If-None-Match") == etag:
+        handler.send_response(304)
+        handler.send_header("ETag", etag)
+        handler.send_header("Cache-Control", "no-cache")
+        handler.end_headers()
+        return
+    ims = handler.headers.get("If-Modified-Since")
+    if ims and not handler.headers.get("If-None-Match"):
+        try:
+            if email_utils.parsedate_to_datetime(ims).timestamp() >= int(st.st_mtime):
+                handler.send_response(304)
+                handler.send_header("ETag", etag)
+                handler.send_header("Cache-Control", "no-cache")
+                handler.end_headers()
+                return
+        except (TypeError, ValueError):
+            pass  # 非法日期头: 按普通 GET 处理
+    try:
         with open(path, "rb") as fh:
             body = fh.read()
     except OSError:
@@ -576,7 +663,10 @@ def _static_response(handler: BaseHTTPRequestHandler, rel: str) -> None:
     handler.send_response(200)
     handler.send_header("Content-Type", ctype)
     handler.send_header("Content-Length", str(len(body)))
+    # no-cache = 允许缓存但每次需校验 (304 时无 body, 省下重复传输)
     handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("ETag", etag)
+    handler.send_header("Last-Modified", last_modified)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -659,6 +749,9 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         slot = _quota_cache.get(active_id) or {}
         quota = slot.get("data") if token else None
         account = db.get_account()
+        # 显式透传 active_id: 各聚合内部若收到 None 会各自重跑
+        # get_active_account_id() (settings 读取 + JSON 解析 + MIN(id) 查询),
+        # 一次 dashboard 会重复 7 次.
         _json_response(
             handler,
             {
@@ -668,13 +761,13 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "accounts_total": db.count_accounts(),
                 "accounts_logged_in": db.count_logged_in_accounts(),
                 "quota": quota,
-                "totals": db.totals(period),
-                "today": db.totals("today"),
-                "daily": db.daily_stats(7),  # 每日趋势固定显示近 7 天
-                "trend": db.daily_stats(30),  # 用量趋势 (费用/请求双轴)
-                "today_trend": db.today_trend(),  # 今日 24 小时趋势
-                "models": db.model_stats(period),
-                "sync": db.get_sync_state(),
+                "totals": db.totals(period, active_id),
+                "today": db.totals("today", active_id),
+                "daily": db.daily_stats(7, active_id),  # 每日趋势固定显示近 7 天
+                "trend": db.daily_stats(30, active_id),  # 用量趋势 (费用/请求双轴)
+                "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势
+                "models": db.model_stats(period, active_id),
+                "sync": db.get_sync_state(active_id),
                 "progress": _sync_progress_snapshot(),
                 "range": range_param,
                 "exchange_rate": {"usd_cny": _fetch_usd_cny(), "currency": "CNY"},
@@ -1041,6 +1134,8 @@ def start_server(host: str = "127.0.0.1", port: int = 0) -> tuple[str, int]:
 
 def stop_server() -> None:
     global _server
+    # 复用型取数线程池是非守护线程, 不关闭会阻塞解释器退出
+    _shutdown_fetch_pool()
     if _server:
         _server.shutdown()
         _server.server_close()

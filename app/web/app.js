@@ -598,7 +598,10 @@ function chartModel(models) {
   if (cModel) cModel.destroy();
   if (!models || !models.length) { cModel = null; $("mr-list").innerHTML = ""; return; }
   const dim = state.modelDim;
-  const getVal = (m) => (dim === "input" ? m.uncached_input_tokens : dim === "output" ? m.total_output_tokens : m.total_cost_usd);
+  // 输入维度取「含缓存命中的总输入」(未命中 + 缓存命中): 缓存命中通常占绝大多数,
+  // 只算未命中会让排行与环形图数值严重偏低 (对应 model_stats.total_input_tokens)
+  const getVal = (m) => (dim === "input" ? m.total_input_tokens : dim === "output" ? m.total_output_tokens : m.total_cost_usd);
+  // 金额只在成本维度出现; 输入/输出显示 Token 数 (fmtTokens 自带 B/M/k 简写)
   const fmt = dim === "cost" ? (v) => fmtMoney(v) : fmtTokens;
   const sorted = [...models].sort((a, b) => getVal(b) - getVal(a));
   const top = sorted.slice(0, 6);
@@ -623,7 +626,7 @@ function chartModel(models) {
     <div class="mr-item"><span class="mr-rank">#${i + 1}</span>
     <span class="mr-name">${modelIcon(m.model)}<span class="txt">${escapeHtml(m.model)}</span></span>
     <span class="mr-sub">${fmtInt(m.request_count)} · ${t("hitRate")} ${m.hit_rate}%</span>
-    <span class="mr-cost">${fmtMoney(m.total_cost_usd)}</span></div>`).join("");
+    <span class="mr-val" title="${escapeHtml(fmtInt(getVal(m)))}">${fmt(getVal(m))}</span></div>`).join("");
 }
 
 /* ---------------- 统计页: 用量趋势 ---------------- */
