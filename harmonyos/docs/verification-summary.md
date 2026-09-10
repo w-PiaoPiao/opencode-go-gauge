@@ -8,13 +8,26 @@
 | --- | --- | --- |
 | Debug 构建 | `./scripts/build.sh hap` (环境探测见脚本) | ✅ BUILD SUCCESSFUL → `entry/build/default/outputs/default/entry-default-unsigned.hap` |
 | Release 构建 | `./hvigorw --mode module -p product=default assembleHap -p buildMode=release` | ✅ BUILD SUCCESSFUL (未混淆, 签名待注入) |
-| 本地单元测试 | `./scripts/build.sh test` | ✅ **Tests run: 21, Failure: 0, Error: 0, Pass: 21, Ignore: 0** |
+| 本地单元测试 | `./hvigorw --mode module -p module=entry@default -p product=default test --no-daemon` | ✅ **Tests run: 28, Failure: 0, Error: 0, Pass: 28, Ignore: 0** (结果文件 `entry/.test/default/intermediates/test/coverage_data/test_result.txt`) |
 | 签名注入脚本 | `HAP_* 环境变量 bash scripts/inject-signing.sh` | ✅ 冒烟通过 (hex 编码 `abc123456`→`616263313233343536`, 已还原配置) |
 | Git 卫生 | `git ls-files` | ✅ 56 个 harmonyos 文件入库, 无 oh_modules/.test/构建产物混入 |
 | 工程对账 | M1–M6 里程碑 | 代码/材料/CI 全部落库 (见本文件 §3) |
 
-单元测试覆盖: QuotaParser(4) / UsageParser(3) / Fmt(7) / 活跃账号策略(7) ——
-与安卓版用例逐条对应 (GET/POST 双格式、null→0、字段顺序双兼容、钳制、格式化边界)。
+单元测试覆盖: QuotaParser(4) / UsageParser(3) / Fmt(7) / 活跃账号策略(7)。
+
+> 活跃账号策略的 7 个用例此前在测试文件内**复制了一份 resolveActive 实现**，
+> 生产逻辑漂移时测试仍会通过。现已改为直接调用生产代码
+> `SyncDao.resolveActive`（该静态方法为此改为公开），这 7 个用例因此首次真正
+> 覆盖了发布逻辑。
+
+## 1.1 尚未实现的能力 (勿按"功能一致"理解)
+
+- **Command Code / GOAT provider** —— 无 `provider` 列、无 `usage_charts` 聚合表，
+  登录域名与 cookie 名硬编码为 opencode。桌面/安卓均已支持。
+- **账户总览面板** —— 跨账号聚合 KPI 与 7 日趋势对比。
+- **`loginMode === 'add'` 的账号去重** —— 依赖 `token_fp` 列，鸿蒙 schema 无此列。
+
+上述任一项落地时，必须同时递增 `AppDb.SCHEMA_VERSION` 并补 `migrate()` 分支。
 
 ## 2. 运行验证交接 (需 DevEco GUI + 华为账号)
 

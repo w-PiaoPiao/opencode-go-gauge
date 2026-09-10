@@ -1,11 +1,27 @@
 # GoGauge HarmonyOS NEXT — OpenCode Go 用量仪表盘（鸿蒙版）
 
-与桌面版（`app/`，Python+pywebview）和安卓版（`android/`，Kotlin+Compose）功能一致的
 鸿蒙 NEXT 原生实现：**ArkTS + ArkUI（Stage 模型）**，单工程一多开发，同时适配
 **手机/平板**（对标安卓版）与 **PC/2in1**（对标 Windows 版）两种形态。
 
-> 解析器/格式化/SQL 与本仓库桌面版、安卓版 1:1 移植；
+> 解析器/格式化/SQL 与桌面版、安卓版 1:1 移植；
 > 若 opencode.ai 接口格式变化，需同步修改三处（Python / Kotlin / ArkTS）。
+
+## 与桌面/安卓的差异（当前实现范围）
+
+opencode 单 provider 的只读路径已完整（配额、概览、统计、记录、会话、多账号切换、
+增量同步）。以下能力**尚未实现**，不要按"三端功能一致"理解：
+
+| 能力 | 桌面 | 安卓 | 鸿蒙 |
+| --- | :---: | :---: | :---: |
+| Command Code / GOAT provider（含 `usage_charts` 聚合） | ✅ | ✅ | ❌ 未实现（schema 无 provider 列） |
+| 账户总览面板（跨账号聚合） | ✅ | ✅ | ❌ 未实现 |
+| 全量同步入口 | ✅ | ✅ | ✅ 设置页「立即全量同步」 |
+| 手动/自动同步 | ✅ | ✅ | ✅ |
+| 双主题 | ✅ | ✅ | ✅（首页/统计/记录/设置均走 Theme 令牌） |
+
+自定义 provider 见 `data/db/AppDb.ets` 的 `SCHEMA_VERSION` / `migrate()`：结构变更
+必须递增版本号并补迁移分支（历史版本曾无版本管理，只能靠 `CREATE TABLE IF NOT EXISTS`
+的巧合，已存在的库不会补新列）。
 
 ## 技术栈与工具链
 

@@ -29,6 +29,7 @@ export struct SettingsPage {
   @State private renamingId: number = -1
   @State private renameText: string = ''
   @State private updateMsg: string = ''
+  @State private syncing: boolean = false
   @Prop @Watch('onRefresh') refreshToken: number = 0
 
   aboutToAppear(): void {
@@ -37,6 +38,27 @@ export struct SettingsPage {
 
   onRefresh(): void {
     this.loadAll()
+  }
+
+  /**
+   * 手动全量同步.
+   *
+   * 此前应用内没有任何入口能触发 'full' 模式 (三处调用点全传 'incremental'),
+   * 而增量被 maxPages=5 硬性截断 (5 页 × 50 条 = 250 条最新记录) ——
+   * 超过 250 条的历史数据永远拉不回来, 同步范围设置也因此形同虚设.
+   */
+  private async runFullSync(): Promise<void> {
+    if (this.syncing) {
+      return
+    }
+    this.syncing = true
+    try {
+      this.updateMsg = await Repo.get().syncAll('full')
+    } catch (e) {
+      this.updateMsg = I18n.t('sync_fail')
+    } finally {
+      this.syncing = false
+    }
   }
 
   private async loadAll(): Promise<void> {
@@ -79,7 +101,7 @@ export struct SettingsPage {
       title: I18n.t('settings_delete'),
       message: I18n.t('settings_delete_confirm'),
       buttons: [
-        { text: I18n.t('cancel'), color: '#888888' },
+        { text: I18n.t('cancel'), color: Theme.sub() },
         { text: I18n.t('settings_delete'), color: Theme.danger() },
       ],
     })
@@ -145,6 +167,7 @@ export struct SettingsPage {
                 if (a.id === this.activeId) {
                   Text(I18n.t('current'))
                     .fontSize(11)
+                    // 强调色徽标上的白字: 与主题无关
                     .fontColor('#FFFFFF')
                     .padding({ left: 8, right: 8, top: 3, bottom: 3 })
                     .backgroundColor(Theme.accent())
@@ -245,6 +268,22 @@ export struct SettingsPage {
               this.saveSettings()
             })
             .width(120)
+        }
+        .width('100%')
+
+        // 手动全量同步: 增量同步上限 250 条, 更早的历史只能靠这里补全
+        Row() {
+          Column({ space: 2 }) {
+            Text(I18n.t('sync_full')).fontSize(13).fontColor(Theme.text())
+            Text(I18n.t('sync_full_desc')).fontSize(11).fontColor(Theme.sub())
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+          Button(this.syncing ? I18n.t('sync_running') : I18n.t('sync'))
+            .fontSize(12)
+            .height(32)
+            .enabled(!this.syncing)
+          .onClick(() => { this.runFullSync() })
         }
         .width('100%')
       }

@@ -4,9 +4,11 @@
 import { Repo } from '../../data/repository/DashboardRepository'
 import { DashboardData, ModelStat } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
+import { AppPrefs } from '../../common/store/AppPrefs'
 import { KpiCard, ModelIcon, SectionCard } from '../components/Cards'
 import { I18n } from '../../common/i18n/I18n'
 import { DonutChart, TrendLine, TrendPointSeries } from '../components/Charts'
+import { Theme } from '../theme/Theme'
 
 interface TrendAgg {
   cost: number
@@ -29,6 +31,8 @@ export struct StatsPage {
   }
 
   private async load(): Promise<void> {
+    // 货币偏好此前只在设置页被读取: 这里不取的话, 选择 CNY 后金额仍按 USD 渲染
+    this.currency = AppPrefs.getCurrency()
     try {
       this.data = await Repo.get().loadDashboard('30d')
     } catch (e) {
@@ -36,6 +40,13 @@ export struct StatsPage {
     }
   }
 
+  /**
+   * 排行取值 (与饼图/桌面/Android 同口径):
+   * - input: **含缓存命中的总输入** (未命中 + 缓存命中); 缓存命中通常占绝大多数,
+   *   只取 uncachedInputTokens 会严重偏低
+   * - output: 总输出 token
+   * - cost: 金额
+   */
   private rankValue(m: ModelStat): number {
     if (this.sortBy === 'output') {
       return m.totalOutputTokens
@@ -44,6 +55,15 @@ export struct StatsPage {
       return m.totalInputTokens
     }
     return m.totalCostUsd
+  }
+
+  /** 排行主数值文案: 跟随当前维度 (cost 显示金额, 其余显示 Token 简写)。 */
+  private rankText(m: ModelStat): string {
+    if (this.sortBy === 'cost') {
+      return Fmt.money(m.totalCostUsd, this.currency, this.data !== null ? this.data.usdCny : 0)
+    }
+    const v = this.sortBy === 'output' ? m.totalOutputTokens : m.totalInputTokens
+    return Fmt.tokens(v)
   }
 
   private sortedModels(): ModelStat[] {
@@ -96,7 +116,7 @@ export struct StatsPage {
     Scroll() {
       Column({ space: 12 }) {
         if (this.data === null) {
-          Text(I18n.t('loading')).fontSize(14).fontColor('#999999').padding(24)
+          Text(I18n.t('loading')).fontSize(14).fontColor(Theme.sub()).padding(24)
         } else {
           SectionCard({ title: I18n.t('token_composition'), subtitle: I18n.t('days30') }) {
             Row({ space: 12 }) {
@@ -127,28 +147,32 @@ export struct StatsPage {
                   Column({ space: 2 }) {
                     Text(m.model)
                       .fontSize(13)
-                      .fontColor('#222222')
+                      .fontColor(Theme.text())
                       .maxLines(1)
                     Text(`${Fmt.int(m.requestCount)} ${I18n.t('req_unit')} · ${I18n.t('sessions')} ${Fmt.int(m.sessionCount)}`)
                       .fontSize(11)
-                      .fontColor('#999999')
+                      .fontColor(Theme.sub())
                   }
                   .alignItems(HorizontalAlign.Start)
                   .layoutWeight(1)
                   Column({ space: 2 }) {
-                    Text(Fmt.tokens(m.totalInputTokens + m.totalOutputTokens))
+                    // 主数值跟随维度: 输入/输出为 Token 简写 (Fmt.tokens 自带 k/M/B), 成本为金额
+                    Text(this.rankText(m))
                       .fontSize(13)
                       .fontWeight(FontWeight.Medium)
-                      .fontColor('#333333')
-                    Text(Fmt.money(m.totalCostUsd, this.currency, this.data!.usdCny))
+                      .fontColor(Theme.text())
+                      .maxLines(1)
+                    Text(`${I18n.t('hitRate')} ${m.hitRate.toFixed(1)}%`)
                       .fontSize(11)
-                      .fontColor('#888888')
+                      .fontColor(Theme.sub())
+                      .maxLines(1)
                   }
                   .alignItems(HorizontalAlign.End)
+                  .width(96)
                 }
                 .width('100%')
                 .padding(8)
-                .backgroundColor('#F8F9FC')
+                .backgroundColor(Theme.surfaceSoft())
                 .borderRadius(10)
               }, (m: ModelStat) => m.model)
             }
@@ -170,7 +194,7 @@ export struct StatsPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F2F3F7')
+    .backgroundColor(Theme.bg())
   }
 
   private sortLabel(): string {
@@ -187,7 +211,7 @@ export struct StatsPage {
   sortPill(key: string, label: string) {
     Text(label)
       .fontSize(12)
-      .fontColor(this.sortBy === key ? '#FFFFFF' : '#666666')
+      .fontColor(this.sortBy === key ? Theme.surface() : Theme.sub())
       .padding({ left: 10, right: 10, top: 4, bottom: 4 })
       .backgroundColor(this.sortBy === key ? '#3B82F6' : '#F0F0F0')
       .borderRadius(12)
@@ -202,11 +226,11 @@ export struct StatsPage {
       Circle({ width: 8, height: 8 }).fill(color)
       Text(label)
         .fontSize(12)
-        .fontColor('#666666')
+        .fontColor(Theme.sub())
       Blank()
       Text(Fmt.tokens(v))
         .fontSize(12)
-        .fontColor('#333333')
+        .fontColor(Theme.text())
     }
     .width(160)
   }
@@ -217,7 +241,7 @@ export struct StatsPage {
       Circle({ width: 8, height: 8 }).fill(color)
       Text(label)
         .fontSize(11)
-        .fontColor('#888888')
+        .fontColor(Theme.sub())
     }
   }
 

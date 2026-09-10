@@ -18,6 +18,8 @@ export struct AppRoot {
   @State private accountName: string = ''
   @State private syncing: boolean = false
   @State private syncMsg: string = ''
+  /** 登出回调: 由 Index 传入, 用于把根页面切回欢迎/登录门。 */
+  onLogout: () => void = () => {}
 
   aboutToAppear(): void {
     this.refreshAccount()
@@ -116,6 +118,9 @@ export struct AppRoot {
         .onClick(async () => {
           await Repo.get().logout()
           this.accountName = ''
+          // 回到未登录态: Index 的 loggedIn 只在 onPageShow 刷新, 如不主动
+          // 通知, 登出后会继续停留在仪表盘外壳 (且前台定时器还在跑 未登录 同步)
+          this.onLogout()
         })
     }
     .width('100%')

@@ -62,19 +62,14 @@ export class Login {
     if (url.length === 0) {
       return false
     }
-    // 仅做前缀/域名片段判断, 避免 URL 解析差异
-    if (url.startsWith(Login.OPENCODE_DOMAIN)) {
-      return true
-    }
-    const prefix = `${Login.OPENCODE_DOMAIN}/`
-    if (url.startsWith(prefix)) {
-      return true
-    }
-    const host: string = Login.hostOf(url)
+    // 必须先解析 host 再判断: 原先的 url.startsWith('https://opencode.ai')
+    // 会把 https://opencode.ai.evil.com/... 当成同域 (前缀匹配), 从而在
+    // 非 opencode 页面上启动 cookie 轮询. Android Login.kt 是先取 host 的.
+    const host: string = Login.hostOf(url).toLowerCase()
     if (host === 'opencode.ai') {
       return true
     }
-    return host.length > 0 && host.endsWith('.opencode.ai')
+    return host.endsWith('.opencode.ai')
   }
 
   private static hostOf(url: string): string {

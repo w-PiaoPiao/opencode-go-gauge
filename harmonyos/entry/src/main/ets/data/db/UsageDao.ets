@@ -233,12 +233,12 @@ export class UsageDao {
       [accountId.toString(), `-${clamped} days`],
     )
     const reader = new RowReader(rs)
-    const out: DailyStat[] = []
+    const byDate: Map<string, DailyStat> = new Map()
     while (reader.next()) {
       const hit = reader.getLong('cache_hit_tokens')
       const miss = reader.getLong('uncached_input_tokens')
       const hitRate = hit + miss > 0 ? hit / (hit + miss) * 100 : 0
-      out.push({
+      const stat: DailyStat = {
         date: reader.getStr('date'),
         totalInputTokens: reader.getLong('total_input_tokens'),
         uncachedInputTokens: miss,
@@ -249,10 +249,41 @@ export class UsageDao {
         totalCostUsd: reader.getDouble('total_cost_usd'),
         requestCount: reader.getLong('request_count'),
         hitRate: Math.round(hitRate * 100) / 100,
-      })
+      }
+      byDate.set(stat.date, stat)
     }
     reader.close()
+
+    // 连续日期补 0 (desktop db.daily_stats / Android UsageDao.dailyStats 同口径):
+    // 只返回有记录的天会让趋势图 x 轴压缩、缺天跳线
+    const out: DailyStat[] = []
+    const now = new Date()
+    for (let i = clamped; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
+      const key = `${d.getFullYear()}-${UsageDao.pad2(d.getMonth() + 1)}-${UsageDao.pad2(d.getDate())}`
+      const existing = byDate.get(key)
+      if (existing !== undefined) {
+        out.push(existing)
+      } else {
+        out.push({
+          date: key,
+          totalInputTokens: 0,
+          uncachedInputTokens: 0,
+          totalReasoningTokens: 0,
+          cacheHitTokens: 0,
+          cacheWriteTokens: 0,
+          totalOutputTokens: 0,
+          totalCostUsd: 0,
+          requestCount: 0,
+          hitRate: 0,
+        })
+      }
+    }
     return out
+  }
+
+  private static pad2(n: number): string {
+    return n < 10 ? `0${n}` : `${n}`
   }
 
   /** 今日 24 小时趋势 (零填充) —— db.today_trend (按账号)。 */

@@ -165,7 +165,13 @@ export class SyncDao {
   // 活跃账号 (ActiveAccountPolicy 移植)
   // ------------------------------------------------------------------
 
-  private static resolveActive(
+  /**
+   * 活跃账号解析: 优先已登录账号, 存储值失效时回退最小已登录 id。
+   *
+   * 公开 (非 private) 供单测直接调用 —— 此前测试文件内复制了一份同名实现,
+   * 生产逻辑漂移时测试仍会通过 (Android 侧测的是真实 ActiveAccountPolicy 对象)。
+   */
+  static resolveActive(
     storedActiveId: number | null, accounts: Array<[number, boolean]>,
   ): number {
     let loggedMin = 0
@@ -298,6 +304,8 @@ export class SyncDao {
     await AppDb.store().executeSql('DELETE FROM usage_records WHERE account_id = ?', [accountId.toString()])
     await AppDb.store().executeSql('DELETE FROM usage_sync_state WHERE account_id = ?', [accountId.toString()])
     await this.deleteAccountRow(accountId)
+    // 清理无主的周期/月度重置键 (desktop db.delete_account 同做法)
+    await this.settings().dropAccountKeys(accountId)
     const remaining = await this.countAccounts()
     const stored = await this.settings().readActiveAccountId()
     if (stored === accountId) {
@@ -321,6 +329,8 @@ export class SyncDao {
     await this.clearToken(aid, new Date().toISOString())
     await this.ensureStateRow(aid)
     await this.resetSyncStateForAccount(aid)
+    // 登出后周期数据不再有效, 一并清掉 (重新登录时会重新拉取)
+    await this.settings().dropAccountKeys(aid)
   }
 
   /** 重新登录语义: 更新活跃账号凭证并重置其增量游标。 */

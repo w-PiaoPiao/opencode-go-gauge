@@ -1,11 +1,14 @@
 /**
- * hypium 测试套件 —— Android 14 个 JUnit 用例的 ArkTS 移植:
+ * hypium 测试套件 —— Android JUnit 用例的 ArkTS 移植:
  * QuotaParser / UsageParser / Fmt / 活跃账号策略 (纯逻辑, 无 UI/设备依赖)。
  */
 import { describe, it, expect } from '@ohos/hypium'
 import { QuotaParser } from '../main/ets/data/remote/QuotaParser'
 import { UsageParser } from '../main/ets/data/remote/UsageParser'
 import { Fmt } from '../main/ets/common/util/Fmt'
+import { SyncDao } from '../main/ets/data/db/SyncDao'
+import { Login } from '../main/ets/common/auth/Login'
+import { UpdateApi } from '../main/ets/data/remote/UpdateApi'
 
 const QUOTA_HTML = `
 <html><body>
@@ -29,42 +32,12 @@ $R[1] = {id: "usg_abc123", timeCreated: $R[2] = new Date("2025-08-01T10:00:00.00
 $R[4] = {id:"usg_def456",timeCreated:$R[5]=new Date("2025-08-01T09:30:00.000Z"),model:"gpt-4o",provider:"openai",inputTokens:100,outputTokens:200,reasoningTokens:0,cacheReadTokens:0,cacheWrite5mTokens:0,cacheWrite1hTokens:0,cost:5000000,keyID:"key_2",sessionID:""};
 $R[6] = {id: "usg_ghi789", timeCreated: $R[7] = new Date("2025-08-01T08:00:00.000Z"), model: "glm-4", provider: "zhipu", inputTokens: null, outputTokens: 0, reasoningTokens: null, cacheReadTokens: 0, cacheWrite5mTokens: 0, cacheWrite1hTokens: 0, cost: 0, keyID: "", sessionID: ""};`
 
-/** 活跃账号解析策略 —— desktop db.get_active_account_id 决策逻辑 parity。 */
+/**
+ * 活跃账号解析策略 —— 直接调用生产实现 SyncDao.resolveActive。
+ * (此前这里复制了一份同名函数, 生产逻辑漂移时测试仍会通过。)
+ */
 function resolveActive(stored: number | null, pairs: Array<[number, boolean]>): number {
-  let loggedMin = 0
-  for (const a of pairs) {
-    if (a[1] && (loggedMin === 0 || a[0] < loggedMin)) {
-      loggedMin = a[0]
-    }
-  }
-  if (stored !== null && stored > 0) {
-    let row: [number, boolean] | null = null
-    for (const a of pairs) {
-      if (a[0] === stored) {
-        row = a
-        break
-      }
-    }
-    if (row !== null) {
-      if (row[1]) {
-        return stored
-      }
-      if (loggedMin !== 0) {
-        return loggedMin
-      }
-      return stored
-    }
-  }
-  if (loggedMin !== 0) {
-    return loggedMin
-  }
-  let fallback = 0
-  for (const a of pairs) {
-    if (fallback === 0 || a[0] < fallback) {
-      fallback = a[0]
-    }
-  }
-  return fallback
+  return SyncDao.resolveActive(stored, pairs)
 }
 
 export default function ggTest() {
@@ -225,6 +198,57 @@ $R[1] = {id: "usg_no_time", model: "x", inputTokens: 1, outputTokens: 1};`
 
     it('no_stored_no_logged_in_uses_min_any_id', 0, () => {
       expect(resolveActive(null, [[3, false], [8, false]])).assertEqual(3)
+    })
+  })
+
+  describe('LoginDomainTest', () => {
+    it('accepts_opencode_root_and_subdomains', 0, () => {
+      expect(Login.isOnOpencodeDomain('https://opencode.ai/workspace/x')).assertTrue()
+      expect(Login.isOnOpencodeDomain('https://app.opencode.ai/x')).assertTrue()
+    })
+
+    it('rejects_lookalike_host_prefix', 0, () => {
+      // 回归: 旧实现用 url.startsWith('https://opencode.ai') 判前缀,
+      // 会把该钓鱼域名当成同域并启动 cookie 轮询
+      expect(Login.isOnOpencodeDomain('https://opencode.ai.evil.com/x')).assertFalse()
+      expect(Login.isOnOpencodeDomain('https://notopencode.ai/x')).assertFalse()
+    })
+
+    it('rejects_empty_and_other_hosts', 0, () => {
+      expect(Login.isOnOpencodeDomain('')).assertFalse()
+      expect(Login.isOnOpencodeDomain('https://example.com/')).assertFalse()
+    })
+  })
+
+  describe('UpdatePlatformTagTest', () => {
+    it('accepts_harmony_tags_only', 0, () => {
+      // 仓库 Latest 是全平台共享标记: 其他平台的 release 必须被过滤掉,
+      // 否则会弹出错误更新提示且 releaseUrl 指向别的平台
+      expect(UpdateApi.isPlatformTag('v2.1.0-harmony')).assertTrue()
+      expect(UpdateApi.isPlatformTag('v2.1.0b-harmony')).assertTrue()
+      expect(UpdateApi.isPlatformTag('v2.1.0-android')).assertFalse()
+      expect(UpdateApi.isPlatformTag('v2.1.0-macos')).assertFalse()
+      expect(UpdateApi.isPlatformTag('v2.1.0')).assertFalse()
+    })
+
+    it('letter_suffix_orders_after_plain_release', 0, () => {
+      // 2.1.0b > 2.1.0 (desktop updater.py 同规则)
+      const plain = UpdateApi.parseVersion('2.1.0')!
+      const suffixed = UpdateApi.parseVersion('2.1.0b')!
+      expect(UpdateApi.isNewer(suffixed, plain)).assertTrue()
+      expect(UpdateApi.isNewer(plain, suffixed)).assertFalse()
+    })
+
+    it('platform_suffix_ignored_in_comparison', 0, () => {
+      const a = UpdateApi.parseVersion('v2.1.0b-harmony')!
+      const b = UpdateApi.parseVersion('2.1.0b')!
+      expect(UpdateApi.isNewer(a, b)).assertFalse()
+      expect(UpdateApi.isNewer(b, a)).assertFalse()
+    })
+
+    it('rejects_malformed_versions', 0, () => {
+      expect(UpdateApi.parseVersion('not-a-version') === null).assertTrue()
+      expect(UpdateApi.parseVersion('v2.1-harmony') === null).assertTrue()
     })
   })
 }

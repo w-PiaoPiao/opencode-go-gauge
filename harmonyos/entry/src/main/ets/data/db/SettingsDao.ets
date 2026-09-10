@@ -215,11 +215,56 @@ export class SettingsDao {
     const key = `monthly_reset:${accountId}`
     await this.enqueueWrite(async () => {
       const raw = await this.rawPayload()
+      const parsed = SettingsDao.parsePayload(raw)
+      // 值未变化时跳过写入: ensureQuota 每次成功拉取都会调用本方法, 无条件重写
+      // 会让 settings 行被反复覆写 (desktop db.record_monthly_reset 会比对旧值)
+      const existing: Object | null | undefined = parsed[key]
+      if (typeof existing === 'string' && existing === resetUtc) {
+        return
+      }
       const current = SettingsDao.decode(raw)
       const extra: Record<string, Object | null> = {}
       extra[key] = resetUtc
       const payload = SettingsDao.buildPayload(
-        SettingsDao.parsePayload(raw), null, current.keyNames, current.activeAccountId, extra)
+        parsed, null, current.keyNames, current.activeAccountId, extra)
+      await this.writePayload(payload)
+    })
+  }
+
+  /**
+   * 清理某账号遗留的周期/月度重置键 (账号删除时调用)。
+   *
+   * desktop db.delete_account 会显式清掉 period_start/period_end/monthly_reset
+   * 这些无主键; 此前 HarmonyOS 删除账号后这些键会永远留在 settings payload 里。
+   */
+  async dropAccountKeys(accountId: number): Promise<void> {
+    const suffixes: string[] = ['period_start', 'period_end', 'monthly_reset']
+    await this.enqueueWrite(async () => {
+      const raw = await this.rawPayload()
+      const parsed = SettingsDao.parsePayload(raw)
+      // ArkTS 禁用 delete 运算符 (arkts-no-delete): 重建一个只保留非孤儿键的对象
+      const kept: Record<string, Object | null> = {}
+      let changed = false
+      for (const k of Object.keys(parsed)) {
+        let isOrphan = false
+        for (const s of suffixes) {
+          if (k === `${s}:${accountId}`) {
+            isOrphan = true
+            break
+          }
+        }
+        if (isOrphan) {
+          changed = true
+        } else {
+          kept[k] = parsed[k]
+        }
+      }
+      if (!changed) {
+        return
+      }
+      const current = SettingsDao.decode(raw)
+      const payload = SettingsDao.buildPayload(
+        kept, null, current.keyNames, current.activeAccountId)
       await this.writePayload(payload)
     })
   }
