@@ -25,6 +25,23 @@ abstract class ChartDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun upsertAll(rows: List<UsageChartEntity>)
 
+    /**
+     * 删除该账号的全部聚合行.
+     *
+     * 与明细表不同, charts 此前从无清理路径 (deleteAccount/clearAccount 只删 records),
+     * 造成两个问题: 按 (模型 × 5min 桶) 无上限增长; 且退出登录再登录后
+     * chartsReady() 仍非空, 仪表盘会继续用上一个计费周期的陈旧聚合值.
+     */
+    @Query("DELETE FROM usage_charts WHERE account_id = :accountId")
+    abstract suspend fun deleteForAccount(accountId: Int)
+
+    /**
+     * 裁剪窗口外的聚合桶 (与 usage_records.pruneOldRecords 同口径).
+     * charts 是计费周期快照, 保留窗口由调用方按同步范围传入.
+     */
+    @Query("DELETE FROM usage_charts WHERE account_id = :accountId AND datetime(time_bucket) < datetime('now', :intervalArg)")
+    abstract suspend fun pruneOldCharts(accountId: Int, intervalArg: String): Int
+
     @Query("SELECT 1 FROM usage_charts WHERE account_id = :accountId LIMIT 1")
     abstract suspend fun chartsReady(accountId: Int): Int?
 
@@ -47,7 +64,8 @@ abstract class ChartDao {
                 args = emptyArray()
             }
             "today" -> {
-                clause = "substr(datetime(time_bucket, 'localtime'), 1, 10) = date('now', 'localtime')"
+                // local_date 为写入时物化的本地日 (见 MIGRATION_3_4)
+                clause = "local_date = date('now', 'localtime')"
                 args = emptyArray()
             }
             "month" -> if (cycleStart != null) {
@@ -173,7 +191,7 @@ abstract class ChartDao {
         val rows = dailyStatsRaw(
             SimpleSQLiteQuery(
                 """
-                SELECT substr(datetime(time_bucket, 'localtime'), 1, 10) AS date,
+                SELECT local_date AS date,
                        SUM(tokens_in) AS total_input_tokens,
                        SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
                        0 AS total_reasoning_tokens,
@@ -183,8 +201,8 @@ abstract class ChartDao {
                        SUM(total_cost) AS total_cost_usd,
                        SUM(requests) AS request_count
                 FROM usage_charts
-                WHERE account_id = ? AND substr(datetime(time_bucket, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
-                GROUP BY substr(datetime(time_bucket, 'localtime'), 1, 10)
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?)
+                GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
                 arrayOf(accountId, "-${clamped} days"),
@@ -236,7 +254,7 @@ abstract class ChartDao {
                0 AS reasoning
         FROM usage_charts
         WHERE account_id = :accountId
-          AND substr(datetime(time_bucket, 'localtime'), 1, 10) = date('now', 'localtime')
+          AND local_date = date('now', 'localtime')
         GROUP BY hour
         """
     )

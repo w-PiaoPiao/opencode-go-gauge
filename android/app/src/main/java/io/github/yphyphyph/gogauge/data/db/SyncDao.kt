@@ -242,6 +242,9 @@ abstract class SyncDao {
     @Transaction
     open suspend fun deleteAccount(accountId: Int): Int {
         deleteRecordsForAccount(accountId)
+        // charts 聚合也必须清: 否则 chartsReady() 仍非空, 重新添加同 id 账号后
+        // 仪表盘会继续用上一个计费周期的陈旧聚合值
+        deleteChartsForAccount(accountId)
         deleteSyncStateForAccount(accountId)
         deleteAccountRow(accountId)
         val remaining = countAccountsRaw()
@@ -262,6 +265,7 @@ abstract class SyncDao {
         if (aid == 0) return
         val now = Instant.now().toString()
         deleteRecordsForAccount(aid)
+        deleteChartsForAccount(aid)  // 同 deleteAccount: 防止登出后残留聚合值
         clearToken(aid, now)
         ensureStateRow(aid)
         resetSyncStateForAccount(aid)
@@ -317,6 +321,10 @@ abstract class SyncDao {
 
     @Query("DELETE FROM usage_sync_state WHERE account_id = :accountId")
     abstract suspend fun deleteSyncStateForAccount(accountId: Int)
+
+    /** usage_charts 聚合行按账号清除 (登出/删除账号时调用, 见 deleteAccount 说明). */
+    @Query("DELETE FROM usage_charts WHERE account_id = :accountId")
+    abstract suspend fun deleteChartsForAccount(accountId: Int)
 
     @Query(
         "SELECT COUNT(*) AS count, MIN(created_at) AS oldest, MAX(created_at) AS newest" +

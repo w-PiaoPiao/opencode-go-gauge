@@ -19,7 +19,9 @@ class SyncWorker(
         val result = repo.syncUsage("incremental")
         return when {
             result.ok -> Result.success()
-            result.error == "未登录" -> Result.success() // nothing to do; stop scheduling retries
+            // 永久性失败 (未登录/鉴权失效/已有同步在跑) 不重试: 否则 WorkManager
+            // 会按指数退避无限重试一个不会自愈的错误, 白白耗电与流量
+            !result.retryable -> Result.success()
             else -> Result.retry()
         }
     }

@@ -20,7 +20,7 @@ import java.time.Instant
         SettingsEntity::class,
         UsageChartEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -67,6 +67,46 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `idx_charts_account_time`" +
                         " ON `usage_charts` (`account_id`, `time_bucket`)"
+                )
+            }
+        }
+
+        /**
+         * v3 → v4 日界索引 — 对齐桌面 db.py 迁移 6.
+         *
+         * 背景: 所有周期过滤原先写作 substr(datetime(created_at,'localtime'),1,10),
+         * 函数包裹索引列使 SQLite 无法范围扫描, 每个周期查询都退化为按账号全表扫
+         * (dashboard 一次刷新 6 条, commandcode 翻倍). SQLite 也拒绝把 localtime
+         * 表达式建进索引 ("non-deterministic use of datetime() in an index"),
+         * 因此改为物化 local_date 列并在写入时计算.
+         *
+         * 1) 两表补 local_date 列
+         * 2) 存量回填 (date(...,'localtime') 与 Room 侧本地日口径一致)
+         * 3) 建 (account_id, local_date) / (account_id, model) 索引
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `usage_records` ADD COLUMN `local_date` TEXT")
+                db.execSQL("ALTER TABLE `usage_charts` ADD COLUMN `local_date` TEXT")
+                db.execSQL(
+                    "UPDATE `usage_records` SET `local_date` = date(`created_at`, 'localtime')" +
+                        " WHERE `local_date` IS NULL"
+                )
+                db.execSQL(
+                    "UPDATE `usage_charts` SET `local_date` = date(`time_bucket`, 'localtime')" +
+                        " WHERE `local_date` IS NULL"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_usage_account_localdate`" +
+                        " ON `usage_records` (`account_id`, `local_date`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_usage_account_model`" +
+                        " ON `usage_records` (`account_id`, `model`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_charts_account_localdate`" +
+                        " ON `usage_charts` (`account_id`, `local_date`)"
                 )
             }
         }
@@ -141,7 +181,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "gousage.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build().also { instance = it }
             }
     }

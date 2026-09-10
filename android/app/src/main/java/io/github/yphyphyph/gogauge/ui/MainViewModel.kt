@@ -22,6 +22,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -59,9 +61,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var dashboard by mutableStateOf<DashboardData?>(null)
         private set
-    var loading by mutableStateOf(false)
+    /**
+     * dashboard 数据版本号 — 每次成功加载自增.
+     *
+     * 供需要"底层数据变了才重查"的页面 (账户总览) 当 LaunchedEffect key:
+     * 直接用 dashboard 对象会让任何一次配额到达/进度更新都触发整套重查.
+     */
+    var dashboardVersion by mutableIntStateOf(0)
         private set
     var progress by mutableStateOf(SyncProgress())
+        private set
+    /** 仅同步运行位 — 见 init 中说明; 供下拉刷新等高频读取点使用. */
+    var syncing by mutableStateOf(false)
         private set
 
     // ---- 多账号状态 (desktop /api/accounts parity) ----
@@ -89,6 +100,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- records page ----
     var records by mutableStateOf<PageResult<UsageRecordRow>?>(null)
         private set
+    var recordsError by mutableStateOf<String?>(null)
+        private set
     var recordsPage by mutableIntStateOf(1)
         private set
     var recordsFilter by mutableStateOf<String?>(null)
@@ -96,6 +109,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var models by mutableStateOf<List<String>>(emptyList())
         private set
     var sessions by mutableStateOf<PageResult<SessionStat>?>(null)
+        private set
+    var sessionsError by mutableStateOf<String?>(null)
         private set
     var sessionsPage by mutableIntStateOf(1)
         private set
@@ -124,10 +139,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         scope.launch {
             repo.progress.collectLatest { progress = it }
         }
+        // 只把 running 这一位单独暴露成布尔 state: 五个页面的下拉刷新都读它,
+        // 而 Compose 的状态失效粒度是对象级的 —— 若直接读整个 SyncProgress,
+        // 每次 page/inserted 更新都会让整屏重组 (一次全量同步上百次).
+        // distinctUntilChanged 保证只在真正翻转时才写, 订阅者不受粒度影响.
+        scope.launch {
+            repo.progress
+                .map { it.running }
+                .distinctUntilChanged()
+                .collectLatest { syncing = it }
+        }
         // Quota arrives asynchronously (30s cache): refresh the dashboard when it lands
         scope.launch {
             repo.quota.collectLatest { q ->
-                if (loggedIn && dashboard != null) loadDashboard()
+                if (loggedIn && dashboard != null) loadDashboard(currentDashRange())
             }
         }
         checkState()
@@ -174,8 +199,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             repo.loginSuccess(token, workspaceHint, pendingLoginMode, pendingLoginProvider)
             loggedIn = true
             showLogin = false
+            // checkState 内部已判断"首次登录 (无同步记录) 自动全量同步",
+            // 这里不再额外 startSync("full"): 之前会触发两次全量同步 (第二次虽被
+            // running 守卫挡下, 仍会多跑一次 loadDashboard)
             checkState()
-            startSync("full")
         }
     }
 
@@ -241,20 +268,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadDashboard(range: String = homeRange) {
         scope.launch {
-            loading = true
             try {
                 // Desktop parity: every dashboard load kicks a background quota refresh
                 // (30s cache + re-entry guard inside ensureQuota).
                 repo.ensureQuotaAsync(scope)
                 dashboard = repo.loadDashboard(range)
+                dashboardVersion++
             } catch (e: CancellationException) {
                 throw e // viewModelScope 取消时正常退出, 不当加载失败记录
             } catch (e: Exception) {
                 android.util.Log.e("GoGauge", "loadDashboard failed range=$range", e)
-            } finally {
-                loading = false
             }
         }
+    }
+
+    /**
+     * 仅在缓存数据与目标 range 不一致时重载.
+     *
+     * 首页与统计页共用同一个 dashboard 对象但各自的 range 状态独立: 之前在统计页
+     * 切到 "30d" 后回到首页, 首页会直接用 30d 的数据渲染, 而高亮的却是 "today".
+     * DashboardData.range 记录了数据对应的周期, 以此为判据即可.
+     */
+    fun ensureDashboard(range: String) {
+        if (dashboard?.range != range) loadDashboard(range)
     }
 
     // ------------------------------------------------------------------
@@ -324,20 +360,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * sequential chain (quota → sync → dashboard), so a slow opencode.ai response made
      * the refresh spinner spin for up to ~90s even on a good network.
      */
+    /** 当前 dashboard 数据对应的周期; 无数据时回退首页默认 (避免刷新把统计页打回首页周期). */
+    private fun currentDashRange(): String = dashboard?.range ?: homeRange
+
     fun refreshNow() {
         android.util.Log.i("GoGauge", "refreshNow called")
+        // 用当前已加载的 range 重载: 之前无条件用 homeRange, 在统计页刷新会把
+        // 数据换成首页周期
         if (repo.progress.value.running) {
-            loadDashboard()
+            loadDashboard(currentDashRange())
             return
         }
         // Instant paint from the local DB — do not block the spinner on network calls.
-        loadDashboard()
+        loadDashboard(currentDashRange())
         startSync("incremental")
     }
 
     private fun fullSync() = startSync("full")
 
-    fun isSyncing(): Boolean = progress.running
+    fun isSyncing(): Boolean = syncing
 
     // ------------------------------------------------------------------
     // Records paging
@@ -350,8 +391,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 records = page
                 // Model list is only needed for the filter dropdown; cache it after first load.
                 if (models.isEmpty()) models = repo.listModels()
-            } catch (e: OpenCodeApiException) {
-                // ignore
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 这里只读 Room, 抛出的是 SQLiteException 一类. 原先捕获
+                // OpenCodeApiException (纯 DB 路径永远不会抛它) 等于没接住,
+                // 异常会逃出 viewModelScope 直接崩溃
+                android.util.Log.e("GoGauge", "loadRecords failed", e)
+                recordsError = e.message ?: "加载失败"
             }
         }
     }
@@ -378,8 +425,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         scope.launch {
             try {
                 sessions = repo.sessionsPage(sessionsPage, 10, null)
-            } catch (e: OpenCodeApiException) {
-                // ignore
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 同 loadRecords: 该路径只读 Room, 需接住 SQLiteException
+                android.util.Log.e("GoGauge", "loadSessions failed", e)
+                sessionsError = e.message ?: "加载失败"
             }
         }
     }

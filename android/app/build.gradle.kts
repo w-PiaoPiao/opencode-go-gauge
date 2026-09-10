@@ -48,12 +48,30 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 开启: 缩代码 + 资源压缩. kotlinx.serialization 与 Room 由各自
+            // 插件生成 keep 规则, proguard-rules.pro 只需补反射/序列化相关例外.
+            isMinifyEnabled = true
+            isShrinkResources = true
             // 有 keystore.properties 时用正式签名, 否则回退 debug keystore (个人侧载/CI).
             // 注意: 换签名后无法覆盖安装旧版本, 需先卸载.
             signingConfig = if (signingConfigs.names.contains("release")) {
                 signingConfigs.getByName("release")
             } else {
+                // 仓库 CI 就是按"个人侧载 + 仓库内 debug.keystore"设计的
+                // (见 .github/workflows/release-android.yml), 因此这里不直接 fail
+                // 以免打断既有发布流程; 改为显式告警 + 提供严格开关.
+                // 上架/公开分发时设 -Pgogauge.strictSigning=true 让构建失败,
+                // 强制提供正式 keystore.
+                if (project.findProperty("gogauge.strictSigning") == "true") {
+                    throw GradleException(
+                        "release 构建缺少 keystore.properties: 拒绝用 debug keystore 签名分发产物. " +
+                            "请提供正式 keystore, 或去掉 -Pgogauge.strictSigning=true (仅限个人侧载)."
+                    )
+                }
+                logger.warn(
+                    "⚠️  release 使用仓库内 debug.keystore 签名 (个人侧载模式). " +
+                        "任何持有该密钥的人都能伪造同包名更新; 正式分发请提供 keystore.properties."
+                )
                 signingConfigs.getByName("debug")
             }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

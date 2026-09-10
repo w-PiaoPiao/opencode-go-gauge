@@ -48,6 +48,8 @@ class UpdateApi(
         // 境内直连 GitHub 间歇性 502/超时/重置, 自动重试提高成功率 (desktop parity)
         private const val MAX_ATTEMPTS = 3
         private const val RETRY_SLEEP_MS = 800L
+        /** GitHub releases/atom 文本响应上限 (2 MiB; 正常响应为几十 KB). */
+        private const val MAX_BODY_BYTES = 2 * 1024 * 1024
         private const val ATOM_NS = "http://www.w3.org/2005/Atom"
         // 版本号支持三段数字 + 可选字母预发布后缀 (2.1.0b > 2.1.0) 及 -/+ 起尾缀
         // (2.1.0-macos / 2.1.0b-android, 尾缀不参与比较) — desktop updater.py parity
@@ -103,7 +105,8 @@ class UpdateApi(
                     .build()
                 val body = client.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) throw OpenCodeApiException("GitHub HTTP ${resp.code}")
-                    resp.body?.string() ?: ""
+                    // 有界读取: releases/atom 响应为文本, 但仍防止异常超大响应耗尽内存
+                    readBoundedBody(resp, MAX_BODY_BYTES)
                 }
                 return@withContext body
             } catch (e: IOException) {

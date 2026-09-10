@@ -1,6 +1,7 @@
 package io.github.yphyphyph.gogauge.data.remote
 
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -14,6 +15,12 @@ open class OpenCodeApiException(message: String) : Exception(message)
 
 /** Auth failure (401/403) — token invalid or expired. */
 class AuthException(message: String) : OpenCodeApiException(message)
+
+/**
+ * 瞬时 HTTP 故障 (5xx) — 内部标记为可重试, 让 fetch 的重试循环接住.
+ * 不对外抛出: 重试耗尽后统一转成 OpenCodeApiException("网络错误: ...").
+ */
+internal class RetryableHttpException(message: String) : Exception(message)
 
 /**
  * OpenCode Go API client — 1:1 port of opencode_api.py (desktop).
@@ -49,7 +56,11 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
             setOf(RegexOption.DOT_MATCHES_ALL),
         )
         // keys 页面内嵌响应数据形如 {id:"key_xxx",name:"gongsi",key:"sk-...",...}
-        private val KEY_ENTRY_RE = Regex("""\{id:"(key_[A-Za-z0-9]+)",name:"([^"]*)"\""")
+        // 注意收尾必须是 """" (1 个内容引号 + 3 个原始字符串终止符):
+        // 原写作 "\"" 会让 pattern 以孤立反斜杠结尾, Regex 在类初始化时抛
+        // PatternSyntaxException("Unrecognized backslash escape sequence"),
+        // 即 OpenCodeApi 一旦被引用整个应用启动即崩溃.
+        private val KEY_ENTRY_RE = Regex("""\{id:"(key_[A-Za-z0-9]+)",name:"([^"]*)"""")
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
@@ -91,12 +102,18 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
                                 throw AuthException("认证失败 (HTTP $status)，请重新登录")
                             status == 404 ->
                                 throw OpenCodeApiException("工作区不存在 (HTTP 404)")
+                            status >= 500 ->
+                                // 5xx 视为瞬时故障: 走重试循环 (4xx 仍立即终止)
+                                throw RetryableHttpException("请求返回 HTTP $status")
                             status !in 200..299 ->
                                 throw OpenCodeApiException("请求返回 HTTP $status")
                             else -> body
                         }
                     }
                     return@withContext result
+                } catch (e: RetryableHttpException) {
+                    lastExc = e
+                    if (attempt < FETCH_RETRIES - 1) delay(RETRY_BACKOFF_MS[attempt])
                 } catch (e: IOException) {
                     lastExc = e
                     if (attempt < FETCH_RETRIES - 1) delay(RETRY_BACKOFF_MS[attempt])
@@ -111,21 +128,7 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
 
     /** 流式读取响应体, 超 MAX_BODY_BYTES 即中止 (防止先整读内存再截断). */
     private fun readBounded(resp: okhttp3.Response): String =
-        resp.body?.byteStream()?.use { input ->
-            val buf = java.io.ByteArrayOutputStream()
-            val chunk = ByteArray(64 * 1024)
-            var total = 0
-            while (true) {
-                val n = input.read(chunk)
-                if (n < 0) break
-                total += n
-                if (total > MAX_BODY_BYTES) {
-                    throw OpenCodeApiException("响应过大 (超过 $MAX_BODY_BYTES 字节)")
-                }
-                buf.write(chunk, 0, n)
-            }
-            buf.toString("UTF-8")
-        } ?: ""
+        readBoundedBody(resp, MAX_BODY_BYTES)
 
     private suspend fun serverCall(serverId: String, args: List<Any?>, refererPath: String, token: String): String {
         val cookie = buildCookieHeader(token)
@@ -270,6 +273,10 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
             val windows = QuotaParser.parseQuotaHtml(html)
             if (windows.isEmpty()) throw OpenCodeApiException("无法从 Dashboard HTML 解析额度数据")
             QuotaResult("Default", workspaceId, true, nowIso, windows = windows)
+        } catch (e: CancellationException) {
+            // 协程取消必须向上传播: 否则被取消的调用会继续跑完阻塞请求,
+            // 并把"取消失败"当成一次配额错误写进缓存
+            throw e
         } catch (e: Exception) {
             QuotaResult("Default", hint, false, nowIso, error = e.message ?: "未知错误")
         }
@@ -328,6 +335,8 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
                 if (id.isNotEmpty() && name.isNotEmpty()) names.putIfAbsent(id, name)
             }
             names
+        } catch (e: CancellationException) {
+            throw e  // 取消不当作"拉取失败", 见 fetchQuota 同处说明
         } catch (e: Exception) {
             emptyMap()
         }

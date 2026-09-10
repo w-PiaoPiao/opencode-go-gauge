@@ -79,7 +79,9 @@ abstract class UsageDao {
                 args = emptyArray()
             }
             "today" -> {
-                clause = "substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')"
+                // local_date 为写入时物化的本地日 (见 MIGRATION_3_4): 原先
+                // substr(datetime(...,'localtime')) 让索引失效, 退化为账号全表扫
+                clause = "local_date = date('now', 'localtime')"
                 args = emptyArray()
             }
             "month" -> if (cycleStart != null) {
@@ -156,7 +158,7 @@ abstract class UsageDao {
         val rows = dailyStatsRaw(
             SimpleSQLiteQuery(
                 """
-                SELECT substr(datetime(created_at, 'localtime'), 1, 10) AS date,
+                SELECT local_date AS date,
                        COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS total_input_tokens,
                        COALESCE(SUM(input_tokens), 0) AS uncached_input_tokens,
                        COALESCE(SUM(reasoning_tokens), 0) AS total_reasoning_tokens,
@@ -166,8 +168,8 @@ abstract class UsageDao {
                        COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
                        COALESCE(COUNT(*), 0) AS request_count
                 FROM usage_records
-                WHERE account_id = ? AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
-                GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?)
+                GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
                 arrayOf(accountId, "-${clamped} days"),
@@ -220,7 +222,7 @@ abstract class UsageDao {
                COALESCE(SUM(reasoning_tokens), 0) AS reasoning
         FROM usage_records
         WHERE account_id = :accountId
-          AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
+          AND local_date = date('now', 'localtime')
         GROUP BY hour
         """
     )

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -27,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -51,7 +53,8 @@ import io.github.yphyphyph.gogauge.util.Fmt
 fun StatsScreen(vm: MainViewModel = viewModel()) {
     val s = vm.s
     LaunchedEffect(Unit) {
-        if (vm.dashboard == null) vm.loadDashboard(range = vm.statsRange)
+        // 按 range 一致性判断: 首页可能已把共享的 dashboard 切成别的周期
+        vm.ensureDashboard(vm.statsRange)
     }
 
     val ptrState = rememberPullToRefreshState()
@@ -136,9 +139,18 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                     when (vm.modelDim) {
                         "output" -> it.totalOutputTokens.toDouble()
                         "cost" -> it.totalCostUsd
-                        else -> it.uncachedInputTokens.toDouble()
+                        // input: 含缓存命中的总输入 (与 Charts.getVal 同口径)
+                        else -> it.totalInputTokens.toDouble()
                     }
                 }.take(3).forEachIndexed { i, m ->
+                    // 数值列与排序维度一致: 输入/输出显示 Token 数, 只有成本维度显示金额
+                    // (原先无论选哪个维度都显示金额)
+                    val rankToken = if (vm.modelDim == "cost") {
+                        Fmt.money(m.totalCostUsd, vm.currency, d.usdCny)
+                    } else {
+                        val v = if (vm.modelDim == "output") m.totalOutputTokens else m.totalInputTokens
+                        Fmt.tokens(v.toLong())
+                    }
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -153,12 +165,18 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                             "${Fmt.int(m.requestCount)} · ${s.hitRate} ${m.hitRate.toInt()}%",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
                         )
-                        Spacer(Modifier.padding(horizontal = 8.dp))
+                        Spacer(Modifier.padding(horizontal = 4.dp))
                         Text(
-                            Fmt.money(m.totalCostUsd, vm.currency, d.usdCny),
+                            rankToken,
                             fontSize = 12.sp,
                             fontFamily = NumFontFamily,
+                            maxLines = 1,
+                            textAlign = TextAlign.End,
+                            // 定宽右对齐: Token 简写 (12.03M) 与金额 (¥78.53) 宽度不同,
+                            // 不固定会随维度切换左右抖动
+                            modifier = Modifier.widthIn(min = 58.dp),
                         )
                     }
                 }

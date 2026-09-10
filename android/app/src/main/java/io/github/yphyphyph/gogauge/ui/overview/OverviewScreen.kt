@@ -27,6 +27,7 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -66,8 +67,10 @@ fun OverviewScreen(vm: MainViewModel = viewModel()) {
         onDispose { vm.setOverviewVisible(false) }
     }
     LaunchedEffect(Unit) { vm.loadOverview() }
-    // 底层数据变化 (同步完成 / 账号切换 / 登录变动) 时静默刷新
-    LaunchedEffect(vm.dashboard, vm.accounts, vm.activeAccountId) { vm.loadOverview(true) }
+    // 底层数据变化 (同步完成 / 账号切换 / 登录变动) 时静默刷新.
+    // key 用轻量版本号而非整个 dashboard 对象: 后者在配额到达、每次同步进度更新时
+    // 都会被替换, 导致总览反复跑完整的 N 账号查询.
+    LaunchedEffect(vm.dashboardVersion, vm.accounts, vm.activeAccountId) { vm.loadOverview(true) }
 
     val ptrState = rememberPullToRefreshState()
     Box(Modifier.fillMaxSize()) {
@@ -131,8 +134,12 @@ fun OverviewScreen(vm: MainViewModel = viewModel()) {
                     // ---- 7 日费用趋势对比: 全部账号合计三条线 (置于账号卡片下方, 桌面 parity) ----
                     GgCard {
                         CardHeader(s.costTrend7d, trailing = { Hint("7 ${s.day}") })
+                        // 合并结果只在 accounts 变化时重算: 此前每次重组都会重新 flatten + 累加
+                        val merged = remember(data.accounts) {
+                            mergeDaily(data.accounts.map { it.daily7 })
+                        }
                         TrendLineChart(
-                            trend = mergeDaily(data.accounts.map { it.daily7 }),
+                            trend = merged,
                             s = s,
                             labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             gridLineColor = MaterialTheme.colorScheme.outline,
