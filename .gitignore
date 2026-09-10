@@ -21,6 +21,7 @@ venv/
 .claude/
 .omo/
 .zcode/
+.codegraph/
 
 # 日志
 *.log

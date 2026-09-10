@@ -1,0 +1,3 @@
+{
+  "exclude": ["app/web/chart.umd.min.js"]
+}
