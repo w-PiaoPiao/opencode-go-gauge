@@ -204,6 +204,17 @@ export class DashboardRepository {
     return this.exchangeCache.usdCny
   }
 
+  /**
+   * 汇率访问器 (供只关心金额换算的页面使用).
+   *
+   * RecordsPage 此前为拿一个汇率值调用 loadDashboard('all'), 连带跑完
+   * totals ×2 / dailyStats ×2 / todayTrend / modelStats / getSyncState 共 9 条查询
+   * 与一次汇率请求 —— 每次刷新、每次切 tab 都重跑一遍.
+   */
+  async usdCnyRate(): Promise<number> {
+    return this.usdCny()
+  }
+
   // ------------------------------------------------------------------
   // Dashboard 数据包 (活跃账号视角)
   // ------------------------------------------------------------------
@@ -294,9 +305,11 @@ export class DashboardRepository {
     try {
       let totalInserted = 0
       let pages = 0
-      let anyError = ''
+      const errors: string[] = []
       let partial = false
 
+      // 单账号失败不中断整轮 (与桌面 sync_usage / Android syncUsage 一致):
+      // 否则首个 token 失效的账号会永久阻塞其后所有账号的自动同步
       for (const target of targets) {
         const aid = target[0]
         const name = target[1]
@@ -305,20 +318,20 @@ export class DashboardRepository {
         totalInserted += result.inserted
         pages += result.pages
         if (!result.ok) {
-          anyError = result.error !== null ? result.error : '同步失败'
-          if (mode === 'incremental') {
-            const msg = `[${name}] ${anyError}`
-            this.updateProgress((p) => { p.phase = 'error'; p.message = msg })
-            return { ok: false, error: anyError, inserted: totalInserted, pages: pages, partial: false, failedPages: 0 }
-          }
+          errors.push(`[${name}] ${result.error !== null ? result.error : '同步失败'}`)
         }
         if (result.partial) {
           partial = true
         }
       }
 
-      if (partial || (mode !== 'incremental' && anyError.length > 0)) {
-        const msg = anyError.length > 0 ? '部分账号同步异常' : '完成, 但部分页面拉取失败'
+      const anyError = errors.join('; ')
+      if (errors.length === targets.length) {
+        this.updateProgress((p) => { p.phase = 'error'; p.message = anyError })
+        return { ok: false, error: anyError, inserted: totalInserted, pages: pages, partial: false, failedPages: 0 }
+      }
+      if (partial || errors.length > 0) {
+        const msg = errors.length > 0 ? '部分账号同步异常' : '完成, 但部分页面拉取失败'
         this.updateProgress((p) => { p.phase = 'done'; p.message = msg })
         return { ok: true, error: null, inserted: totalInserted, pages: pages, partial: true, failedPages: 0 }
       }
@@ -499,9 +512,17 @@ export class DashboardRepository {
     return out
   }
 
-  async syncAll(mode: string): Promise<void> {
+  /** 配额刷新 + 用量同步; 返回同步结果文本供调用方展示 (full 模式必须可被触发, 见设置页说明). */
+  async syncAll(mode: string): Promise<string> {
     await this.ensureQuota()
-    await this.syncUsage(mode)
+    const result = await this.syncUsage(mode)
+    if (!result.ok) {
+      return `同步失败: ${result.error !== null ? result.error : ''}`
+    }
+    if (result.partial) {
+      return `同步完成（部分数据）: 新增 ${result.inserted} 条 / ${result.pages} 页`
+    }
+    return `同步完成: 新增 ${result.inserted} 条 / ${result.pages} 页`
   }
 
   // ------------------------------------------------------------------
@@ -566,7 +587,29 @@ export class DashboardRepository {
 
   /** 退出登录当前活跃账号 (清其数据, 保留账号行)。 */
   async logout(): Promise<void> {
-    return this.syncDao.clearAccount()
+    await this.syncDao.clearAccount()
+    // 清空配额缓存槽: 否则重新登录前 UI 可能取到上一个账号的残留配额
+    // (Android DashboardRepository.logout 同做法)
+    this.quotaCache.clear()
+    // 清 WebView cookie 库: 登录时从 opencode.ai 读走的会话 cookie 会留在
+    // 应用持久化 Web 数据里, 登出后仍可用 (Android LoginScreen 在捕获时就
+    // removeAllCookies; 这里在登出侧兜底清理).
+    await DashboardRepository.clearWebCookies()
+  }
+
+  /**
+   * 清理 WebView 侧的会话 cookie (含 opencode.ai 登录态)。
+   * 导入失败/无 webview 能力时静默跳过 (非致命, 不影响本地登出).
+   */
+  static async clearWebCookies(): Promise<void> {
+    try {
+      const webviewMod = await import('@ohos.web.webview')
+      // clearAllCookiesSync: 同步清空 cookie 库 (API 8+);
+      // 没有 removeAllCookies 这个成员, 名称写错会直接编译失败
+      webviewMod.default.WebCookieManager.clearAllCookiesSync()
+    } catch (e) {
+      // WebView 不可用时无需清理
+    }
   }
 
   /** 清除 injectSampleData 注入的调试记录 (debug 构建设置页入口), 返回删除条数。 */

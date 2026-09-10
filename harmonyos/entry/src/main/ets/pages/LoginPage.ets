@@ -6,7 +6,8 @@
 import webview from '@ohos.web.webview'
 import router from '@ohos.router'
 import { Login } from '../common/auth/Login'
-import { Repo } from '../data/repository/DashboardRepository'
+import { Repo, DashboardRepository } from '../data/repository/DashboardRepository'
+import { I18n } from '../common/i18n/I18n'
 
 const POLL_INTERVAL_MS = 1000
 
@@ -120,14 +121,17 @@ struct LoginPage {
     this.captured = true
     this.stopPolling()
     const hint: string = Login.extractWorkspaceHint(this.currentUrl)
+    // 捕获后清掉 WebView 中的会话 cookie (Android LoginScreen 同做法):
+    // cookie 已落入账号表, 无需继续留在应用持久化 Web 数据里
+    await DashboardRepository.clearWebCookies()
     try {
       await Repo.get().loginSuccess(segment, hint, this.loginMode)
-      this.statusText = '登录成功，正在进入仪表盘…'
+      this.statusText = I18n.t('login_success')
       setTimeout(() => {
         router.back()
       }, 600)
     } catch (e) {
-      this.statusText = `登录失败: ${(e as Error).message}`
+      this.statusText = `${I18n.t('login_failed')}: ${(e as Error).message}`
       this.captured = false
     }
   }

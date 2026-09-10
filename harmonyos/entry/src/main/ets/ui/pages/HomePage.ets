@@ -3,10 +3,12 @@
  */
 import { Repo } from '../../data/repository/DashboardRepository'
 import { I18n } from '../../common/i18n/I18n'
+import { AppPrefs } from '../../common/store/AppPrefs'
 import { DashboardData, QuotaWindow } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
 import { KpiCard, SectionCard } from '../components/Cards'
 import { BarChart24h, QuotaRing } from '../components/Charts'
+import { Theme } from '../theme/Theme'
 
 @Component
 export struct HomePage {
@@ -27,6 +29,8 @@ export struct HomePage {
   }
 
   private async load(): Promise<void> {
+    // 货币偏好此前只在设置页读取: 这里不取的话, 选择 CNY 后金额仍按 USD 渲染
+    this.currency = AppPrefs.getCurrency()
     try {
       this.data = await Repo.get().loadDashboard('all')
     } catch (e) {
@@ -40,7 +44,7 @@ export struct HomePage {
         if (this.data === null) {
           Text(I18n.t('loading'))
             .fontSize(14)
-            .fontColor('#999999')
+            .fontColor(Theme.sub())
             .padding(24)
         } else {
           this.quotaSection(this.data!.quota !== null ? this.data!.quota.windows : [])
@@ -55,7 +59,7 @@ export struct HomePage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F2F3F7')
+    .backgroundColor(Theme.bg())
   }
 
   @Builder
@@ -64,7 +68,7 @@ export struct HomePage {
       if (windows.length === 0) {
         Text(I18n.t('quota_empty'))
           .fontSize(12)
-          .fontColor('#999999')
+          .fontColor(Theme.sub())
       } else {
         GridRow({ columns: { sm: 2, md: 3, lg: 4 }, gutter: 8 }) {
           ForEach(windows, (w: QuotaWindow) => {

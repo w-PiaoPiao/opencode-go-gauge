@@ -4,8 +4,10 @@
 import { Repo } from '../../data/repository/DashboardRepository'
 import { PageResult, SessionStat, UsageRecordRow } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
+import { AppPrefs } from '../../common/store/AppPrefs'
 import { ModelIcon, SectionCard } from '../components/Cards'
 import { I18n } from '../../common/i18n/I18n'
+import { Theme } from '../theme/Theme'
 
 const PAGE_SIZE = 20
 
@@ -31,9 +33,12 @@ export struct RecordsPage {
   }
 
   private async loadAll(): Promise<void> {
+    // 货币偏好此前只在设置页被读取, 记录页的金额永远是 USD
+    this.currency = AppPrefs.getCurrency()
     try {
       const repo = Repo.get()
-      this.usdCny = (await repo.loadDashboard('all')).usdCny
+      // 只取汇率, 不再为它跑整套 dashboard 查询 (见 usdCnyRate 说明)
+      this.usdCny = await repo.usdCnyRate()
       await Promise.all([
         this.loadSessions(1),
         this.loadRecords(1, ''),
@@ -83,7 +88,7 @@ export struct RecordsPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F2F3F7')
+    .backgroundColor(Theme.bg())
   }
 
   private selectedIndex(): number {
@@ -95,7 +100,7 @@ export struct RecordsPage {
   }
 
   private modelOptions(): Array<SelectOption> {
-    const out: Array<SelectOption> = [{ value: '全部模型' }]
+    const out: Array<SelectOption> = [{ value: I18n.t('all_models') }]
     for (const m of this.models) {
       out.push({ value: m })
     }
@@ -106,9 +111,9 @@ export struct RecordsPage {
   tabPill(key: string, label: string) {
     Text(label)
       .fontSize(14)
-      .fontColor(this.tab === key ? '#FFFFFF' : '#666666')
+      .fontColor(this.tab === key ? '#FFFFFF' : Theme.sub())
       .padding({ left: 16, right: 16, top: 6, bottom: 6 })
-      .backgroundColor(this.tab === key ? '#3B82F6' : '#E9EAEE')
+      .backgroundColor(this.tab === key ? Theme.accent() : Theme.surfaceSoft())
       .borderRadius(16)
       .onClick(() => {
         this.tab = key
@@ -126,11 +131,11 @@ export struct RecordsPage {
               Text(this.sessionTitle(s))
                 .fontSize(13)
                 .fontWeight(FontWeight.Medium)
-                .fontColor('#222222')
+                .fontColor(Theme.text())
                 .maxLines(1)
               Text(`${Fmt.int(s.requestCount)} ${I18n.t('req_unit')} · ${Fmt.dateTimeShort(s.lastAt)}`)
                 .fontSize(11)
-                .fontColor('#999999')
+                .fontColor(Theme.sub())
             }
             .alignItems(HorizontalAlign.Start)
             .layoutWeight(1)
@@ -138,16 +143,16 @@ export struct RecordsPage {
               Text(Fmt.tokens(s.totalInputTokens + s.totalOutputTokens + s.totalReasoningTokens))
                 .fontSize(13)
                 .fontWeight(FontWeight.Medium)
-                .fontColor('#333333')
+                .fontColor(Theme.text())
               Text(Fmt.money(s.totalCostUsd, this.currency, this.usdCny))
                 .fontSize(11)
-                .fontColor('#888888')
+                .fontColor(Theme.sub())
             }
             .alignItems(HorizontalAlign.End)
           }
           .width('100%')
           .padding(12)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(Theme.surface())
           .borderRadius(12)
         }
       }, (s: SessionStat) => s.sessionId + s.keyId)
@@ -170,11 +175,11 @@ export struct RecordsPage {
                 Text(r.model)
                   .fontSize(13)
                   .fontWeight(FontWeight.Medium)
-                  .fontColor('#222222')
+                  .fontColor(Theme.text())
                   .maxLines(1)
                 Text(`${r.keyName !== null && r.keyName.length > 0 ? r.keyName : '—'} · ${Fmt.dateTimeShort(r.createdAt)}`)
                   .fontSize(11)
-                  .fontColor('#999999')
+                  .fontColor(Theme.sub())
               }
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
@@ -186,20 +191,20 @@ export struct RecordsPage {
             Row({ space: 14 }) {
               Text(`${I18n.t('in_label')} ${Fmt.tokens(r.inputTokens)}`)
                 .fontSize(11)
-                .fontColor('#888888')
+                .fontColor(Theme.sub())
               Text(`${I18n.t('out_label')} ${Fmt.tokens(r.outputTokens)}`)
                 .fontSize(11)
-                .fontColor('#888888')
+                .fontColor(Theme.sub())
               if (r.cacheReadTokens > 0) {
                 Text(`${I18n.t('cache_label')} ${Fmt.tokens(r.cacheReadTokens)}`)
                   .fontSize(11)
-                  .fontColor('#888888')
+                  .fontColor(Theme.sub())
               }
             }
           }
           .width('100%')
           .padding(12)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(Theme.surface())
           .borderRadius(12)
         }
       }, (r: UsageRecordRow) => r.usgId)
@@ -226,7 +231,7 @@ export struct RecordsPage {
         .onClick(() => { onPage(Math.max(1, page - 1)) })
       Text(`${page} / ${this.totalPages(total)}`)
         .fontSize(12)
-        .fontColor('#666666')
+        .fontColor(Theme.sub())
       Button('›')
         .fontSize(16)
         .width(40)
@@ -237,7 +242,7 @@ export struct RecordsPage {
       Blank()
       Text(`${I18n.t('total_label')} ${Fmt.int(total)} ${I18n.t('items')}`)
         .fontSize(12)
-        .fontColor('#999999')
+        .fontColor(Theme.sub())
     }
     .width('100%')
     .padding({ left: 12, right: 12, top: 8, bottom: 8 })
@@ -246,10 +251,12 @@ export struct RecordsPage {
   private sessionTitle(s: SessionStat): string {
     if (s.sessionId.length > 0) {
       const p = s.sessionId.split('_')
-      return p.length > 1 ? `会话 ${p[1].slice(0, 8)}` : s.sessionId
+      return p.length > 1 ? `${I18n.t('session_prefix')} ${p[1].slice(0, 8)}` : s.sessionId
     }
     if (s.keyId !== null && s.keyId.length > 0) {
-      return s.keyName !== null && s.keyName.length > 0 ? `Key: ${s.keyName}` : '未归属 (Key)'
+      return s.keyName !== null && s.keyName.length > 0
+        ? `${I18n.t('key_prefix')}: ${s.keyName}`
+        : I18n.t('ungrouped_key')
     }
     return I18n.t('ungrouped')
   }

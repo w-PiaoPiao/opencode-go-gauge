@@ -1,5 +1,6 @@
 /** 通用卡片组件 —— Compose Cards 的 ArkUI 移植。 */
 import { Fmt } from '../../common/util/Fmt'
+import { Theme } from '../theme/Theme'
 
 /** 区块容器: 标题 + 内容区 (由 @BuilderParam content 注入)。 */
 @Component
@@ -14,12 +15,12 @@ export struct SectionCard {
         Text(this.title)
           .fontSize(15)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#222222')
+          .fontColor(Theme.text())
         Blank()
         if (this.subtitle.length > 0) {
           Text(this.subtitle)
             .fontSize(11)
-            .fontColor('#999999')
+            .fontColor(Theme.sub())
         }
       }
       .width('100%')
@@ -31,7 +32,7 @@ export struct SectionCard {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(Theme.surface())
     .borderRadius(14)
     .shadow({ radius: 8, color: '#11000000', offsetY: 2 })
   }
@@ -43,7 +44,7 @@ export struct KpiCard {
   @Prop label: string = ''
   @Prop value: string = ''
   @Prop hint: string = ''
-  @Prop accent: string = '#333333'
+  @Prop accent: string = Theme.text()
 
   build() {
     Column({ space: 4 }) {
@@ -54,17 +55,17 @@ export struct KpiCard {
         .maxLines(1)
       Text(this.label)
         .fontSize(12)
-        .fontColor('#666666')
+        .fontColor(Theme.sub())
       if (this.hint.length > 0) {
         Text(this.hint)
           .fontSize(10)
-          .fontColor('#AAAAAA')
+          .fontColor(Theme.faint())
           .maxLines(1)
       }
     }
     .width('100%')
     .padding(10)
-    .backgroundColor('#F8F9FC')
+    .backgroundColor(Theme.surfaceSoft())
     .borderRadius(10)
     .alignItems(HorizontalAlign.Start)
   }
@@ -83,6 +84,7 @@ export struct ModelIcon {
   build() {
     Text(this.initials())
       .fontSize(12)
+      // 彩色徽标上的白字: 与主题无关 (深色模式下同样需要白字, 不能用 surface)
       .fontColor('#FFFFFF')
       .width(26)
       .height(26)

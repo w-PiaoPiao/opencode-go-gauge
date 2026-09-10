@@ -3,6 +3,7 @@
  * 组件内封闭实现, 后续如需可平滑替换为 mpchart 等三方库。
  */
 import { HourStat } from '../../common/model/Models'
+import { Theme } from '../theme/Theme'
 
 /** 配额环: Ring Progress + 中央百分比。 */
 @Component
@@ -27,15 +28,15 @@ export struct QuotaRing {
       }
       Text(this.label)
         .fontSize(13)
-        .fontColor('#333333')
+        .fontColor(Theme.text())
       Text(this.caption)
         .fontSize(11)
-        .fontColor('#999999')
+        .fontColor(Theme.sub())
         .maxLines(1)
     }
     .width(120)
     .padding(8)
-    .backgroundColor('#F8F9FC')
+    .backgroundColor(Theme.surfaceSoft())
     .borderRadius(12)
   }
 }
@@ -50,16 +51,16 @@ export struct BarChart24h {
       Row() {
         Text(`${this.hours.length} 小时输入/输出`)
           .fontSize(12)
-          .fontColor('#888888')
+          .fontColor(Theme.sub())
         Blank()
         Row({ space: 8 }) {
           Row({ space: 3 }) {
             Circle({ width: 8, height: 8 }).fill('#4C8DFF')
-            Text('输入').fontSize(11).fontColor('#888888')
+            Text('输入').fontSize(11).fontColor(Theme.sub())
           }
           Row({ space: 3 }) {
             Circle({ width: 8, height: 8 }).fill('#FFB74D')
-            Text('输出').fontSize(11).fontColor('#888888')
+            Text('输出').fontSize(11).fontColor(Theme.sub())
           }
         }
       }
@@ -85,7 +86,7 @@ export struct BarChart24h {
             if (idx % 4 === 0) {
               Text(h.hour.slice(0, 2))
                 .fontSize(9)
-                .fontColor('#BBBBBB')
+                .fontColor(Theme.faint())
             } else {
               Text('')
                 .fontSize(9)
@@ -98,7 +99,7 @@ export struct BarChart24h {
     }
     .width('100%')
     .padding(12)
-    .backgroundColor('#F8F9FC')
+    .backgroundColor(Theme.surfaceSoft())
     .borderRadius(12)
   }
 
@@ -154,18 +155,30 @@ export struct DonutChart {
 /** 折线趋势图 (多序列归一化, Canvas 绘制)。 */
 @Component
 export struct TrendLine {
-  @Prop series: TrendPointSeries[] = []
+  // @Watch 必需: ArkUI 的 Canvas 不会因状态变化自动重绘, 只在 onReady 回调里
+  // 画一次. 没有它时, 统计页 load() 换掉数据后曲线仍是上一份 (要等组件重建,
+  // 例如切 tab, 才会更新).
+  @Prop @Watch('onSeriesChanged') series: TrendPointSeries[] = []
   @Prop chartHeight: number = 150
   private settings: RenderingContextSettings = new RenderingContextSettings(true)
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings)
+  /** onReady 是否已触发: 数据先到时不能画 (画布尺寸为 0), 需在 ready 后补画。 */
+  private ready: boolean = false
+
+  onSeriesChanged(): void {
+    if (this.ready) {
+      this.draw()
+    }
+  }
 
   build() {
     Canvas(this.ctx)
       .width('100%')
       .height(this.chartHeight)
-      .backgroundColor('#F8F9FC')
+      .backgroundColor(Theme.surfaceSoft())
       .borderRadius(12)
       .onReady(() => {
+        this.ready = true
         this.draw()
       })
   }
