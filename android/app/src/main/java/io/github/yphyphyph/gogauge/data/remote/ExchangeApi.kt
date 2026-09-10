@@ -33,10 +33,15 @@ class ExchangeApi(
             .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw OpenCodeApiException("汇率接口 HTTP ${resp.code}")
-            val body = resp.body?.string() ?: ""
+            // 有界读取: 汇率响应只有几百字节, 但仍按共享上限保护
+            val body = readBoundedBody(resp, MAX_BODY_BYTES)
             val data = json.decodeFromString<RateResponse>(body)
             data.rates["CNY"]?.takeIf { it > 0 }
                 ?: throw OpenCodeApiException("汇率接口缺少 CNY")
         }
+    }
+
+    private companion object {
+        const val MAX_BODY_BYTES = 256 * 1024
     }
 }

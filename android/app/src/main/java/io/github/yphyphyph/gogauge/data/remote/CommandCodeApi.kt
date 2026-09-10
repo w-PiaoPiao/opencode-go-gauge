@@ -4,6 +4,7 @@ import io.github.yphyphyph.gogauge.data.model.QuotaResult
 import io.github.yphyphyph.gogauge.data.model.QuotaWindow
 import io.github.yphyphyph.gogauge.data.model.UsageChartBucket
 import io.github.yphyphyph.gogauge.data.model.UsageRecord
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -40,10 +41,15 @@ class CommandCodeApi(private val client: OkHttpClient = OpenCodeApi.defaultClien
             val credits = get("/billing/credits", token)
             val sub = try {
                 get("/billing/subscriptions", token)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 null // 订阅缺失不影响配额主数据
             }
             parseQuota(credits.toString(), sub?.toString(), System.currentTimeMillis())
+        } catch (e: CancellationException) {
+            // 协程取消必须传播, 不能落成 QuotaResult.error (否则取消后仍继续写库)
+            throw e
         } catch (e: Exception) {
             QuotaResult("Default", "commandcode", false, nowIso, error = e.message ?: "未知错误")
         }

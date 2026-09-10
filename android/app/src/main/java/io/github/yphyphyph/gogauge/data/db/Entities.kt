@@ -31,6 +31,7 @@ data class AccountEntity(
     primaryKeys = ["account_id", "model", "time_bucket"],
     indices = [
         Index(value = ["account_id", "time_bucket"], name = "idx_charts_account_time"),
+        Index(value = ["account_id", "local_date"], name = "idx_charts_account_localdate"),
     ],
 )
 data class UsageChartEntity(
@@ -50,6 +51,10 @@ data class UsageChartEntity(
     @ColumnInfo(name = "cache_read_tokens") val cacheReadTokens: Int = 0,
     @ColumnInfo(name = "cache_creation_tokens") val cacheCreationTokens: Int = 0,
     @ColumnInfo(name = "synced_at") val syncedAt: String = "",
+    // 本地日 "yyyy-MM-dd" (写入时按本地时区落库): 使日界过滤可走索引.
+    // 见 AppDatabase.MIGRATION_3_4 说明 —— SQLite 拒绝在索引里用非确定性的
+    // datetime(..., 'localtime'), 只能物化成一列.
+    @ColumnInfo(name = "local_date") val localDate: String? = null,
 )
 
 /** Mirrors desktop db.py v2.0.0 `usage_records` table — records belong to an account. */
@@ -59,6 +64,8 @@ data class UsageChartEntity(
         Index(value = ["created_at"], name = "idx_usage_time"),
         Index(value = ["session_id"], name = "idx_usage_session"),
         Index(value = ["account_id", "created_at"], name = "idx_usage_account_time"),
+        Index(value = ["account_id", "local_date"], name = "idx_usage_account_localdate"),
+        Index(value = ["account_id", "model"], name = "idx_usage_account_model"),
     ],
 )
 data class UsageRecordEntity(
@@ -80,6 +87,8 @@ data class UsageRecordEntity(
     @ColumnInfo(name = "synced_at") val syncedAt: String = "",
     // desktop db.insert_usage_records: 记录归属账号 (v2.0.0 多用户维度列)
     @ColumnInfo(name = "account_id") val accountId: Int = 1,
+    // 本地日 "yyyy-MM-dd": 日界过滤的索引列, 见 AppDatabase.MIGRATION_3_4
+    @ColumnInfo(name = "local_date") val localDate: String? = null,
 )
 
 /**

@@ -51,6 +51,14 @@ data class SyncResult(
     val pages: Int = 0,
     val partial: Boolean = false,
     val failedPages: Int = 0,
+    /**
+     * 失败是否值得重试 (仅供 WorkManager 后台任务判断).
+     *
+     * false 表示永久性失败 —— 未登录、鉴权失效、已有同步在跑等, 重试无意义;
+     * true 才是网络抖动一类可恢复错误. 默认 true 以保持"未知错误倾向于重试",
+     * 但已知的永久失败路径都会显式置 false.
+     */
+    val retryable: Boolean = true,
 )
 
 /**
@@ -169,7 +177,10 @@ class DashboardRepository(
         if (accountId == 0) return
         val now = System.currentTimeMillis() / 1000.0
         val slot = synchronized(quotaCache) { quotaCache[accountId] }
-        if (slot?.data != null && now - slot.at < QUOTA_CACHE_TTL) return
+        // 失败也要吃 TTL: 失败路径写入 data = null, 若以 data != null 作为命中条件,
+        // 失败的账号会永远绕过缓存 —— 总览页每 5s 重试一次, 每个账号都重新发起
+        // 2 次尝试 + 退避的配额请求. 首个 slot 尚不存在时仍照常发起 (slot != null 判定).
+        if (slot != null && now - slot.at < QUOTA_CACHE_TTL) return
         quotaMutex.withLock {
             if (accountId in quotaRefreshing) return
             val token = syncDao.getTokenFor(accountId)
@@ -177,7 +188,8 @@ class DashboardRepository(
             quotaRefreshing.add(accountId)
         }
         try {
-            // failure also writes cache (null data) so the UI doesn't retry every load
+            // 成功与失败都写 slot 时间戳: 失败时 data 保持 null, 但 at 已更新,
+            // 因此 TTL 内不会重复重试 (见 ensureQuotaFor 开头的 slot != null 判定)
             val target = synchronized(quotaCache) { quotaCache.getOrPut(accountId) { QuotaCache() } }
             val token = syncDao.getTokenFor(accountId)
             val hint = syncDao.getWorkspaceHintFor(accountId)
@@ -308,27 +320,31 @@ class DashboardRepository(
     suspend fun accountsOverview(): AccountsOverviewData {
         val activeId = activeAccountId()
         val loggedIn = accounts().filter { it.hasToken }
-        val list = loggedIn.map { acc ->
-            val aid = acc.id
-            val slot = synchronized(quotaCache) { quotaCache[aid] }
-            coroutineScope {
-                val todayDeferred = async { usageDao.totals("today", aid) }
-                val trendDeferred = async { usageDao.todayTrend(aid) }
-                val dailyDeferred = async { usageDao.dailyStats(7, aid) }
-                val syncDeferred = async { syncDao.getSyncStateFor(aid) }
-                val syncState = syncDeferred.await()
-                AccountOverview(
-                    id = aid,
-                    name = acc.name,
-                    active = aid == activeId,
-                    quota = slot?.data,
-                    today = todayDeferred.await(),
-                    todayTrend = trendDeferred.await(),
-                    daily7 = dailyDeferred.await(),
-                    lastSyncAt = syncState.lastSyncAt,
-                    lastSyncStatus = syncState.lastSyncStatus,
-                )
-            }
+        // 账号之间并发: 原先 map + 内层 coroutineScope 只让单个账号内的 4 条查询并行,
+        // 账号本身仍串行, N 个账号就是 N 组查询依次排队
+        val list = coroutineScope {
+            loggedIn.map { acc ->
+                val aid = acc.id
+                val slot = synchronized(quotaCache) { quotaCache[aid] }
+                async {
+                    val todayDeferred = async { usageDao.totals("today", aid) }
+                    val trendDeferred = async { usageDao.todayTrend(aid) }
+                    val dailyDeferred = async { usageDao.dailyStats(7, aid) }
+                    val syncDeferred = async { syncDao.getSyncStateFor(aid) }
+                    val syncState = syncDeferred.await()
+                    AccountOverview(
+                        id = aid,
+                        name = acc.name,
+                        active = aid == activeId,
+                        quota = slot?.data,
+                        today = todayDeferred.await(),
+                        todayTrend = trendDeferred.await(),
+                        daily7 = dailyDeferred.await(),
+                        lastSyncAt = syncState.lastSyncAt,
+                        lastSyncStatus = syncState.lastSyncStatus,
+                    )
+                }
+            }.awaitAll()
         }
         return AccountsOverviewData(accounts = list, usdCny = usdCny())
     }
@@ -347,11 +363,16 @@ class DashboardRepository(
         } else {
             accounts().filter { it.hasToken }.map { it.id to it.name }
         }
-        if (targets.isEmpty()) return SyncResult(ok = false, error = "未登录")
+        if (targets.isEmpty()) {
+            return SyncResult(ok = false, error = "未登录", retryable = false)
+        }
         // check-then-set 原子化: WorkManager / 前台定时器 / 下拉刷新 / 登录后 fullSync
         // 可能并发进入, 无锁会双同步并互踩进度状态 (desktop 对应有 _sync_lock)
         syncMutex.withLock {
-            if (_progress.value.running) return SyncResult(ok = false, error = "已有同步任务进行中")
+            if (_progress.value.running) {
+                // 不是错误: 已有同步在跑, 重试只会继续撞锁
+                return SyncResult(ok = false, error = "已有同步任务进行中", retryable = false)
+            }
             _progress.value = SyncProgress(running = true, mode = mode, phase = "usage")
         }
 
@@ -360,27 +381,37 @@ class DashboardRepository(
         try {
             var totalInserted = 0
             var pages = 0
-            var anyError = ""
+            val errors = mutableListOf<String>()
             var partial = false
 
+            // 单账号失败不中断整轮 (与桌面端 sync_usage 一致): 否则首个 token 失效
+            // 的账号会永久阻塞其后所有账号的后台自动同步
+            var anyRetryable = false
             for ((aid, name) in targets) {
                 setProgress { it.copy(account = name) }
                 val result = syncOneAccount(aid, name, mode, windowDays)
                 totalInserted += result.inserted
                 pages += result.pages
                 if (!result.ok) {
-                    anyError = result.error ?: "同步失败"
-                    if (mode == "incremental") {
-                        val msg = "[$name] $anyError"
-                        failSync(msg, anyError)
-                        return SyncResult(ok = false, error = anyError, inserted = totalInserted)
-                    }
+                    errors.add("[$name] ${result.error ?: "同步失败"}")
+                    // 任一账号的失败可恢复 -> 整轮值得重试; 全部为永久性失败才停止
+                    if (result.retryable) anyRetryable = true
                 }
                 if (result.partial) partial = true
             }
 
-            return if (partial || (mode != "incremental" && anyError.isNotEmpty())) {
-                val msg = if (anyError.isNotEmpty()) "部分账号同步异常" else "完成, 但部分页面拉取失败"
+            val anyError = errors.joinToString("; ")
+            // 全部账号都失败 -> 整体失败. retryable 必须逐账号聚合: 若全为鉴权/未登录
+            // 这类永久失败, 置 false 让 WorkManager 停止指数退避重试
+            if (errors.size == targets.size) {
+                failSync(anyError, anyError)
+                return SyncResult(
+                    ok = false, error = anyError,
+                    inserted = totalInserted, retryable = anyRetryable,
+                )
+            }
+            return if (partial || errors.isNotEmpty()) {
+                val msg = if (errors.isNotEmpty()) "部分账号同步异常" else "完成, 但部分页面拉取失败"
                 setProgress { it.copy(phase = "done", message = msg) }
                 SyncResult(ok = true, partial = true, inserted = totalInserted, pages = pages)
             } else {
@@ -392,7 +423,8 @@ class DashboardRepository(
             throw e // 结构化并发取消必须穿透, 不能当作同步失败吞掉
         } catch (e: Exception) {
             failSync(e.message ?: "同步失败", e.message)
-            return SyncResult(ok = false, error = e.message)
+            // 鉴权失效重试不会自愈 (需重新登录), 其余异常按可恢复处理
+            return SyncResult(ok = false, error = e.message, retryable = e !is AuthException)
         } finally {
             setProgress { it.copy(running = false, account = "") }
         }
@@ -409,7 +441,9 @@ class DashboardRepository(
         windowDays: Int?,
     ): SyncResult {
         val token = syncDao.getTokenFor(accountId)
-        if (token.isEmpty()) return SyncResult(ok = false, error = "未登录")
+        if (token.isEmpty()) {
+            return SyncResult(ok = false, error = "未登录", retryable = false)
+        }
         if (syncDao.getAccountProvider(accountId) == PROVIDER_COMMANDCODE) {
             return ccSyncOneAccount(accountId, name, mode, windowDays, token)
         }
@@ -427,7 +461,8 @@ class DashboardRepository(
                 val msg = "工作区解析失败: ${e.message}"
                 syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
                 setProgress { it.copy(phase = "error", message = msg) }
-                return SyncResult(ok = false, error = e.message)
+                // 鉴权失效: 重试不会自愈, 需用户重新登录
+                return SyncResult(ok = false, error = e.message, retryable = false)
             } catch (e: OpenCodeApiException) {
                 val msg = "工作区解析失败: ${e.message}"
                 syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
@@ -451,6 +486,10 @@ class DashboardRepository(
                 var batchInserted = 0
                 var batchFullPages = 0
                 var batchFailed = 0
+                // 整批一次事务: 原先每页一次 insertUsageRecords (各自 SELECT 去重 +
+                // upsert + 事务), 5 页批次 = 5 次事务. 汇总后单次写入, 去重也只查一次.
+                val batchRecords = ArrayList<io.github.yphyphyph.gogauge.data.db.UsageRecordEntity>()
+                val nowIso = Instant.now().toString()
                 for (p in batchPages.sorted()) {
                     val result = results[p]
                     if (result == null) {
@@ -471,16 +510,13 @@ class DashboardRepository(
                             }
                         }
                     }
-                    val inserted = usageDao.insertUsageRecords(
-                        result.map { r ->
-                            val entity = r.toEntity(Instant.now().toString())
-                            entity.copy(accountId = accountId)
-                        },
-                        accountId,
-                    )
+                    result.mapTo(batchRecords) { it.toEntity(nowIso).copy(accountId = accountId) }
+                    if (result.size >= 50) batchFullPages++
+                }
+                if (batchRecords.isNotEmpty()) {
+                    val inserted = usageDao.insertUsageRecords(batchRecords, accountId)
                     totalInserted += inserted
                     batchInserted += inserted
-                    if (result.size >= 50) batchFullPages++
                     setProgress { it.copy(inserted = totalInserted) }
                 }
 
@@ -577,7 +613,11 @@ class DashboardRepository(
                         val msg = "[$name] 第 ${pages + 1} 页拉取失败: ${e.message}"
                         syncDao.updateSyncStateAndTotals(accountId, "error", msg, totalInserted)
                         setProgress { it.copy(phase = "error", message = msg) }
-                        return SyncResult(ok = false, error = e.message, inserted = totalInserted)
+                        // 鉴权类失败重试无意义 (需重新登录); 其余按可恢复处理
+                        return SyncResult(
+                            ok = false, error = e.message,
+                            inserted = totalInserted, retryable = e !is AuthException,
+                        )
                     }
                     failed = true
                     break
@@ -648,6 +688,7 @@ class DashboardRepository(
                             cacheReadTokens = b.cacheReadTokens,
                             cacheCreationTokens = b.cacheCreationTokens,
                             syncedAt = Instant.now().toString(),
+                            localDate = localDateOfBucket(b.timeBucket),
                         )
                     }
                 )

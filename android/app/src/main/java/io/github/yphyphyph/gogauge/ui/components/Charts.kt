@@ -159,10 +159,17 @@ fun ModelPieChart(
     )
 }
 
+/**
+ * 模型排行/饼图的取值口径 (三端一致):
+ * - input: **含缓存命中的总输入** (未命中 + 缓存命中)。缓存命中通常占绝大多数,
+ *   只取 uncachedInputTokens 会让数值严重偏低
+ * - output: 总输出 token
+ * - cost: 金额
+ */
 private fun getVal(m: ModelStat, dim: String): Double = when (dim) {
     "output" -> m.totalOutputTokens.toDouble()
     "cost" -> m.totalCostUsd
-    else -> m.uncachedInputTokens.toDouble()
+    else -> m.totalInputTokens.toDouble()
 }
 
 /**
