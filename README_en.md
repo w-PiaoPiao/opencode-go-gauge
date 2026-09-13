@@ -5,7 +5,8 @@
 </p>
 
 <p align="center">
-  <b>A local-first usage dashboard for OpenCode Go</b>: quota windows, token breakdown, model ranking and usage records — all in one place.
+  <b>A local-first usage dashboard</b>: quota windows, token breakdown, model ranking and usage records — all in one place.
+  Supports <b>OpenCode Go</b> and <b>Command Code GOAT</b> plans.
 </p>
 
 <p align="center">
@@ -14,15 +15,16 @@
 
 > 🔀 This repository is a fork of [yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge),
 > adding **macOS** and **Android** support on top of the original Windows app.
-> macOS / Android packages are published in this repo's [Releases](releases); the Windows installer is published by the upstream repo.
+> All platform packages (Windows / macOS / Android) are published in this repo's [Releases](releases).
 
 ## 🗺 Platform Support
 
 | Platform | Status | Installer | Docs |
 |:---:|:---:|:---|:---|
-| **Windows** | ✅ Released | [Upstream Releases](https://github.com/yphyphyph/opencode-go-gauge/releases): `GoGauge.exe` (single file, no install) | — |
+| **Windows** | ✅ Released | [This repo's Releases](releases): `GoGauge-vX.X.X-windows.exe` (single file, no install) | — |
 | **macOS** | ✅ Released | [This repo's Releases](releases): arm64 / x86_64 packages (see the actual assets on the Releases page) | [docs/macos.md](docs/macos.md) |
-| **Android** | ✅ Released | [This repo's Releases](releases): `GoGauge-v2.0.0-android.apk` (APK sideload) | [android/README.md](android/README.md) |
+| **Android** | ✅ Released | [This repo's Releases](releases): `GoGauge-vX.X.X-android.apk` (APK sideload) | [android/README.md](android/README.md) |
+| **HarmonyOS NEXT** | 🚧 In development (opencode quota / overview / stats / records / multi-account work; Command Code & accounts overview pending) | HAP (build / signing / publishing: [harmonyos/README.md](harmonyos/README.md)) | [harmonyos/README.md](harmonyos/README.md) |
 
 ---
 
@@ -50,7 +52,8 @@
 - **Usage stats**: token breakdown (input / output / reasoning / cache read / cache write / sessions), model usage donut + ranking, cost / requests / total tokens triple-line trend
 - **Session history**: per-session aggregation of requests / input / output / reasoning / total tokens / cost, paginated
 - **Usage records**: request-level detail with pagination and model filtering, incl. model / key-name columns
-- **Multi-account support**: user management (add / switch / rename / remove / re-login), usage isolated per account, key-name column on records & sessions
+- **Multi-account support**: user management (add / switch / rename / remove / re-login), usage isolated per account, key-name column on records & sessions; accounts can come from OpenCode or Command Code (with source badge)
+- **Command Code GOAT support**: after logging into a Command Code account, view 5h / weekly / monthly quota windows and request-level details (GOAT source badge)
 - **Accounts overview panel**: toggle in settings, aggregates each account's quota windows and today's usage with cross-account summary KPIs and a 7-day cost trend comparison
 - **Built-in WebView login**: independent login window opens the official auth page, auto-fills cookie & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
@@ -63,14 +66,13 @@
 
 ### Windows
 
-Download `GoGauge.exe` (single file, no install) from the **upstream Releases** in the [platform table](#-platform-support):
+Download `GoGauge-vX.X.X-windows.exe` (single file, no install) from [Releases](releases):
 
 1. Double-click to run, click "Login Now" on the welcome page — an official auth window pops up
 2. After login, the dashboard loads and usage data syncs automatically
 3. Data is stored in the `data\` folder next to the exe
 
 > Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window minimizes to the system tray.
-> The Windows installer is maintained and published by the upstream repo.
 
 ### macOS
 
@@ -80,7 +82,7 @@ Download the package for your architecture (arm64 / x86_64) from [Releases](rele
 
 ### Android
 
-Download `GoGauge-v2.0.0-android.apk` from [Releases](releases) and allow "install unknown apps" to sideload it.
+Download `GoGauge-vX.X.X-android.apk` from [Releases](releases) and allow "install unknown apps" to sideload it.
 
 > The Android app is a native Kotlin + Jetpack Compose implementation with the same features as the desktop version —
 > build, tech stack and platform differences are documented in [android/README.md](android/README.md).
@@ -115,7 +117,7 @@ Output: `dist/GoGauge.app` (no console window; `.icns` icon and menu-bar tray su
 
 ## 📊 Data Notes
 
-- **Source**: opencode.ai workspace usage API (`/_server` server-fn) + quota page HTML parsing
+- **Source**: OpenCode Go = opencode.ai workspace usage API (`/_server` server-fn) + quota page HTML parsing; Command Code GOAT = api.commandcode.ai internal API (credits / usage)
 - **Total tokens** = input (incl. cache hits) + output + reasoning
 - **Cache hit rate** = hits / (hits + misses)
 - **Cost**: raw USD; CNY converted via open.er-api.com live FX rate (24h cache)
