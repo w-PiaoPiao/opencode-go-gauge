@@ -15,15 +15,15 @@
 
 > 🔀 本仓库 fork 自 [yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge)，
 > 在原 Windows 版基础上新增 **macOS** 与 **Android** 平台支持。
-> macOS / Android 安装包发布在本仓库 [Releases](releases)，Windows 安装包由上游仓库发布。
+> 全平台安装包（Windows / macOS / Android）均发布在本仓库 [Releases](releases)。
 
 ## 🗺 平台支持
 
 | 平台 | 状态 | 安装包 | 文档 |
 |:---:|:---:|:---|:---|
-| **Windows** | ✅ 正式版 | [上游 Releases](https://github.com/yphyphyph/opencode-go-gauge/releases)：`GoGauge.exe`（单文件，无需安装） | — |
+| **Windows** | ✅ 正式版 | [本仓库 Releases](releases)：`GoGauge-vX.X.X-windows.exe`（单文件，无需安装） | — |
 | **macOS** | ✅ 正式版 | [本仓库 Releases](releases)：arm64 / x86_64 分包（以 Releases 页实际产物为准） | [docs/macos.md](docs/macos.md) |
-| **Android** | ✅ 正式版 | [本仓库 Releases](releases)：`GoGauge-v2.1.0-android.apk`（APK 侧载） | [android/README.md](android/README.md) |
+| **Android** | ✅ 正式版 | [本仓库 Releases](releases)：`GoGauge-vX.X.X-android.apk`（APK 侧载） | [android/README.md](android/README.md) |
 | **HarmonyOS NEXT** | 🚧 开发中（opencode 配额/概览/统计/记录/多账号可用；缺 Command Code 与账户总览） | HAP（构建/签名/上架见 [harmonyos/README.md](harmonyos/README.md)） | [harmonyos/README.md](harmonyos/README.md) |
 
 ---
@@ -66,14 +66,13 @@
 
 ### Windows
 
-从上方 [平台支持](#-平台支持) 的**上游 Releases** 下载 `GoGauge.exe`（单文件，无需安装）：
+从本仓库 [Releases](releases) 下载 `GoGauge-vX.X.X-windows.exe`（单文件，无需安装）：
 
 1. 双击运行，欢迎页点击「立即登录」弹出官方授权窗口
 2. 完成登录后自动进入面板并同步用量数据
 3. 数据保存在 exe 同目录 `data\` 文件夹
 
 > 需要 Windows 10/11（自带 WebView2 Runtime）。关闭窗口会最小化到系统托盘。
-> Windows 安装包由上游仓库维护发布。
 
 ### macOS
 
@@ -83,7 +82,7 @@
 
 ### Android
 
-从本仓库 [Releases](releases) 下载 `GoGauge-v2.1.0-android.apk`，在系统设置中允许「安装未知来源应用」后侧载安装。
+从本仓库 [Releases](releases) 下载 `GoGauge-vX.X.X-android.apk`，在系统设置中允许「安装未知来源应用」后侧载安装。
 
 > Android 版为 Kotlin + Jetpack Compose 原生实现，功能与桌面版一致，
 > 构建 / 技术栈 / 与桌面版的差异详见 [android/README.md](android/README.md)。
