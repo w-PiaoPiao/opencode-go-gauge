@@ -17,7 +17,10 @@ else
 fi
 
 echo "[2/5] 读取版本号 + 生成本次构建信息..."
-APP_VERSION="$(python3 -c 'from app import __version__; print(__version__)')"
+# 直读源码文本而非 import: __pycache__ 的旧 pyc 在 mtime+size 恰好未变时
+# (版本号单字符变更大小不变) 会被 Python 缓存校验放行, 读到上一个版本号,
+# 导致打包产物版本错一代 (曾把 2.1.0e 打成 2.1.0d)
+APP_VERSION="$(python3 -c 'import re; print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", open("app/__init__.py").read()).group(1))')"
 # 打包产物的更新检查仓库: 默认本 fork (mac 版实际发布处), 可用环境变量覆盖
 UPDATE_REPO="${GOUSAGE_UPDATE_REPO:-w-PiaoPiao/opencode-go-gauge}"
 cat > app/_build_info.py <<EOF
