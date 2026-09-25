@@ -280,6 +280,10 @@ def test_settings_roundtrip_preserves_extras(tmp_db):
     assert db.get_key_names() == {"k1": "名字"}
     assert db.get_settings()["sync_interval_sec"] == 60
     assert db.get_active_account_id() == aid
+    # chart_animation 默认关闭 (弱机优先), bool 值可持久化
+    assert db.get_settings()["chart_animation"] is False
+    db.save_settings({"chart_animation": True})
+    assert db.get_settings()["chart_animation"] is True
 
 
 # ---------------------------------------------------------------------------

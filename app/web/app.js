@@ -37,6 +37,7 @@ const I18N = {
     d30short: "30天", d60: "60天", d90: "90天", d180: "180天",
     fullSync: "立即全量同步", fullSyncDesc: "重新拉取历史记录，补全数据", startFullSync: "开始全量同步",
     setAppearance: "外观", theme: "主题", themeDesc: "亮色 / 深色，顶栏按钮快捷切换",
+    chartAnim: "图表动画", chartAnimDesc: "数据刷新时的过渡动画；低配设备建议关闭以减少卡顿",
     light: "浅色", dark: "深色", currency: "默认货币", currencyDesc: "费用主显示货币（实时汇率）",
     language: "语言 / Language", languageDesc: "界面显示语言",
     setData: "数据", dataDir: "数据目录", syncInfo: "同步记录",
@@ -132,6 +133,7 @@ const I18N = {
     d30short: "30d", d60: "60d", d90: "90d", d180: "180d",
     fullSync: "Full Sync Now", fullSyncDesc: "Re-fetch history records to fill gaps", startFullSync: "Start Full Sync",
     setAppearance: "Appearance", theme: "Theme", themeDesc: "Light / Dark, quick toggle in top bar",
+    chartAnim: "Chart Animation", chartAnimDesc: "Transition animation on data refresh; disable on low-end devices",
     light: "Light", dark: "Dark", currency: "Currency", currencyDesc: "Primary currency for costs (live FX rate)",
     language: "Language", languageDesc: "Interface language",
     setData: "Data", dataDir: "Data Directory", syncInfo: "Sync History",
@@ -218,12 +220,12 @@ let state = {
 
 const COLOR = { input: "#4f8ef7", output: "#22c55e", reasoning: "#a78bfa", cache: "#06b6d4", cost: "#d97706" };
 
-/* 弱机优化: 关闭 Chart.js 全部动画. 仪表盘数据图每次刷新都重建, 动画没有
-   叙事价值, 却要在低功耗小主机 (N100 级 CPU / 软件渲染 WebView) 上重合成
-   上百帧, 是刷新时掉帧卡顿的大头. 静态一帧直接出图 (官方文档的全局开关,
-   同时禁用图表初始/更新/hover tooltip 等所有动画). */
-if (window.Chart) {
-  Chart.defaults.animation = false;
+/* 图表动画由设置 chart_animation 控制 (默认关闭: 低配设备上每次刷新重建
+   动画要在 N100 级小主机/软件渲染的 WebView 里重合成上百帧, 是掉帧大头).
+   设置未就绪前保持关闭 (安全默认, 首次渲染图表发生在 settings 加载之后). */
+function applyChartAnimation(on) {
+  if (!window.Chart) return;
+  Chart.defaults.animation = on === true;
 }
 const QUOTA_LABEL = { "5h Rolling": () => t("rolling"), "Weekly": () => t("weekly"), "Monthly": () => t("monthly") };
 const PLAN_BADGE = { lite: "GO", sub: "GO", byok: "BYOK" };
@@ -1058,12 +1060,13 @@ async function renderSettings() {
     const settings = await api("/api/settings");
     state.settings = settings;
     syncSettingsPills();
-    $("set-auto-sync").checked = settings.auto_sync !== false;
-    // 开机自启仅 mac 打包版展示 (LaunchAgent 实现)
-    const macApp = isMac() && window.pywebview !== undefined;
-    $("row-autostart").hidden = !macApp;
-    if (macApp) $("set-autostart").checked = settings.autostart === true;
-    $("set-overview-panel").checked = settings.show_accounts_panel === true;
+  $("set-auto-sync").checked = settings.auto_sync !== false;
+  // 开机自启仅 mac 打包版展示 (LaunchAgent 实现)
+  const macApp = isMac() && window.pywebview !== undefined;
+  $("row-autostart").hidden = !macApp;
+  if (macApp) $("set-autostart").checked = settings.autostart === true;
+  $("set-overview-panel").checked = settings.show_accounts_panel === true;
+  $("set-chart-anim").checked = settings.chart_animation === true;
     await fetchAccounts();  // 账户列表 (失败不阻塞其他设置渲染)
   } catch (e) { toast(e.message || t("loadFailed"), "err"); }
 }
@@ -1552,6 +1555,13 @@ function bindEvents() {
     api("/api/settings", { method: "PUT", body: JSON.stringify({ show_accounts_panel: e.target.checked }) }).catch(() => {});
     applyOverviewPanel(e.target.checked);
   });
+  // 图表动画开关: 即时生效 — 改 Chart 全局默认后重建可见页图表
+  $("set-chart-anim").addEventListener("change", (e) => {
+    state.settings.chart_animation = e.target.checked;
+    api("/api/settings", { method: "PUT", body: JSON.stringify({ chart_animation: e.target.checked }) }).catch(() => {});
+    applyChartAnimation(e.target.checked);
+    rerenderCharts();
+  });
   // 账户操作已合并进「OpenCode 账户」卡片内的账号行 (relogin/logout 为行级动作)
 
   // 多用户: 顶栏切换器 + 设置页账户列表
@@ -1642,7 +1652,9 @@ let APP_VERSION = "";  // 后端版本号 (app/__init__.py), 唯一版本源
   syncSettingsPills();
   $("set-auto-sync").checked = state.settings.auto_sync !== false;
   $("set-overview-panel").checked = state.settings.show_accounts_panel === true;
+  $("set-chart-anim").checked = state.settings.chart_animation === true;
   applyOverviewPanel(state.settings.show_accounts_panel === true);
+  applyChartAnimation(state.settings.chart_animation === true);
   await checkState();
   restartAutoSync();
 })();

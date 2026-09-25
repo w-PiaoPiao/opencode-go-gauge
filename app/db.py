@@ -1222,6 +1222,7 @@ _DEFAULT_SETTINGS = {
     "auto_sync": True,  # 自动增量同步开关
     "autostart": False,  # 开机自启 (macOS LaunchAgent; 仅 mac 打包版生效)
     "show_accounts_panel": False,  # 账户总览面板开关 (侧边栏入口显隐)
+    "chart_animation": False,  # 图表动画开关 (默认关闭: 低配设备上每次刷新重建动画是掉帧大头)
 }
 
 
@@ -1429,7 +1430,7 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                             current[key] = max(1, min(int(val), 3650))
                         except (TypeError, ValueError):
                             pass
-                elif key in ("auto_sync", "show_accounts_panel"):
+                elif key in ("auto_sync", "show_accounts_panel", "chart_animation"):
                     current[key] = bool(payload[key])
                 else:
                     current[key] = payload[key]
