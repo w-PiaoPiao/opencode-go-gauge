@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import datetime
+
 from app import db, server
 
 
@@ -23,10 +25,14 @@ def two_accounts(tmp_path, monkeypatch):
     db._schema_init_path = None
 
 
-def _record(usg_id: str, created_at: str = "2026-09-10 10:00:00") -> dict:
+# 默认落在今天: 日期写死会随时间推移落出 7 天统计窗口 (曾因此假日失败)
+_TODAY_10AM = datetime.now().strftime("%Y-%m-%d") + " 10:00:00"
+
+
+def _record(usg_id: str, created_at: str = "") -> dict:
     return {
         "usg_id": usg_id,
-        "created_at": created_at,
+        "created_at": created_at or _TODAY_10AM,
         "model": "test-model",
         "input_tokens": 10,
         "output_tokens": 5,

@@ -14,6 +14,7 @@ def tmp_db(tmp_path, monkeypatch):
     """独立临时库: 重定向 data_dir 并重置模块级连接."""
     monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
     db._DB = None
+    db._invalidate_cred_cache()  # 进程级凭证缓存跨测试共享, 换库必须清
     yield tmp_path
     db.close_db()
 

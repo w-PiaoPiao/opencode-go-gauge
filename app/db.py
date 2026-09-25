@@ -58,6 +58,8 @@ def _invalidate_cred_cache(account_id: Optional[int] = None) -> None:
 def set_data_dir(path: str) -> None:
     global _data_dir_override
     _data_dir_override = path
+    # 数据目录已切换: 凭证缓存键虽是账号 id, 内容却指向旧库, 必须整体失效
+    _invalidate_cred_cache()
 
 
 def _default_data_dir() -> str:
@@ -783,11 +785,13 @@ def save_resolved_workspace(workspace_id: str, account_id: Optional[int] = None)
 
 
 def get_token() -> str:
+    """活跃账号凭证 (明文). 复用 get_account_credentials 的进程内缓存:
+    frozen 版解密走 DPAPI/钥匙串子进程, dashboard 每次刷新都取 token,
+    无缓存时每请求都要派生一次解密调用."""
     aid = get_active_account_id()
     if not aid:
         return ""
-    row = get_db().execute("SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
-    return _storage_decode(aid, row["token"]) if row else ""
+    return get_account_credentials(aid)[0]
 
 
 def get_workspace_hint() -> str:
@@ -1229,9 +1233,12 @@ def prune_old_records(window_days: int | None, account_id: Optional[int] = None)
     if not aid:
         return 0
     window_days = max(1, min(int(window_days), 3650))
+    # local_date 走 idx_usage_account_localdate; 原先 datetime(created_at) <
+    # datetime('now', ?) 每次同步都要按账号全表扫一遍. 日历日口径最多多保留
+    # 窗口边界当天一天的记录, 只多不少, 不会丢数据.
     cur = get_db().execute(
         "DELETE FROM usage_records WHERE account_id = ?"
-        " AND datetime(created_at) < datetime('now', ?)",
+        " AND local_date < date('now', 'localtime', ?)",
         (aid, f"-{window_days} days"),
     )
     get_db().commit()
@@ -1261,7 +1268,8 @@ def usage_records_page(
         where.append("model = ?")
         params.append(model)
     if days:
-        where.append("datetime(created_at) >= datetime('now', ?)")
+        # 日历日口径 + local_date 索引 (原先 datetime(created_at) 全表扫)
+        where.append("local_date >= date('now', 'localtime', ?)")
         params.append(f"-{days} days")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     where_sql, params = _account_filter(where_sql, params, _resolve_account_id(account_id))
@@ -1329,7 +1337,8 @@ def session_stats_page(
     where: list[str] = []
     params: list[Any] = []
     if days:
-        where.append("datetime(created_at) >= datetime('now', ?)")
+        # 日历日口径 + local_date 索引 (原先 datetime(created_at) 全表扫)
+        where.append("local_date >= date('now', 'localtime', ?)")
         params.append(f"-{days} days")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     where_sql, params = _account_filter(where_sql, params, _resolve_account_id(account_id))
@@ -1557,7 +1566,14 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
 _PERIOD_CLAUSES = {
     # local_date 为写入时落库的本地日 (见 _init_schema 迁移 6), 可直接走
     # idx_usage_account_localdate; 原先的 substr(datetime(...,'localtime')) 无法用索引.
-    "5h": "datetime(created_at) >= datetime('now', '-5 hours')",
+    #
+    # "5h" 滚动窗口: datetime() 包裹索引列无法走索引, 先用 local_date 把行集
+    # 收敛到昨/今两天 (索引范围扫, 行数少), 再叠加 datetime() 保留精确的
+    # 滚动 5 小时口径 —— 外层索引过滤 + 内层精确过滤, 两全.
+    "5h": (
+        "(local_date >= date('now', 'localtime', '-1 day')"
+        " AND datetime(created_at) >= datetime('now', '-5 hours'))"
+    ),
     "today": "local_date = date('now', 'localtime')",
 }
 
@@ -1570,18 +1586,25 @@ def _period_where(period: str, account_id: Optional[int] = None) -> tuple[str, l
     elif period == "month":
         start = monthly_cycle_start(account_id)
         if start:
+            # 先以起点的本地日做索引收敛 (local_date >= 起点本地日), 再用
+            # datetime() 保留秒级精确口径; 直接比较 datetime 只能全索引扫描
+            clauses.append("local_date >= date(?, 'localtime')")
+            params.append(start)
             clauses.append("datetime(created_at) >= datetime(?)")
             params.append(start)
         else:
-            # 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 口径一致)
-            clauses.append("datetime(created_at) >= datetime('now', ?)")
+            # 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 日历口径一致)
+            clauses.append("local_date >= date('now', 'localtime', ?)")
             params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
     elif period != "all":
+        # "7d"/"30d" 等: 日历日口径 (与 daily_stats/today_trend 一致), 走索引;
+        # 原先 datetime(created_at) >= datetime('now','-N days') 无法用索引,
+        # dashboard 一次刷新 6 条聚合全是按账号全范围扫描.
         days = 30
         match = _NUM_DAYS_RE.match(period or "")
         if match:
             days = max(1, int(match.group(1)))
-        clauses.append("datetime(created_at) >= datetime('now', ?)")
+        clauses.append("local_date >= date('now', 'localtime', ?)")
         params.append(f"-{days} days")
     return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
 
