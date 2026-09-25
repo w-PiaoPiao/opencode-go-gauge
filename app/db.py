@@ -710,6 +710,20 @@ def count_accounts() -> int:
     return int(get_db().execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"])
 
 
+def list_provider_token_fps(provider: str) -> list[str]:
+    """该 provider 名下所有账号的凭证指纹 (不含明文/密文本身).
+
+    重新登录时用于识别登录窗口里的残留旧会话: 命中这些指纹的凭证在登录前
+    就已存在, 不能算作本次登录新拿到的凭证.
+    """
+    rows = get_db().execute(
+        "SELECT token_fp FROM accounts WHERE provider = ?"
+        " AND TRIM(COALESCE(token_fp, '')) != ''",
+        (provider,),
+    ).fetchall()
+    return [r["token_fp"] for r in rows if r["token_fp"]]
+
+
 def count_logged_in_accounts() -> int:
     row = get_db().execute(
         "SELECT COUNT(*) AS c FROM accounts WHERE TRIM(token) != ''"

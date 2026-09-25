@@ -123,6 +123,22 @@ def _set_phase(phase: str, message: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
+def invalidate_quota_cache(account_id: Optional[int] = None) -> None:
+    """凭证变更 (登录/重新登录/新增账号) 后丢弃配额缓存, 让面板按新凭证立即重拉.
+
+    否则在 QUOTA_CACHE_TTL 内仍会读到旧凭证的结果 (通常是 401 失败值), 界面
+    表现为"重新登录成功但配额依旧是空的". 在途刷新线程的写回由
+    _fetch_quota_with_cache 的缓存槽 identity 校验拦下, 不会把旧凭证结果塞回.
+    """
+    with _quota_gate:
+        if account_id is None:
+            _quota_cache.clear()
+        else:
+            _quota_cache.pop(int(account_id), None)
+            # 放行后续刷新: 不清则 _ensure_quota_async 会认为"已有线程在跑"而不重拉
+            _quota_refreshing.discard(int(account_id))
+
+
 def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str, provider: str = PROVIDER_OPENCODE) -> dict[str, Any]:
     slot = _quota_cache.setdefault(account_id, {"at": 0.0, "data": None})
     now = time.time()
@@ -132,10 +148,15 @@ def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str, pr
         result = cc_fetch_quota(token)
     else:
         result = fetch_quota(token, workspace_hint)
+    data = result.to_dict()
+    # 缓存槽已被凭证变更清掉 (relogin): 丢弃本次结果, 否则旧 token 的结果会落进
+    # 新槽并在 TTL 内被当成新凭证的配额返回
+    if _quota_cache.get(account_id) is not slot:
+        return data
     slot["at"] = now
-    slot["data"] = result.to_dict()
-    _record_monthly_reset(account_id, slot["data"], provider)
-    return slot["data"]
+    slot["data"] = data
+    _record_monthly_reset(account_id, data, provider)
+    return data
 
 
 def _record_monthly_reset(account_id: int, quota: dict[str, Any], provider: str = PROVIDER_OPENCODE) -> None:
@@ -180,9 +201,11 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
             # 失败也写入缓存 (None), TTL 内不再重试, 避免前端无限刷新
             _fetch_quota_with_cache(aid, token, workspace_hint, provider)
         except Exception:  # noqa: BLE001
-            _quota_cache.setdefault(aid, {"at": 0.0, "data": None})
-            _quota_cache[aid]["at"] = time.time()
-            _quota_cache[aid]["data"] = None
+            # 缓存槽已被凭证变更清掉时不再回写 (也不重建): 让下次请求按新凭证重拉
+            slot = _quota_cache.get(aid)
+            if slot is not None:
+                slot["at"] = time.time()
+                slot["data"] = None
         finally:
             _quota_refreshing.discard(aid)
 
