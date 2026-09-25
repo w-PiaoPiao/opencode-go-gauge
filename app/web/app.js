@@ -222,10 +222,14 @@ const COLOR = { input: "#4f8ef7", output: "#22c55e", reasoning: "#a78bfa", cache
 
 /* 图表动画由设置 chart_animation 控制 (默认关闭: 低配设备上每次刷新重建
    动画要在 N100 级小主机/软件渲染的 WebView 里重合成上百帧, 是掉帧大头).
-   设置未就绪前保持关闭 (安全默认, 首次渲染图表发生在 settings 加载之后). */
+   关闭用 false; 开启必须还原"出厂默认对象"而非 true —— Chart.js 的
+   animation 选项合法形态是 false | 配置对象 (duration/easing/...), 布尔
+   true 会让 Animations.configure 直接跳过、duration 等参数全部丢失,
+   动画静默不跑 (曾因此开关打开后无效果). 设置未就绪前保持关闭 (安全默认). */
+const CHART_ANIM_DEFAULTS = window.Chart ? Chart.defaults.animation : null;
 function applyChartAnimation(on) {
   if (!window.Chart) return;
-  Chart.defaults.animation = on === true;
+  Chart.defaults.animation = on ? CHART_ANIM_DEFAULTS : false;
 }
 const QUOTA_LABEL = { "5h Rolling": () => t("rolling"), "Weekly": () => t("weekly"), "Monthly": () => t("monthly") };
 const PLAN_BADGE = { lite: "GO", sub: "GO", byok: "BYOK" };
