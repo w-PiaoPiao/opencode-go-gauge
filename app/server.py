@@ -39,6 +39,8 @@ QUOTA_CACHE_TTL = 30.0
 INCREMENTAL_PAGES = 5  # 增量同步最多拉取的页数 (5*50=250 条)
 MAX_FULL_PAGES = 2000  # 全量同步上限, 防失控
 FETCH_BATCH = 5  # 并发拉取页数 (服务端响应慢, 并发提速)
+KEY_NAMES_REFRESH_SEC = 24 * 3600  # key 名称缓存刷新周期 (变化极少, 无需每轮同步都拉)
+_key_names_fetched_at: dict[int, float] = {}  # {account_id: 上次成功拉取时刻}
 
 
 def _resource_path(rel: str) -> str:
@@ -408,14 +410,19 @@ def _sync_one_account(
             db.prune_old_records(window_days, account_id)
 
         # 顺带刷新该账号的 key 显示名称缓存 (合并写入: key_id 全局唯一,
-        # 多账号各补各的条目; 单账号失败不影响已有缓存)
-        try:
-            fresh_keys = fetch_key_names(token_str, workspace_id)
-            merged = dict(db.get_key_names())
-            merged.update(fresh_keys)
-            db.save_key_names(merged)
-        except Exception:  # noqa: BLE001
-            pass
+        # 多账号各补各的条目; 单账号失败不影响已有缓存).
+        # 24h 内不重复拉取: keys 页面是一个完整 HTML 网络请求 + settings
+        # 整包读改写, 而名称变化极少, 没必要每轮增量同步都跑一遍.
+        now = time.time()
+        if now - _key_names_fetched_at.get(account_id, 0.0) > KEY_NAMES_REFRESH_SEC:
+            try:
+                fresh_keys = fetch_key_names(token_str, workspace_id)
+                merged = dict(db.get_key_names())
+                merged.update(fresh_keys)
+                db.save_key_names(merged)
+                _key_names_fetched_at[account_id] = now
+            except Exception:  # noqa: BLE001
+                pass
 
         return _finish_sync(account_id, total_inserted, page, failed_pages=failed_pages)
     except Exception as exc:  # noqa: BLE001
@@ -775,6 +782,10 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         # 显式透传 active_id: 各聚合内部若收到 None 会各自重跑
         # get_active_account_id() (settings 读取 + JSON 解析 + MIN(id) 查询),
         # 一次 dashboard 会重复 7 次.
+        totals_period = db.totals(period, active_id)
+        # 首页默认 range 即 today: 此时 totals(period) 与 totals("today") 是
+        # 同一个查询, 复用结果省一次聚合 (弱机上聚合是 dashboard 的 CPU 大头)
+        totals_today = totals_period if period == "today" else db.totals("today", active_id)
         _json_response(
             handler,
             {
@@ -784,8 +795,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "accounts_total": db.count_accounts(),
                 "accounts_logged_in": db.count_logged_in_accounts(),
                 "quota": quota,
-                "totals": db.totals(period, active_id),
-                "today": db.totals("today", active_id),
+                "totals": totals_period,
+                "today": totals_today,
                 "daily": db.daily_stats(7, active_id),  # 每日趋势固定显示近 7 天
                 "trend": db.daily_stats(30, active_id),  # 用量趋势 (费用/请求双轴)
                 "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势

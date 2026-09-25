@@ -217,6 +217,14 @@ let state = {
 };
 
 const COLOR = { input: "#4f8ef7", output: "#22c55e", reasoning: "#a78bfa", cache: "#06b6d4", cost: "#d97706" };
+
+/* 弱机优化: 关闭 Chart.js 全部动画. 仪表盘数据图每次刷新都重建, 动画没有
+   叙事价值, 却要在低功耗小主机 (N100 级 CPU / 软件渲染 WebView) 上重合成
+   上百帧, 是刷新时掉帧卡顿的大头. 静态一帧直接出图 (官方文档的全局开关,
+   同时禁用图表初始/更新/hover tooltip 等所有动画). */
+if (window.Chart) {
+  Chart.defaults.animation = false;
+}
 const QUOTA_LABEL = { "5h Rolling": () => t("rolling"), "Weekly": () => t("weekly"), "Monthly": () => t("monthly") };
 const PLAN_BADGE = { lite: "GO", sub: "GO", byok: "BYOK" };
 
