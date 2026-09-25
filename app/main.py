@@ -21,7 +21,18 @@ from typing import Optional
 import webview
 
 from . import db, server
-from .auth import LoginWatcher, build_login_url
+from .auth import (
+    BOOT_SETTLE_SEC,
+    LoginWatcher,
+    build_login_url,
+    clear_provider_cookies,
+    ensure_login_page_loaded,
+    render_login_boot_page,
+    install_login_network_rules,
+    nudge_window_repaint,
+    page_snapshot,
+    read_provider_cookie,
+)
 
 APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
 WINDOW_SIZE = (1280, 840)
@@ -917,6 +928,13 @@ def main() -> None:
             _mlog("  token saved")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  save_token ERROR: {exc}")
+        # 凭证已更换: 丢弃旧 token 的配额缓存槽, 否则面板在 TTL 内仍返回
+        # 旧凭证的 401 结果, 看起来像"重新登录了但配额还是空的"
+        try:
+            server.invalidate_quota_cache(db.get_active_account_id())
+            _mlog("  quota cache invalidated")
+        except Exception as exc:  # noqa: BLE001
+            _mlog(f"  invalidate quota cache ERROR: {exc}")
         try:
             if _login_win_alive():
                 login_win_ref["win"].hide()
@@ -939,9 +957,39 @@ def main() -> None:
             _mlog(f"  evaluate_js ERROR: {exc}")
         server.sync_all_async("full")
 
-    def _start_watcher(lw, provider: str = "opencode") -> None:
+    def _stale_credential_fps(provider: str) -> list[str]:
+        """该 provider 名下已知凭证的指纹 (库内旧 token).
+
+        登录窗口是复用的, WebView cookie store 里留着上一轮/上一账号的会话;
+        命中这些指纹的凭证是"登录前就有的", 不能算作本次登录的结果.
+        """
+        try:
+            return db.list_provider_token_fps(provider)
+        except Exception:  # noqa: BLE001 查不到就不拦截 (仍有 baseline 比对兜底)
+            return []
+
+    def _stale_credential_snapshot(lw, provider: str) -> Optional[str]:
+        """登录窗口打开瞬间 store 里已有的凭证 = 残留会话基线.
+
+        必须在加载登录页之前、且不在主线程调用: pywebview 的 get_cookies 用
+        无超时信号量等主线程回调, 主线程调用会死锁. 读不到时返回 None, 由
+        数据库旧凭证指纹继续兜底.
+        """
+        if threading.current_thread() is threading.main_thread():
+            return None
+        try:
+            return read_provider_cookie(lw, provider)
+        except Exception:  # noqa: BLE001 窗口未就绪等
+            return None
+
+    def _start_watcher(lw, provider: str = "opencode", snapshot_stale: bool = True) -> None:
         """启动登录监听: 优先等 shown 事件 (避免 hidden 窗口调用窗口方法抛内部异常);
-        复用窗口 (已显示过) 直接启动; 事件不触发时 3s 兜底启动 (LoginWatcher 对未就绪窗口有重试)."""
+        复用窗口 (已显示过) 直接启动; 事件不触发时 3s 兜底启动 (LoginWatcher 对未就绪窗口有重试).
+
+        snapshot_stale: 是否采集"残留会话基线". 仅复用窗口需要 —— 新建窗口在
+        _recreate_login_window 里刚清过残留 cookie (基线必为空), 且此时 BrowserView
+        尚未实例化, 读取只会卡到超时.
+        """
         def _on_cancelled() -> None:
             # 监听线程退出 (窗口被关/自愈) 后释放单飞守卫引用
             if watcher.get("ref") is w_ref["self"]:
@@ -949,7 +997,13 @@ def main() -> None:
                 _mlog("  watcher exited -> ref cleared")
 
         w_ref: dict[str, object] = {}
-        w = LoginWatcher(lw, provider, on_login_success, on_cancelled=_on_cancelled)
+        baseline = _stale_credential_snapshot(lw, provider) if snapshot_stale else None
+        w = LoginWatcher(
+            lw, provider, on_login_success,
+            on_cancelled=_on_cancelled,
+            stale_fps=_stale_credential_fps(provider),
+            baseline_value=baseline,
+        )
         w_ref["self"] = w
         watcher["ref"] = w
         if getattr(lw, "_gousage_shown", False):
@@ -985,6 +1039,20 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             return False
 
+    def _prepare_login_session(provider: str) -> None:
+        """加载登录页之前清掉该 provider 域的残留会话.
+
+        pywebview 只在 create_window 时清理网站数据 (private_mode), 而登录窗口
+        是复用的 (hide/show): 上一轮的会话 cookie 仍在 store 里, 登录页会据旧
+        凭证直接跳转后台 (无法重新选择账号), LoginWatcher 也会把这份残留凭证
+        误判为本次登录成功 (窗口秒关 + 凭证未刷新).
+        """
+        try:
+            purged = clear_provider_cookies(provider)
+            _mlog(f"[main] login session prepared (purged {purged} stale cookie(s))")
+        except Exception as exc:  # noqa: BLE001 清理失败不阻断登录
+            _mlog(f"[main] cookie purge ERROR: {exc}")
+
     def open_login(mode: str = "relogin", provider: str = "opencode") -> None:
         """弹出独立登录窗口并开始监听 (欢迎页/设置页按钮). 单飞守卫: 已有登录流程时忽略."""
         if provider not in ("opencode", "commandcode"):
@@ -1015,14 +1083,61 @@ def main() -> None:
         pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
         pending_mode["provider"] = provider
         lw = login_win()
+        # 清残留会话必须在加载登录页之前完成: 否则登录页带着旧凭证请求, 会被
+        # 直接带到套餐后台, 用户根本没有重新选择账号的机会
+        _prepare_login_session(provider)
         try:
             lw.show()
-            lw.load_url(build_login_url(provider))
         except Exception as exc:  # noqa: BLE001 窗口可能被用户手动关闭, 重建
             print(f"[main] login window reopen: {exc}", flush=True)
             _recreate_login_window(provider)
             return
         _start_watcher(lw, provider)
+        _arm_login_window(lw, provider)
+
+    def _arm_login_window(lw, provider: str) -> None:
+        """后台为登录窗口做三件事: 装请求拦截 → 打开登录页 → 盯加载进度.
+
+        1. rule list 只对之后的请求生效, 必须在导航前装好;
+        2. 登录页引用的追踪域在部分网络下不可达, 会让加载卡在半途 (实测窗口
+           一直纯白), 由 ensure_login_page_loaded 停滞超时后主动 reload 救回;
+        3. 放后台线程, 避免编译规则/看门狗的等待阻塞 open_login 的调用方.
+        """
+        def worker() -> None:
+            # 先渲染本地引导页: 缺这一步, WKWebView 对登录页这种复杂 SPA 不做
+            # 首次合成, 页面加载得再完整窗口也只显示背景色 (白屏根治手段)
+            try:
+                render_login_boot_page(lw)
+            except Exception as exc:  # noqa: BLE001
+                _mlog(f"[main] login boot page ERROR: {exc}")
+            time.sleep(BOOT_SETTLE_SEC)
+            try:
+                ok = install_login_network_rules(lw)
+                _mlog(f"[main] login network rules: {'on' if ok else 'skipped'}")
+            except Exception as exc:  # noqa: BLE001
+                _mlog(f"[main] login network rules ERROR: {exc}")
+            try:
+                lw.load_url(build_login_url(provider))
+            except Exception as exc:  # noqa: BLE001 窗口可能已被关闭
+                _mlog(f"[main] login load_url ERROR: {exc}")
+                return
+            try:
+                loaded = ensure_login_page_loaded(lw)
+                _mlog(f"[main] login page loaded: {loaded}")
+            except Exception as exc:  # noqa: BLE001
+                _mlog(f"[main] login load watchdog ERROR: {exc}")
+            # 页面内部状态快照: 用来区分"页面没渲染"与"渲染了但没显示"
+            try:
+                _mlog(f"[main] login page snapshot: {page_snapshot(lw)}")
+            except Exception as exc:  # noqa: BLE001
+                _mlog(f"[main] login page snapshot ERROR: {exc}")
+            # 页面已渲染但窗口不刷新首帧时, 强制重新合成一次
+            try:
+                _mlog(f"[main] login repaint nudge: {nudge_window_repaint(lw)}")
+            except Exception as exc:  # noqa: BLE001
+                _mlog(f"[main] login repaint nudge ERROR: {exc}")
+
+        threading.Thread(target=worker, daemon=True, name="gousage-login-arm").start()
 
     def _recreate_login_window(provider: str = "opencode") -> None:
         """登录窗口被手动关闭后重建 (回调绑定新窗口)."""
@@ -1035,9 +1150,12 @@ def main() -> None:
                 old.destroy()
             except Exception:  # noqa: BLE001
                 pass
+        # 新窗口由 pywebview 的 private_mode 清理网站数据, 但那是异步的: 先显式
+        # 清一遍目标域会话, 保证登录页拿到的是未登录态
+        _prepare_login_session(provider)
         new_win = webview.create_window(
             "GoGauge - Login",
-            build_login_url(provider),
+            "about:blank",
             width=720,
             height=640,
             min_size=(560, 500),
@@ -1045,7 +1163,9 @@ def main() -> None:
         )
         login_win_ref["win"] = new_win
         _bind_login_close_cleanup(new_win)
-        _start_watcher(new_win, provider)
+        # 新建窗口: 上面刚清过残留 cookie, 基线必为空, 不必再读 (窗口未就绪会卡超时)
+        _start_watcher(new_win, provider, snapshot_stale=False)
+        _arm_login_window(new_win, provider)
 
     api.set_login_callback(open_login)
     server.set_login_callback(open_login)  # /api/relogin 兼容 (浏览器环境/兜底)
