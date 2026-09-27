@@ -25,7 +25,7 @@ import time
 import uuid
 from http.cookies import SimpleCookie as SimpleCookieCls
 from typing import Callable, Optional
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, unquote, urlencode
 
 import webview
 
@@ -144,8 +144,9 @@ def _authorize_url_from_entry(entry_url: str) -> Optional[str]:
     """从 GitHub 登录入口 URL 提取可续跑的 authorize URL.
 
     入口形如 ``github.com/login?client_id=...&return_to=%2Flogin%2Foauth%2Fauthorize%3F...``
-    (return_to 也可能是未编码/双重编码); 提取 authorize 路径并去掉
-    ``prompt=select_account``, 让已登录会话直接续跑授权, 不再弹账号选择器。
+    (return_to 可能是未编码/编码/混合编码 — WebView2 不同时机返回的地址栏形态不一致);
+    提取 authorize 路径后对 query 值做规范化 (解到不含百分号编码为止, 再统一
+    单层编码), 并去掉 ``prompt=select_account``, 让已登录会话直接续跑授权。
     """
     if not entry_url:
         return None
@@ -161,10 +162,36 @@ def _authorize_url_from_entry(entry_url: str) -> Optional[str]:
                 target = decoded[idx:]
     if not target:
         return None
-    target = re.sub(r"([?&])prompt=select_account&?", r"\1", target).rstrip("?&")
-    if "client_id=" not in target:
+    return _normalize_authorize_target(target)
+
+
+def _normalize_authorize_target(target: str) -> Optional[str]:
+    """规范化 authorize 目标 URL 的 query (修复混合编码导致的 redirect_uri 失配).
+
+    混合编码形态里 redirect_uri 可能仍是 ``https%253A%252F%252F...`` (双重编码),
+    GitHub 解一层后看到的是编码串, 与注册回调不匹配, 会报
+    "The redirect_uri is not associated with this application"。这里把每个
+    query 值解到不含百分号编码, 再统一单层编码重建 URL。
+    """
+    path, _, query = target.partition("?")
+    pairs: list[tuple[str, str]] = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if key == "prompt" and value == "select_account":
+            continue  # 已登录续跑不需要账号选择器
+        for _ in range(3):
+            if "%" not in value:
+                break
+            try:
+                decoded = unquote(value)
+            except Exception:  # noqa: BLE001 非法编码: 保留原值
+                break
+            if decoded == value:
+                break
+            value = decoded
+        pairs.append((key, value))
+    if not any(key == "client_id" for key, _ in pairs):
         return None
-    return "https://github.com" + target
+    return "https://github.com" + path + "?" + urlencode(pairs)
 
 
 def _github_logged_user(win) -> str:
@@ -282,7 +309,13 @@ class LoginWatcher:
             return
         if not _github_logged_user(self.win):
             return  # 仍在登录前状态 (如设置页未登录), 不打扰
-        target = _authorize_url_from_entry(self._oauth_entry or "")
+        # 交替目标: 奇数次用重构的 authorize URL (全自动); 偶数次用原始入口
+        # (GitHub 原生链路, 保真不重构 — 重构 URL 因编码问题失败时的兜底)
+        target: Optional[str] = None
+        if self._reloads % 2 == 0:
+            target = _authorize_url_from_entry(self._oauth_entry or "")
+        if not target and self._oauth_entry:
+            target = self._oauth_entry
         if not target:
             _log("[login] github signed-in but OAuth entry URL missing; cannot auto-resume")
             self._reloads = _GITHUB_MAX_RELOADS  # 无入口可续跑, 停止重试

@@ -95,6 +95,44 @@ def test_workspace_hint_absent_on_login_page():
 # ── GitHub OAuth 卡死自动续跑 (2FA 登录后 return_to 丢失) ──────────────────
 
 
+def test_authorize_url_from_mixed_decoded_return_to():
+    """复刻打包版实测失败场景: WebView2 返回混合解码形态的入口 URL.
+
+    地址栏里 return_to 路径已解码, 但其中 redirect_uri 仍是双重编码
+    (https%253A%252F%252F...); 直接切片不二次解码会生成 GitHub 不认的
+    redirect_uri (报 not associated with this application)。
+    """
+    entry = (
+        "https://github.com/login?client_id=Ov23lilNxFR08yhwthpz"
+        "&return_to=/login/oauth/authorize?client_id=Ov23lilNxFR08yhwthpz"
+        "&code_challenge=CAmwEOrlEO2NgvdoKmAuDeFLxAxfLXaSQfv99-D2tXQ"
+        "&code_challenge_method=S256&prompt=select_account"
+        "&redirect_uri=https%253A%252F%252Fopencode.ai%252Fconsole%252Fauth%252Fsocial%252Fgithub%252Fcallback"
+        "&response_type=code&scope=read%3Auser+user%3Aemail&state=st_flow"
+    )
+    url = auth._authorize_url_from_entry(entry)
+    assert url is not None
+    # redirect_uri 必须被解回真实回调地址 (单层编码), GitHub 才能匹配注册回调
+    assert "redirect_uri=https%3A%2F%2Fopencode.ai%2Fconsole%2Fauth%2Fsocial%2Fgithub%2Fcallback" in url
+    assert "https%253A" not in url  # 不允许残留双重编码
+    assert "prompt=select_account" not in url
+    assert "client_id=Ov23lilNxFR08yhwthpz" in url
+    assert "code_challenge=CAmwEOrlEO2NgvdoKmAuDeFLxAxfLXaSQfv99-D2tXQ" in url
+    assert "state=st_flow" in url
+
+
+def test_normalize_strips_only_malformed_encoding():
+    """普通已编码值保持原样, 不会多解一层 (加号/冒号语义不变)."""
+    target = (
+        "/login/oauth/authorize?client_id=abc"
+        "&redirect_uri=https%3A%2F%2Fopencode.ai%2Fcb&scope=read%3Auser+user%3Aemail"
+    )
+    url = auth._normalize_authorize_target(target)
+    assert url is not None
+    assert "redirect_uri=https%3A%2F%2Fopencode.ai%2Fcb" in url
+    assert "scope=read%3Auser+user%3Aemail" in url
+
+
 def test_classify_github_oauth_entry():
     """授权入口: github.com/login?client_id=... / authorize?client_id=..."""
     entry = (
