@@ -1,0 +1,12 @@
+﻿fix: 修复自动续跑 URL 的 redirect_uri 混合编码失配
+
+实测打包版发现: WebView2 在不同时机返回的 GitHub 入口 URL 是混合解码形态
+(return_to 路径已解码, 但其中 redirect_uri 仍为双重编码 https%253A%252F%252F...),
+直接切片生成 authorize URL 后, GitHub 解一层仍得到编码串, 与注册回调不匹配,
+报 "The redirect_uri is not associated with this application", 续跑失败。
+
+- _normalize_authorize_target: 对 query 值解到不含百分号编码为止再统一单层
+  编码重建 URL; 同时作为通用管线处理未编码/编码/混合编码三种入口形态;
+- 卡死续跑目标交替: 奇数次用重构 authorize URL (全自动), 偶数次用原始入口
+  URL (GitHub 原生链路保真兜底);
+- 新增 2 个测试 (混合编码入口 / 已编码值不被多解), 全量 52 个测试通过。
