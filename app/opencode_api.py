@@ -1,8 +1,14 @@
-"""OpenCode Go API client.
+"""OpenCode Console API 客户端 (2026-09 前端改版后).
 
-两种能力:
-1. 配额 (quota): 抓取 opencode.ai dashboard HTML, 正则解析 5h/weekly/monthly 用量百分比与重置时间
-2. 用量记录 (usage): 调用 opencode.ai/_server server-fn 接口, 解析每条请求的 token/cost 明细
+旧接口链路已随 opencode.ai 改版失效, 本模块改为对接 /console 控制台:
+
+- 会话 Cookie: ``auth`` -> ``__Host-console_session`` (登录页 /console/login)
+- 配额: 旧 dashboard HTML 解析 -> GET /console/api/go/status
+- 明细: 旧 /_server server-fn -> GET /console/api/request-logs (游标分页)
+- 工作区: GET /console/api/orgs ; Key 名称: GET /console/api/service-accounts
+
+所有 /console/api 请求除 Cookie 外还需 ``x-org-id: <wrk_xxx>`` 头 (org 即工作区).
+服务端对请求明细只保留 30 天 (响应中的 retentionDays).
 """
 from __future__ import annotations
 
@@ -13,25 +19,26 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
 
-DASHBOARD_BASE = "https://opencode.ai/workspace"
-WORKSPACE_SERVER_ID = (
-    "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f"
-)
-DEFAULT_USAGE_SERVER_ID = (
-    "bfd684bfc2e4eed05cd0b518f5e4eafd3f3376e3938abb9e536e7c03df831e5c"
-)
+CONSOLE_ORIGIN = "https://opencode.ai"
+CONSOLE_LOGIN_URL = "https://opencode.ai/console/login"
+API_BASE = "https://opencode.ai/console/api"
+
+# 会话 Cookie: 新版 __Host-console_session, 旧版 auth (兼容历史 token)
+SESSION_COOKIE = "__Host-console_session"
+LEGACY_SESSION_COOKIE = "auth"
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0"
 )
 REQUEST_TIMEOUT = 30.0
-MAX_BODY_BYTES = 4 << 20  # 4 MiB
+MAX_BODY_BYTES = 8 << 20  # 8 MiB
 FETCH_RETRIES = 3  # 网络抖动重试次数
 RETRY_BACKOFF = [0.5, 1.5, 3.0]
 
@@ -39,48 +46,19 @@ LABEL_ROLLING = "5h Rolling"
 LABEL_WEEKLY = "Weekly"
 LABEL_MONTHLY = "Monthly"
 
-# 令牌格式: auth cookie 或 OAuth token 统一以 "auth=<value>" 形式携带
-AUTH_HEADER_PREFIX = "auth="
+# go/status: access.meters 下的三个额度窗口
+METER_ROLLING = "fiveHour"
+METER_WEEKLY = "week"
+METER_MONTHLY = "month"
 
-# ---------------------------------------------------------------------------
-# 正则 (字段顺序有两种: usagePercent 在前 或 resetInSec 在前)
-# ---------------------------------------------------------------------------
+# request-logs: 单页条数 (接口上限 100)
+USAGE_PAGE_SIZE = 100
 
-_ROLLING_PCT_FIRST = re.compile(
-    r"rollingUsage:\s*\$R\[\d+\]\s*=\s*\{[^}]*usagePercent\s*:\s*(-?\d+(?:\.\d+)?)"
-    r"[^}]*resetInSec\s*:\s*(-?\d+(?:\.\d+)?)[^}]*\}"
-)
-_ROLLING_RESET_FIRST = re.compile(
-    r"rollingUsage:\s*\$R\[\d+\]\s*=\s*\{[^}]*resetInSec\s*:\s*(-?\d+(?:\.\d+)?)"
-    r"[^}]*usagePercent\s*:\s*(-?\d+(?:\.\d+)?)[^}]*\}"
-)
-_WEEKLY_PCT_FIRST = re.compile(
-    r"weeklyUsage:\s*\$R\[\d+\]\s*=\s*\{[^}]*usagePercent\s*:\s*(-?\d+(?:\.\d+)?)"
-    r"[^}]*resetInSec\s*:\s*(-?\d+(?:\.\d+)?)[^}]*\}"
-)
-_WEEKLY_RESET_FIRST = re.compile(
-    r"weeklyUsage:\s*\$R\[\d+\]\s*=\s*\{[^}]*resetInSec\s*:\s*(-?\d+(?:\.\d+)?)"
-    r"[^}]*usagePercent\s*:\s*(-?\d+(?:\.\d+)?)[^}]*\}"
-)
-_MONTHLY_PCT_FIRST = re.compile(
-    r"monthlyUsage:\s*\$R\[\d+\]\s*=\s*\{[^}]*usagePercent\s*:\s*(-?\d+(?:\.\d+)?)"
-    r"[^}]*resetInSec\s*:\s*(-?\d+(?:\.\d+)?)[^}]*\}"
-)
-_MONTHLY_RESET_FIRST = re.compile(
-    r"monthlyUsage:\s*\$R\[\d+\]\s*=\s*\{[^}]*resetInSec\s*:\s*(-?\d+(?:\.\d+)?)"
-    r"[^}]*usagePercent\s*:\s*(-?\d+(?:\.\d+)?)[^}]*\}"
-)
+# 明细中的推理请求分类 (另一类 "api" 是控制台自身的接口调用, 不计入用量)
+CATEGORY_INFERENCE = "inference"
 
 _WORKSPACE_ID_RE = re.compile(r"wrk_[A-Za-z0-9]+")
-_WORKSPACE_ENTRY_RE = re.compile(
-    r'id\s*:\s*"(wrk_[^"]+)"[^{}]*?name\s*:\s*"([^"]*)"', re.DOTALL
-)
 
-# server-fn 响应中的一条 usage 记录 (兼容 GET 无空格 / POST 带空格两种格式)
-_RECORD_ANCHOR_RE = re.compile(r'id:\s*"(usg_[^"]+)"')
-_PLAN_RE = re.compile(r'id:\s*"(usg_[^"]+)"[^}]*?enrichment:\$R\[\d+\]=\{plan:"([^"]+)"\}', re.DOTALL)
-
-_CREATED_RE = re.compile(r'timeCreated:\s*\$R\[\d+\]\s*=\s*new Date\("([^"]+)"\)')
 
 # ---------------------------------------------------------------------------
 # 数据类型
@@ -173,31 +151,52 @@ class UsageRecord:
         }
 
 
+@dataclass
+class UsagePage:
+    """request-logs 的一页结果 (游标分页)."""
+
+    records: list[UsageRecord] = field(default_factory=list)
+    next_cursor: Optional[str] = None
+    retention_days: Optional[int] = None
+
+
 class OpenCodeAPIError(Exception):
     """opencode.ai API 调用失败."""
 
 
 class AuthError(OpenCodeAPIError):
-    """认证失败 (token 无效/过期)."""
+    """认证失败 (会话无效/过期)."""
 
 
 # ---------------------------------------------------------------------------
-# HTTP 工具
+# Cookie / HTTP 工具
 # ---------------------------------------------------------------------------
 
 
 def build_cookie_header(token: str) -> str:
-    """规范化 token 为 Cookie 头中的 auth 段."""
-    cookie = token.strip()
-    if cookie.lower().startswith("cookie:"):
-        cookie = cookie[7:].strip()
-    if not cookie:
+    """把 token 规范化为 Cookie 头.
+
+    支持三种输入:
+    - 完整 Cookie 串: ``__Host-console_session=st_xxx`` / ``auth=Fe26...`` (直接透传)
+    - ``Cookie: xxx`` 前缀串
+    - 纯值: ``st_xxx`` (补上新版会话 Cookie 名)
+    """
+    raw = token.strip()
+    if raw.lower().startswith("cookie:"):
+        raw = raw[7:].strip()
+    if not raw:
         return ""
-    for part in cookie.split(";"):
+    for part in raw.split(";"):
         p = part.strip()
-        if p.startswith("auth="):
+        if not p:
+            continue
+        name = p.split("=", 1)[0].strip().lower()
+        if name in (SESSION_COOKIE.lower(), LEGACY_SESSION_COOKIE):
             return p
-    return f"auth={cookie}"
+    # 形如 name=value 的其它 Cookie 原样透传, 纯值则按新版会话 Cookie 处理
+    if re.fullmatch(r"[A-Za-z0-9_.\-]+\s*=\s*\S+", raw):
+        return raw
+    return f"{SESSION_COOKIE}={raw}"
 
 
 def _fetch(
@@ -206,67 +205,133 @@ def _fetch(
     timeout: float = REQUEST_TIMEOUT,
     retries: int = FETCH_RETRIES,
 ) -> str:
+    """GET 请求, 自动重试; 401/403 抛 AuthError, 404 抛 OpenCodeAPIError."""
     last_exc: Optional[Exception] = None
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = resp.status
-                if status == 401 or status == 403:
-                    raise AuthError(f"认证失败 (HTTP {status})，请重新登录")
-                if status == 404:
-                    raise OpenCodeAPIError("工作区不存在 (HTTP 404)")
-                if status < 200 or status >= 300:
-                    raise OpenCodeAPIError(f"请求返回 HTTP {status}")
                 return resp.read(MAX_BODY_BYTES).decode("utf-8", errors="replace")
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise AuthError("登录已过期，请重新登录") from exc
+            if exc.code == 403:
+                raise OpenCodeAPIError("无访问权限 (HTTP 403)") from exc
+            if exc.code == 404:
+                raise OpenCodeAPIError("工作区不存在或接口不可用 (HTTP 404)") from exc
             last_exc = exc
-            if isinstance(exc, urllib.error.HTTPError):
-                status = exc.code
-                if status == 401 or status == 403:
-                    raise AuthError(f"认证失败 (HTTP {status})，请重新登录") from exc
-                if status == 404:
-                    raise OpenCodeAPIError("工作区不存在 (HTTP 404)") from exc
-                raise OpenCodeAPIError(f"请求返回 HTTP {status}") from exc
-            if attempt < retries - 1:
-                time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_exc = exc
+        if attempt < retries - 1:
+            time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
+    if isinstance(last_exc, urllib.error.HTTPError):
+        raise OpenCodeAPIError(f"请求返回 HTTP {last_exc.code}") from last_exc
     if isinstance(last_exc, urllib.error.URLError):
         raise OpenCodeAPIError(f"网络错误: {last_exc.reason}") from last_exc
     raise OpenCodeAPIError(f"网络错误: {last_exc}") from last_exc
 
 
-def _server_call(
-    server_id: str, args: list[Any], referer_path: str, token: str
-) -> str:
-    """调用 opencode.ai/_server 的 server-fn 接口, 返回原始文本."""
+def _api_get(
+    path: str,
+    token: str,
+    org_id: Optional[str] = None,
+    params: Optional[dict[str, Any]] = None,
+    timeout: float = REQUEST_TIMEOUT,
+    retries: int = FETCH_RETRIES,
+) -> Any:
+    """调用 /console/api 下接口, 返回解析后的 JSON."""
     cookie = build_cookie_header(token)
     if not cookie:
         raise OpenCodeAPIError("token 为空")
-    url = (
-        "https://opencode.ai/_server?id="
-        + urllib.parse.quote(server_id)
-        + "&args="
-        + urllib.parse.quote(json.dumps(args))
-    )
+    url = f"{API_BASE}{path}"
+    if params:
+        clean = {k: v for k, v in params.items() if v is not None}
+        if clean:
+            url += "?" + urllib.parse.urlencode(clean)
     headers = {
         "Cookie": cookie,
-        "X-Server-Id": server_id,
-        "X-Server-Instance": f"server-fn:{int(time.time() * 1e6)}",
+        "Accept": "application/json",
         "User-Agent": USER_AGENT,
-        "Origin": "https://opencode.ai",
-        "Referer": f"https://opencode.ai{referer_path}",
-        "Accept": "text/javascript, application/json;q=0.9, */*;q=0.8",
+        "Origin": CONSOLE_ORIGIN,
+        "Referer": f"{CONSOLE_ORIGIN}/console/",
     }
-    return _fetch(url, headers)
+    if org_id:
+        headers["x-org-id"] = org_id
+    text = _fetch(url, headers, timeout=timeout, retries=retries)
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise OpenCodeAPIError("接口返回非 JSON 数据") from exc
 
 
 # ---------------------------------------------------------------------------
-# 工作区解析
+# 数值解析小工具 (接口有数字/字符串两种编码)
+# ---------------------------------------------------------------------------
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _iso_from_ms(value: Any) -> str:
+    ms = _as_float(value, 0.0)
+    if ms <= 0:
+        return ""
+    try:
+        return (
+            datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def _iso_from_text(value: Any) -> str:
+    """把接口返回的 ISO 时间串规范成 ``...Z``."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _seconds_until(iso_text: str, now: datetime) -> int:
+    try:
+        dt = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0, int((dt - now).total_seconds()))
+
+
+# ---------------------------------------------------------------------------
+# 工作区 (org)
 # ---------------------------------------------------------------------------
 
 
 def extract_workspace_id(raw: str) -> str:
-    value = raw.strip()
+    value = (raw or "").strip()
     if not value:
         return ""
     if value.startswith("wrk_") and len(value) > 4:
@@ -276,105 +341,104 @@ def extract_workspace_id(raw: str) -> str:
 
 
 def fetch_workspace_refs(token: str) -> list[tuple[str, str]]:
-    """获取账号下所有工作区 (id, name)."""
-    cookie = build_cookie_header(token)
-    if not cookie:
-        raise OpenCodeAPIError("token 为空")
-    url = (
-        "https://opencode.ai/_server?id="
-        + urllib.parse.quote(WORKSPACE_SERVER_ID)
-    )
-    headers = {
-        "Cookie": cookie,
-        "X-Server-Id": WORKSPACE_SERVER_ID,
-        "X-Server-Instance": f"server-fn:{int(time.time() * 1e6)}",
-        "User-Agent": USER_AGENT,
-        "Origin": "https://opencode.ai",
-        "Referer": "https://opencode.ai",
-        "Accept": "text/javascript, application/json;q=0.9, */*;q=0.8",
-    }
-    text = _fetch(url, headers)
+    """获取账号下的工作区列表 [(id, name)]."""
+    data = _api_get("/orgs", token)
     refs: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for m in _WORKSPACE_ENTRY_RE.finditer(text):
-        workspace_id, name = m.group(1), m.group(2).strip()
-        if workspace_id in seen:
-            continue
-        seen.add(workspace_id)
-        refs.append((workspace_id, name))
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            wid = str(item.get("id") or "").strip()
+            if not wid or wid in seen:
+                continue
+            seen.add(wid)
+            refs.append((wid, str(item.get("name") or "").strip()))
     if not refs:
-        raise OpenCodeAPIError("无法从账号数据解析工作区 ID")
+        raise OpenCodeAPIError("无法获取工作区列表 (账号下没有工作区)")
     return refs
 
 
-def resolve_workspace_id(hint: str, token: str) -> str:
-    """将工作区提示 (id/name/Default) 解析为 wrk_xxx ID."""
+def _resolve_workspace(hint: str, token: str) -> tuple[str, str]:
+    """解析工作区提示 -> (workspace_id, 显示名); 显示名可能为空.
+
+    hint 已是 wrk_xxx 时直接采用 (不做额外请求); 否则拉一次工作区列表按
+    ID/名称匹配, 匹配不到则取第一个。
+    """
     resolved = extract_workspace_id(hint)
     if resolved:
-        return resolved
+        return resolved, ""
     refs = fetch_workspace_refs(token)
-    hint_l = hint.strip().lower()
+    hint_l = (hint or "").strip().lower()
     if hint_l:
         for workspace_id, name in refs:
-            if (
-                workspace_id.lower() == hint_l
-                or name.lower() == hint_l
-            ):
-                return workspace_id
-    if refs:
-        return refs[0][0]
-    raise OpenCodeAPIError(f"无法从 \"{hint}\" 解析工作区 ID")
+            if workspace_id.lower() == hint_l or name.lower() == hint_l:
+                return workspace_id, name
+    workspace_id, name = refs[0]
+    return workspace_id, name
+
+
+def resolve_workspace_id(hint: str, token: str) -> str:
+    """将工作区提示 (id/名称/Default) 解析为 wrk_xxx ID."""
+    return _resolve_workspace(hint, token)[0]
 
 
 # ---------------------------------------------------------------------------
-# 配额
+# 配额 (go/status)
 # ---------------------------------------------------------------------------
-
-
-def _parse_window(pct_first: re.Pattern, reset_first: re.Pattern, html: str) -> Optional[tuple[float, int]]:
-    match = pct_first.search(html)
-    if match:
-        return float(match.group(1)), int(float(match.group(2)))
-    match = reset_first.search(html)
-    if match:
-        return float(match.group(2)), int(float(match.group(1)))
-    return None
 
 
 def _clamp_percent(value: float) -> float:
     return max(0.0, min(100.0, value))
 
 
-def parse_quota_html(html: str, now: Optional[datetime] = None) -> list[QuotaWindow]:
+def parse_go_status(payload: Any, now: Optional[datetime] = None) -> list[QuotaWindow]:
+    """解析 /go/status 响应为三个额度窗口 (5h/weekly/monthly).
+
+    结构: access.meters.{fiveHour,week,month} 各含 limitMicroCents / usedMicroCents
+    (1e-8 USD), 以及可选 startsAt / resetsAt; 月额度无 resetsAt 时用 access.endsAt.
+    """
     now = now or datetime.now(timezone.utc)
+    if not isinstance(payload, dict):
+        return []
+    access = payload.get("access")
+    if not isinstance(access, dict):
+        return []
+    meters = access.get("meters")
+    if not isinstance(meters, dict):
+        return []
+    period_end = _iso_from_text(access.get("endsAt"))
     windows: list[QuotaWindow] = []
-    pairs = [
-        (LABEL_ROLLING, _ROLLING_PCT_FIRST, _ROLLING_RESET_FIRST),
-        (LABEL_WEEKLY, _WEEKLY_PCT_FIRST, _WEEKLY_RESET_FIRST),
-        (LABEL_MONTHLY, _MONTHLY_PCT_FIRST, _MONTHLY_RESET_FIRST),
-    ]
-    for label, pct_re, reset_re in pairs:
-        parsed = _parse_window(pct_re, reset_re, html)
-        if parsed:
-            used = _clamp_percent(parsed[0])
-            reset_in = parsed[1]
-            reset_at = now + timedelta(seconds=reset_in)
-            windows.append(
-                QuotaWindow(
-                    label=label,
-                    used=used,
-                    remaining=round(100.0 - used, 1),
-                    total=100.0,
-                    unit="%",
-                    reset_at=reset_at.isoformat().replace("+00:00", "Z"),
-                    reset_in_sec=reset_in,
-                )
+    for label, key in (
+        (LABEL_ROLLING, METER_ROLLING),
+        (LABEL_WEEKLY, METER_WEEKLY),
+        (LABEL_MONTHLY, METER_MONTHLY),
+    ):
+        meter = meters.get(key)
+        if not isinstance(meter, dict):
+            continue
+        limit = _as_float(meter.get("limitMicroCents"))
+        used_raw = _as_float(meter.get("usedMicroCents"))
+        if limit <= 0:
+            continue
+        used = _clamp_percent(used_raw / limit * 100.0)
+        reset_at = _iso_from_text(meter.get("resetsAt")) or period_end
+        windows.append(
+            QuotaWindow(
+                label=label,
+                used=round(used, 2),
+                remaining=round(100.0 - used, 2),
+                total=100.0,
+                unit="%",
+                reset_at=reset_at,
+                reset_in_sec=_seconds_until(reset_at, now),
             )
+        )
     return windows
 
 
 def fetch_quota(token: str, workspace_hint: str = "Default") -> QuotaResult:
-    """获取单个工作区的配额 (5h/weekly/monthly)."""
+    """获取单个工作区的 Go 配额 (5h/weekly/monthly)."""
     now = datetime.now(timezone.utc)
     updated_at = now.isoformat().replace("+00:00", "Z")
     hint = (workspace_hint or "Default").strip() or "Default"
@@ -383,160 +447,149 @@ def fetch_quota(token: str, workspace_hint: str = "Default") -> QuotaResult:
             name="Default", workspace_id=hint, success=False,
             updated_at=updated_at, error="未配置 token",
         )
+    name = hint
     try:
-        workspace_id = resolve_workspace_id(hint, token)
-        cookie = build_cookie_header(token)
-        if not cookie:
-            raise OpenCodeAPIError("token 为空")
-        url = f"{DASHBOARD_BASE}/{urllib.parse.quote(workspace_id)}/go"
-        headers = {
-            "Cookie": cookie,
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html, application/xhtml+xml",
-        }
-        # dashboard HTML 较慢, 短超时 + 少重试, 避免长时间阻塞
-        html = _fetch(url, headers, timeout=20.0, retries=2)
-        windows = parse_quota_html(html, now)
+        workspace_id, ws_name = _resolve_workspace(hint, token)
+        if ws_name:
+            name = ws_name
+        payload = _api_get("/go/status", token, org_id=workspace_id, timeout=20.0, retries=2)
+        windows = parse_go_status(payload, now)
         if not windows:
-            raise OpenCodeAPIError("无法从 Dashboard HTML 解析额度数据")
+            raise OpenCodeAPIError("账号未订阅 OpenCode Go (接口无额度数据)")
         return QuotaResult(
-            name="Default", workspace_id=workspace_id, success=True,
+            name=name, workspace_id=workspace_id, success=True,
             updated_at=updated_at, windows=windows,
         )
     except Exception as exc:  # noqa: BLE001
         return QuotaResult(
-            name="Default", workspace_id=hint, success=False,
+            name=name, workspace_id=hint, success=False,
             updated_at=updated_at, error=str(exc),
         )
 
 
 # ---------------------------------------------------------------------------
-# 用量记录
+# 用量明细 (request-logs)
 # ---------------------------------------------------------------------------
 
 
-def _parse_num_field(body: str, name: str) -> int:
-    match = re.search(rf"{re.escape(name)}:\s*(\d+|null)", body)
-    if not match:
-        return 0
-    value = match.group(1)
-    if value == "null":
-        return 0
-    try:
-        return int(value)
-    except ValueError:
-        return 0
+def _record_from_item(item: dict[str, Any]) -> Optional[UsageRecord]:
+    usg_id = str(item.get("id") or "").strip()
+    created_at = _iso_from_ms(item.get("startedAt"))
+    if not usg_id or not created_at:
+        return None
+    cache_write = _as_int(item.get("cacheWriteTokens"))
+    return UsageRecord(
+        usg_id=usg_id,
+        created_at=created_at,
+        model=str(item.get("model") or "").strip(),
+        provider=str(item.get("provider") or "").strip(),
+        input_tokens=_as_int(item.get("inputTokens")),
+        output_tokens=_as_int(item.get("outputTokens")),
+        reasoning_tokens=_as_int(item.get("reasoningTokens")),
+        cache_read_tokens=_as_int(item.get("cacheReadTokens")),
+        # 新接口不再区分 5m/1h 缓存写入, 统一记入 5m 列 (合计口径不变)
+        cache_write_5m_tokens=cache_write,
+        cache_write_1h_tokens=0,
+        cost_raw=int(round(_as_float(item.get("cost")) * 100_000_000)),
+        key_id=str(item.get("serviceAPIKeyID") or "").strip(),
+        session_id=str(item.get("sessionID") or "").strip(),
+        plan=str(item.get("product") or "").strip() or None,
+    )
 
 
-def _parse_str_field(body: str, name: str) -> str:
-    match = re.search(rf'{re.escape(name)}:\s*"([^"]*)"', body)
-    return match.group(1) if match else ""
-
-
-def parse_usage_response(text: str) -> list[UsageRecord]:
-    """解析 server-fn 响应为 UsageRecord 列表.
-
-    兼容两种序列化格式:
-    - GET 方式: id:"usg_..." (无空格)
-    - POST 方式: id: "usg_..." (新格式, 有空格)
-    """
-    plans: dict[str, str] = {}
-    for m in _PLAN_RE.finditer(text):
-        plans[m.group(1)] = m.group(2)
-
-    # 以 usg_id 锚点切分记录, 每个锚点到下一个锚点之间是一条记录体
-    anchors = list(_RECORD_ANCHOR_RE.finditer(text))
+def parse_request_logs(payload: Any) -> UsagePage:
+    """解析 /request-logs 响应 (只保留 inference 类请求)."""
+    if not isinstance(payload, dict):
+        return UsagePage()
+    items = payload.get("items")
     records: list[UsageRecord] = []
-    for i, m in enumerate(anchors):
-        end = anchors[i + 1].start() if i + 1 < len(anchors) else len(text)
-        body = text[m.end():end]
-        created_match = _CREATED_RE.search(body)
-        if not created_match:
-            continue
-        usg_id = m.group(1)
-        records.append(
-            UsageRecord(
-                usg_id=usg_id,
-                created_at=created_match.group(1),
-                model=_parse_str_field(body, "model"),
-                provider=_parse_str_field(body, "provider"),
-                input_tokens=_parse_num_field(body, "inputTokens"),
-                output_tokens=_parse_num_field(body, "outputTokens"),
-                reasoning_tokens=_parse_num_field(body, "reasoningTokens"),
-                cache_read_tokens=_parse_num_field(body, "cacheReadTokens"),
-                cache_write_5m_tokens=_parse_num_field(body, "cacheWrite5mTokens"),
-                cache_write_1h_tokens=_parse_num_field(body, "cacheWrite1hTokens"),
-                cost_raw=_parse_num_field(body, "cost"),
-                key_id=_parse_str_field(body, "keyID"),
-                session_id=_parse_str_field(body, "sessionID"),
-                plan=plans.get(usg_id),
-            )
-        )
-    return records
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("category") or "").strip().lower() != CATEGORY_INFERENCE:
+                continue  # 控制台自身接口调用, 不计入用量
+            rec = _record_from_item(item)
+            if rec is not None:
+                records.append(rec)
+    cursor = payload.get("nextCursor")
+    retention = payload.get("retentionDays")
+    return UsagePage(
+        records=records,
+        next_cursor=str(cursor) if cursor else None,
+        retention_days=_as_int(retention) if retention is not None else None,
+    )
 
 
 def fetch_usage_page(
     token: str,
     workspace_id: str,
-    page: int = 0,
-    key_id: Optional[str] = None,
-    usage_server_id: Optional[str] = None,
-) -> list[UsageRecord]:
-    """拉取一页用量记录 (每页 50 条, page 从 0 开始).
+    cursor: Optional[str] = None,
+    limit: int = USAGE_PAGE_SIZE,
+    since_ms: Optional[int] = None,
+) -> UsagePage:
+    """拉取一页用量明细 (游标分页, 按时间倒序).
 
-    使用 GET /_server?id=...&args=[workspace_id, page] 方式.
+    Args:
+        cursor: 上一页返回的 next_cursor; 首页传 None
+        limit: 单页条数 (接口上限 100)
+        since_ms: 只取该毫秒时间戳之后的记录 (增量同步用)
     """
-    args: list[Any] = [workspace_id]
-    if key_id:
-        if page > 0:
-            args.extend([page, key_id])
-        else:
-            args.append(key_id)
-    elif page > 0:
-        args.append(page)
-
-    server_id = usage_server_id or DEFAULT_USAGE_SERVER_ID
-    text = _server_call(server_id, args, f"/workspace/{workspace_id}/usage", token)
-    return parse_usage_response(text)
+    params: dict[str, Any] = {"limit": max(1, min(int(limit), 100))}
+    if cursor:
+        params["cursor"] = cursor
+    if since_ms:
+        params["since"] = int(since_ms)
+    payload = _api_get("/request-logs", token, org_id=workspace_id, params=params)
+    return parse_request_logs(payload)
 
 
-_KEY_ENTRY_RE = re.compile(r'\{id:"(key_[A-Za-z0-9]+)",name:"([^"]*)"')
+def iso_to_ms(iso_text: str) -> int:
+    """ISO 时间 -> 毫秒时间戳 (解析失败返回 0)."""
+    text = (iso_text or "").strip()
+    if not text:
+        return 0
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+# ---------------------------------------------------------------------------
+# Key 名称
+# ---------------------------------------------------------------------------
 
 
 def fetch_key_names(token: str, workspace_id: str) -> dict[str, str]:
     """拉取工作区下所有 API key 的名称映射 (key_id -> 名称).
 
-    keys 页面内嵌的响应数据形如 {id:"key_xxx",name:"gongsi",key:"sk-...",...},
-    正则提取 id 与 name 即可获得 key 的显示名称 (如 "gongsi"/"deepseek gongsi").
-
-    Args:
-        token: 认证 cookie / token
-        workspace_id: 工作区 ID (wrk_xxx)
-
-    Returns:
-        key_id -> 名称 的映射; 页面拉取或解析失败时返回空 dict (不影响主流程)
-
-    Raises:
-        AuthError: 认证失败 (由 _fetch 抛出)
+    service-accounts 响应形如 ``{"items":[{account:{...}, keys:[{id,name},...]}]}``,
+    失败时返回空 dict (不影响主流程).
     """
-    cookie = build_cookie_header(token)
-    if not cookie:
-        raise OpenCodeAPIError("token 为空")
-    url = f"https://opencode.ai/workspace/{workspace_id}/keys"
-    headers = {
-        "Cookie": cookie,
-        "User-Agent": USER_AGENT,
-        "Origin": "https://opencode.ai",
-        "Referer": f"https://opencode.ai/workspace/{workspace_id}/keys",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
     try:
-        html = _fetch(url, headers, timeout=15.0, retries=2)
+        payload = _api_get(
+            "/service-accounts", token, org_id=workspace_id, timeout=15.0, retries=2
+        )
     except OpenCodeAPIError:
         return {}
     names: dict[str, str] = {}
-    for m in _KEY_ENTRY_RE.finditer(html):
-        key_id, name = m.group(1), m.group(2).strip()
-        if key_id and name:
-            names.setdefault(key_id, name)
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return {}
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        keys = entry.get("keys")
+        if not isinstance(keys, list):
+            continue
+        for key in keys:
+            if not isinstance(key, dict):
+                continue
+            key_id = str(key.get("id") or "").strip()
+            name = str(key.get("name") or "").strip()
+            if key_id and name:
+                names.setdefault(key_id, name)
     return names

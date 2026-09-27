@@ -38,7 +38,7 @@
 - **Usage stats**: token breakdown (input / output / reasoning / cache read / cache write / sessions), model usage donut + ranking, cost / requests / total tokens triple-line trend
 - **Session history**: per-session aggregation of requests / input / output / reasoning / total tokens / cost, paginated
 - **Usage records**: request-level detail with pagination and model filtering
-- **Built-in WebView login**: independent login window opens the official auth page, auto-fills cookie & workspace — no manual copy-paste
+- **Built-in WebView login**: independent login window opens the opencode.ai console sign-in page, auto-captures session & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)
 - **System tray**: closing the window minimizes to tray; brand logo icons
@@ -50,11 +50,13 @@
 
 Download `GoGauge.exe` from [Releases](../../releases) (single file, no install):
 
-1. Double-click to run, click "Login Now" on the welcome page — an official auth window pops up
+1. Double-click to run, click "Login Now" on the welcome page — the opencode.ai console sign-in window pops up
 2. After login, the dashboard loads and usage data syncs automatically
 3. Data is stored in the `data\` folder next to the exe
 
 > Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window minimizes to the system tray.
+
+> ⚠️ **Upgrading from v2.1.0 or earlier**: opencode.ai switched to its new console API, so the stored session is void. The stale credential is cleared automatically, the app returns to the welcome page — just log in once (local history is kept).
 
 ### From Source
 
@@ -73,10 +75,11 @@ Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon and tray support incl
 
 ## 📊 Data Notes
 
-- **Source**: opencode.ai workspace usage API (`/_server` server-fn) + quota page HTML parsing
+- **Source**: opencode.ai console API (`/console/api`) — `go/status` quota + `request-logs` usage detail + `service-accounts` key names
 - **Total tokens** = input (incl. cache hits) + output + reasoning
 - **Cache hit rate** = hits / (hits + misses)
 - **Cost**: raw USD; CNY converted via open.er-api.com live FX rate (24h cache)
+- **Detail range**: the official API only retains the last 30 days of request detail (quota windows are unaffected)
 
 ## 🔒 Privacy
 

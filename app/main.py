@@ -17,7 +17,7 @@ import time
 import webview
 
 from . import db, server
-from .auth import LoginWatcher, build_login_url
+from .auth import LoginWatcher, build_login_url, clear_login_cookies
 
 APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
 WINDOW_SIZE = (1280, 840)
@@ -558,6 +558,9 @@ def main() -> None:
         pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
         lw = login_win()
         try:
+            if pending_mode["mode"] == "add":
+                # 添加新账号: 清掉 WebView 里的旧会话, 否则控制台会直接复用已登录账号
+                clear_login_cookies(lw)
             lw.show()
             lw.load_url(build_login_url())
         except Exception as exc:  # noqa: BLE001 窗口可能被用户手动关闭, 重建
@@ -571,8 +574,11 @@ def main() -> None:
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher):
             w.stop()
+        old_win = login_win()
+        if pending_mode.get("mode") == "add":
+            clear_login_cookies(old_win)  # 同上: 重建前清会话, 保证可切换账号
         try:
-            login_win().destroy()
+            old_win.destroy()
         except Exception:  # noqa: BLE001
             pass
         new_win = webview.create_window(
