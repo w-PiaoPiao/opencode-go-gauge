@@ -1,0 +1,42 @@
+feat: 同步 v2.2.0 控制台登录改造 + 修复 GitHub 2FA 登录卡死
+
+opencode.ai 已于 2026-09 前端改版: 旧授权页 auth.opencode.ai/authorize 与旧会话
+cookie auth 失效, 登录入口迁移到 /console 控制台 (会话 cookie
+__Host-console_session), 配额/明细/工作区接口迁移到 /console/api。main 分支的
+v2.1.0 登录链路已完全失效。本 PR 包含 v2.2.0 的完整源码改动 (控制台登录 +
+API 迁移 + 双语/界面更新), 并附带一次针对 GitHub 2FA 登录卡死的修复。
+
+## 修复: GitHub 2FA 登录卡死 (登完不跳转、无法被软件识别)
+
+现象: GitHub 开启两步验证的账号, 在登录窗口完成 2FA 后, 窗口不回跳
+opencode.ai, 应用始终捕获不到会话 cookie。
+
+根因 (在真实 WebView2 环境逐跳实测确认):
+- 控制台登录页 "Continue with GitHub" 带 client_id/code_challenge/
+  redirect_uri 跳 github.com/login;
+- 完成 2FA 后 GitHub 可能丢失 OAuth 续跑链路 (return_to), 把窗口留在
+  github.com/settings/security 等无关页面且不再回跳;
+- 监听器只在 url 位于 opencode.ai 域时读取 cookie, 因此永远等不到
+  __Host-console_session, 登录静默失败。
+
+修复 (app/auth.py):
+- LoginWatcher 记录授权入口 URL (github.com/login?client_id=...,
+  含 code_challenge/redirect_uri/state);
+- 页面分类: entry(授权入口) / flow(登录表单、2FA 验证页, 正常等待) /
+  stuck(settings 等无关页);
+- 确认 GitHub 已登录 (页面 meta[user-login]) 且卡在无关页超过 3 秒后,
+  自动重新加载授权入口, 依靠刚建立的 GitHub 会话续跑 authorize →
+  回跳 opencode.ai → 捕获会话 cookie; 最多重试 3 次防循环;
+- 登录窗没有浏览器后退按钮 (WebView2 发布版禁用 Alt+←), 在 GitHub 页面
+  注入悬浮 "← 返回 / 继续登录 →" 导航按钮 (仅卡死页显示继续按钮, 避免与
+  GitHub 自带 Authorize 按钮混淆);
+- 关键状态写入 gousage_login.log 便于后续诊断。
+
+## 测试
+
+- 新增 10 个用例: GitHub 页面分类 / 授权 URL 提取 (编码与双重编码 return_to) /
+  登录态读取; tests/test_auth_login.py 与 test_opencode_api.py 为 2.2.0
+  配套新增测试文件;
+- 全量 50 个测试通过;
+- 端到端实测: 2FA 登录 → 卡死 settings/security → 3 秒自动续跑 →
+  authorize → 回跳 opencode.ai → __Host-console_session 捕获成功。

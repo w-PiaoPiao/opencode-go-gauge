@@ -17,7 +17,7 @@ import time
 import webview
 
 from . import db, server
-from .auth import LoginWatcher, build_login_url
+from .auth import LoginWatcher, build_login_url, clear_login_cookies
 
 APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
 WINDOW_SIZE = (1280, 840)
@@ -41,8 +41,7 @@ def _screen_workarea_logical() -> tuple[int, int]:
         pass
     return WINDOW_SIZE
 
-_quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
-_tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
+_quitting = False  # 为 True 时窗口关闭路径都在执行真正退出
 _move_lock = threading.Lock()  # 拖动 move_by 串行化: 防 js_api 并发读-写丢增量
 
 
@@ -88,8 +87,7 @@ def _asset_path(rel: str) -> str:
 _LOCK_FILE_NAME = "GoGauge.lock"
 _MUTEX_NAME = "GoGauge_SingleInstance_Mutex"
 _ERROR_ALREADY_EXISTS = 183  # GetLastError: 命名对象已存在
-_ACTIVATE_RETRY_INTERVAL = 0.5  # 激活旧实例窗口的重试间隔(秒)
-_ACTIVATE_RETRY_TIMES = 30  # 重试次数 (共约15秒, 覆盖旧实例 onefile 解压+启动耗时)
+_SINGLE_INSTANCE_WAIT_SEC = 8.0  # 快速重启竞态: 等待旧实例释放互斥体的最长时间
 _SW_SHOW = 5
 _SW_RESTORE = 9
 _MB_ICONINFORMATION = 0x40
@@ -211,23 +209,6 @@ def _read_valid_lock_pid() -> int:
     return 0
 
 
-def _activate_with_retry() -> bool:
-    """带重试激活旧实例窗口.
-
-    第二实例与首实例几乎同时启动时 (快速连击双击), 首实例可能仍在 onefile
-    解压/初始化, 窗口尚未创建. 此时需轮询等待其窗口就绪后再激活,
-    否则会误弹提示框并残留为第二个可见窗口.
-
-    Returns:
-        True=成功激活旧实例窗口 False=超时仍未找到窗口
-    """
-    for _ in range(_ACTIVATE_RETRY_TIMES):
-        if _activate_existing_instance(_read_valid_lock_pid()):
-            return True
-        time.sleep(_ACTIVATE_RETRY_INTERVAL)
-    return False
-
-
 def _ensure_single_instance() -> None:
     """单实例守卫: 命名互斥体原子判定, 已有实例时激活其窗口并结束当前进程.
 
@@ -235,88 +216,46 @@ def _ensure_single_instance() -> None:
     无锁文件方案的竞态窗口 (双击过快/系统卡顿时两个实例互相看不到对方),
     进程崩溃时内核自动回收互斥体, 无残留无 PID 复用问题.
     锁文件降级为辅助: 记录首实例 PID 供激活窗口定位; 失效时按标题全局枚举兜底.
+
+    快速重启竞态处理: 用户退出后立刻再次双击时, 旧进程可能仍在收尾
+    (atexit 关服务器/数据库), 窗口已销毁但互斥体尚未释放 — 旧版此时会
+    激活一个不存在的窗口后直接退出, 表现为"连开两次窗口都闪退, 第三次才
+    正常"。现在激活不到可见窗口时等待互斥体释放 (最多 8s), 然后由当前
+    进程接管成为首实例, 避免空启动。
     """
     global _mutex_handle
     # use_last_error=True: ctypes 每次调用后私有捕获错误码, 避免被 Python 中间系统调用污染
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
-    if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
-        # 互斥体已存在 = 旧实例一定在运行, 激活其窗口后退出
+    deadline = time.time() + _SINGLE_INSTANCE_WAIT_SEC
+    while True:
+        handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+        if ctypes.get_last_error() != _ERROR_ALREADY_EXISTS:
+            # 首实例: 持有互斥体 (全局引用防回收, 进程退出由内核自动释放)
+            _mutex_handle = handle
+            # 锁文件记录当前 PID, 供后续实例激活窗口定位
+            try:
+                with open(os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME), "w") as fh:
+                    fh.write(str(os.getpid()))
+            except OSError:
+                _mlog("[single-instance] 写锁文件失败")
+            _mlog(f"[single-instance] primary started, pid={os.getpid()}")
+            return
         if handle:
             kernel32.CloseHandle(handle)
-        if not _activate_with_retry():
-            # 超时仍定位不到窗口 (极端情况): 提示从托盘操作
+        old_pid = _read_valid_lock_pid()
+        # 已有实例在运行: 激活其窗口后退出 (托盘隐藏窗口也能被找到并唤起)
+        if _activate_existing_instance(old_pid):
+            _mlog(f"[single-instance] activated existing instance pid={old_pid}, exit")
+            sys.exit(0)
+        if time.time() >= deadline:
+            _mlog("[single-instance] existing instance window not found within deadline")
             ctypes.windll.user32.MessageBoxW(
                 0, "GoGauge 已在运行, 请从系统托盘打开窗口。", "GoGauge", _MB_ICONINFORMATION
             )
-        sys.exit(0)
-    # 首实例: 持有互斥体 (全局引用防回收, 进程退出由内核自动释放)
-    _mutex_handle = handle
-    # 锁文件记录当前 PID, 供后续实例激活窗口定位
-    try:
-        with open(os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME), "w") as fh:
-            fh.write(str(os.getpid()))
-    except OSError:
-        _mlog("[single-instance] 写锁文件失败")
-
-
-class TrayIcon:
-    """系统托盘 (pystray): logo 图标 + 显示窗口/退出 菜单."""
-
-    def __init__(self, icon_path: str) -> None:
-        self._icon_path = icon_path
-        self._icon = None
-        self._win_getter = None
-
-    def bind_window(self, getter) -> None:
-        self._win_getter = getter
-
-    def start(self) -> bool:
-        global _tray_ready
-        try:
-            from PIL import Image
-            import pystray
-
-            if not os.path.isfile(self._icon_path):
-                return False
-            img = Image.open(self._icon_path).convert("RGBA")
-            menu = pystray.Menu(
-                pystray.MenuItem("显示窗口", self._show, default=True),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("退出", self._quit),
-            )
-            self._icon = pystray.Icon("GoGauge", img, "GoGauge - OpenCode Go 用量面板", menu)
-            threading.Thread(target=self._icon.run, daemon=True).start()
-            _tray_ready = True
-            return True
-        except Exception as exc:  # noqa: BLE001
-            print(f"[tray] 托盘启动失败: {exc}", flush=True)
-            _tray_ready = False
-            return False
-
-    def stop(self) -> None:
-        if self._icon:
-            try:
-                self._icon.stop()
-            except Exception:  # noqa: BLE001
-                pass
-
-    def _show(self, icon=None, item=None) -> None:
-        if self._win_getter:
-            win = self._win_getter()
-            if win:
-                win.show()
-                win.restore()
-
-    def _quit(self, icon=None, item=None) -> None:
-        global _quitting
-        _quitting = True
-        if icon:
-            try:
-                icon.stop()
-            except Exception:  # noqa: BLE001
-                pass
-        _destroy_all_windows()
+            sys.exit(0)
+        # 旧实例找不到窗口 (可能正在退出): 等互斥体释放后由本进程接管
+        _mlog("[single-instance] no visible window on existing instance, wait for release")
+        time.sleep(0.5)
 
 
 class WindowApi:
@@ -375,14 +314,12 @@ class WindowApi:
         return True
 
     def close(self) -> bool:
-        """关闭按钮: 托盘可用时最小化到托盘, 否则真正关闭."""
-        global _quitting, _tray_ready
+        """关闭按钮: 直接退出应用 (连同隐藏的登录窗口), 与"关闭=退出"的用户预期一致."""
+        global _quitting
         if not self._win:
             return True
-        if _quitting or not _tray_ready:
-            self._win.destroy()
-        else:
-            self._win.hide()  # 最小化到托盘
+        _quitting = True
+        _destroy_all_windows()
         return True
 
     def quit(self) -> bool:
@@ -412,6 +349,7 @@ def main() -> None:
 
     host, port = server.start_server()
     dashboard_url = f"http://{host}:{port}/"
+    _mlog(f"[startup] server ready at {dashboard_url}, pid={os.getpid()}")
     watcher: dict[str, object] = {"ref": None}
     api = WindowApi()
 
@@ -558,6 +496,9 @@ def main() -> None:
         pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
         lw = login_win()
         try:
+            if pending_mode["mode"] == "add":
+                # 添加新账号: 清掉 WebView 里的旧会话, 否则控制台会直接复用已登录账号
+                clear_login_cookies(lw)
             lw.show()
             lw.load_url(build_login_url())
         except Exception as exc:  # noqa: BLE001 窗口可能被用户手动关闭, 重建
@@ -571,8 +512,11 @@ def main() -> None:
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher):
             w.stop()
+        old_win = login_win()
+        if pending_mode.get("mode") == "add":
+            clear_login_cookies(old_win)  # 同上: 重建前清会话, 保证可切换账号
         try:
-            login_win().destroy()
+            old_win.destroy()
         except Exception:  # noqa: BLE001
             pass
         new_win = webview.create_window(
@@ -595,9 +539,12 @@ def main() -> None:
         server.sync_all_async("full")
 
     def on_window_closed() -> None:
+        # 主窗口被关闭 (Alt+F4 等) = 用户要退出: 销毁含隐藏登录窗在内的全部窗口,
+        # 否则隐藏的登录窗会让事件循环空转, 进程残留
         w = watcher.get("ref")
         if isinstance(w, LoginWatcher):
             w.stop()
+        _destroy_all_windows()
 
     def on_shown() -> None:
         # 窗口显示后 native 句柄才可用: 补 WS_MINIMIZEBOX, 修复任务栏点击不最小化
@@ -611,16 +558,10 @@ def main() -> None:
     main_win.events.shown += on_shown
     main_win.events.restored += on_restored
 
-    # 系统托盘 (logo 图标)
-    tray = TrayIcon(_asset_path("GoGauge.ico"))
-    tray.bind_window(lambda: main_win if main_win in webview.windows else None)
-    tray.start()
-
     # 任务栏/窗口图标: 使用 logo (winforms 后端从 start(icon=...) 设置窗口 Icon)
+    _mlog("[startup] entering webview event loop")
     webview.start(icon=_asset_path("GoGauge.ico") if os.path.isfile(_asset_path("GoGauge.ico")) else None)
-
-    if not _quitting:
-        tray.stop()
+    _mlog("[startup] webview event loop exited, quitting")
 
 
 def shutdown() -> None:
