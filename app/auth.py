@@ -29,6 +29,7 @@ import time
 import uuid
 from http.cookies import SimpleCookie as SimpleCookieCls
 from typing import Callable, Iterable, Optional
+from urllib.parse import urlparse
 
 import webview
 
@@ -271,8 +272,14 @@ def _win_cookie_operation(win, host: str, handler, timeout: float):
     return True, result.get("value")
 
 
-def _win_read_provider_cookies(win, host: str, cookie_name: str, timeout: float) -> list[str]:
-    """Windows: 读取 provider 域指定名 cookie 的值列表."""
+def _win_read_provider_cookies(
+    win, host: str, cookie_name: str, timeout: float
+) -> Optional[list[str]]:
+    """Windows: 读取 provider 域指定名 cookie 的值列表; 读取失败返回 None.
+
+    空列表与 None 必须区分: 前者是"确实没有残留会话", 后者是"读不到" ——
+    清 cookie 后的验证若把两者混同, 真机上就分不清"已清干净"和"清理没生效".
+    """
 
     def collect(cookies, _cm) -> list[str]:
         values: list[str] = []
@@ -285,26 +292,110 @@ def _win_read_provider_cookies(win, host: str, cookie_name: str, timeout: float)
         return values
 
     ok, values = _win_cookie_operation(win, host, collect, timeout)
-    return list(values or []) if ok else []
+    if not ok:
+        return None
+    return list(values or [])
 
 
-def _win_delete_provider_cookies(win, host: str, timeout: float) -> int:
-    """Windows: 删除 provider 域的 cookie, 返回删除条数 (按域过滤, 不碰其它域)."""
+def _win_clear_all_cookies(win, timeout: float) -> bool:
+    """Windows: 清空 WebView2 cookie store (CookieManager.DeleteAllCookies).
 
-    def purge(cookies, cm) -> int:
-        removed = 0
-        for cookie in cookies:
-            try:
-                if not _domain_matches(str(cookie.Domain), host):
-                    continue
-                cm.DeleteCookie(cookie)
-                removed += 1
-            except Exception:  # noqa: BLE001 单个 cookie 失败不中断其余
-                continue
-        return removed
+    profile 级同步操作: 本应用 WebView 里的 cookie 只服务于 provider 登录页
+    (会话凭证已入 SQLite), 全清不影响任何已保存账号 —— pywebview 在
+    private_mode 下建首个窗口时也这么做, 上游版本的"添加账号前清会话"用的
+    同样是 DeleteAllCookies.
 
-    ok, removed = _win_cookie_operation(win, host, purge, timeout)
-    return int(removed or 0) if ok else 0
+    刻意不做"按域逐条删除": 那条链路要 GetCookiesAsync -> 等 Task 完成 ->
+    在 UI 线程按域过滤, 任何一环在真机上失败都是静默跳过; 全清只有一次
+    UI 线程调用, 失败面最小.
+    """
+    core, control = _win_webview_pair(win, allow_fallback=True)
+    if core is None or control is None:
+        _log("[login] cookie purge (win): no CoreWebView2 available")
+        return False
+    done: dict[str, object] = {}
+
+    def wipe() -> None:
+        try:
+            core.CookieManager.DeleteAllCookies()
+            done["ok"] = True
+        except Exception as exc:  # noqa: BLE001 WebView2 未就绪等
+            done["error"] = repr(exc)
+
+    if not _win_invoke_bounded(control, wipe, timeout):
+        _log("[login] cookie purge (win): UI invoke failed/timed out")
+        return False
+    if done.get("error"):
+        _log(f"[login] cookie purge (win): DeleteAllCookies failed: {done['error']}")
+        return False
+    return done.get("ok") is True
+
+
+def _win_clear_page_storage(win, timeout: float) -> bool:
+    """Windows: 清当前页面的 localStorage/sessionStorage (best-effort).
+
+    控制台/官网这类 SPA 可能把登录标记放在 localStorage, 由客户端路由直接
+    跳到后台 —— 只清 cookie 挡不住. 页面需已位于目标域, 否则清的是空 storage
+    (后续页面加载时会自然带上未登录态, 无损).
+    """
+    script = "try{localStorage.clear();sessionStorage.clear();}catch(e){}"
+    return _win_run_js(win, script, timeout) is not None
+
+
+def _win_current_url(win) -> str:
+    """Windows: 读 EdgeChrome 跟踪的当前 URL.
+
+    纯 Python 属性, 不 marshal 到 UI 线程、不等 loaded 事件 —— 可在任意
+    后台线程安全调用 (pywebview 的 get_current_url 会等无超时信号量).
+    """
+    try:
+        browser = getattr(getattr(win, "native", None), "browser", None)
+        return str(getattr(browser, "url", "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def login_entry_lost(win, provider: str) -> bool:
+    """登录窗口是否被残留会话带离了登录入口.
+
+    仅 commandcode 判定: 其登录入口就是 ``/signin`` 单页, 若页面加载完却停在
+    该域的其它路径 (官网首页/控制台), 说明服务端按残留会话把我们重定向走了,
+    用户根本没有登录的机会. opencode 的 OAuth 流程会合法地跨多域多路径,
+    不做判定 (返回 False).
+    """
+    if provider != PROVIDER_COMMANDCODE:
+        return False
+    if sys.platform == "win32":
+        url = _win_current_url(win)
+    else:
+        try:
+            url = win.get_current_url() or ""
+        except Exception:  # noqa: BLE001 窗口未就绪/已销毁
+            return False
+    host = provider_host(provider)
+    if not url.startswith("https://" + host):
+        return False
+    return not urlparse(url).path.startswith("/signin")
+
+
+def reset_login_session(win, provider: str) -> bool:
+    """把被残留会话带走的登录窗口拉回登录入口 (cookie + 页面存储一起清).
+
+    返回是否做过干预. 调用方负责确认"登录尚未成功"再调用 —— 否则会把刚建立
+    的会话清掉.
+    """
+    if not login_entry_lost(win, provider):
+        return False
+    host = provider_host(provider)
+    _log(f"[login] fell off the sign-in entry on {host} -> reset session and retry")
+    clear_provider_cookies(provider, win)
+    if sys.platform == "win32":
+        _win_clear_page_storage(win, COOKIE_PURGE_TIMEOUT)
+    try:
+        win.load_url(build_login_url(provider))
+    except Exception as exc:  # noqa: BLE001 窗口可能已被关闭
+        _log(f"[login] reload sign-in entry failed: {exc}")
+    return True
 
 
 def _win_run_js(win, script: str, timeout: float):
@@ -384,6 +475,37 @@ def _win_reload_window(win) -> bool:
     return done.get("ok") is True
 
 
+def _win_purge_provider_session(win, provider: str) -> int:
+    """Windows: 清空 cookie store 并回读验证 provider 会话确实消失.
+
+    返回清掉的 provider 域会话 cookie 条数; 0 表示"本来就没有"或"清理/验证
+    未通过" (区分写进日志 —— 真机排查时这一行是关键证据).
+    """
+    host = provider_host(provider)
+    target = CC_AUTH_COOKIE_NAME if provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
+    deadline = time.time() + COOKIE_PURGE_TIMEOUT * 2
+    before = _win_read_provider_cookies(win, host, target, _remaining(deadline))
+    cleared = _win_clear_all_cookies(win, _remaining(deadline))
+    after = _win_read_provider_cookies(win, host, target, _remaining(deadline))
+    if not cleared:
+        _log(
+            f"[login] cookie purge (win) FAILED on {host}: "
+            f"before={'?' if before is None else len(before)} (store untouched)"
+        )
+        return 0
+    if after is None:
+        # 回读不可用: DeleteAllCookies 是 profile 级操作, 清了就是清了, 按成功处理
+        _log(f"[login] cookie store wiped on {host} (verification unavailable)")
+        return len(before or [])
+    if after:
+        # 清了又出现 (旧页面 JS 续写等): 如实上报, 由"偏离登录入口"的兜底重试处理
+        _log(f"[login] cookie purge (win) incomplete on {host}: {len(after)} still present")
+        return 0
+    if before:
+        _log(f"[login] purged {len(before)} stale cookie(s) on {host}")
+    return len(before or [])
+
+
 def clear_provider_cookies(provider: str, win=None) -> int:
     """删除 WebView cookie store 中该 provider 域的会话 cookie, 返回删除条数.
 
@@ -393,20 +515,18 @@ def clear_provider_cookies(provider: str, win=None) -> int:
     LoginWatcher 把这份残留凭证当成"刚登录成功".
 
     - macOS: WKHTTPCookieStore 逐条删除, 不触碰其它域与 localStorage;
-    - Windows: WebView2 CookieManager 按域删除 (win 为目标登录窗口; 传 None
-      或该窗口 WebView2 未就绪时借任一存活窗口, cookie store 进程内共享);
+    - Windows: WebView2 DeleteAllCookies 全清 + 回读验证 (profile 级操作,
+      本应用 WebView 里的 cookie 只服务于 provider 登录页; win 为目标登录
+      窗口, 传 None 或该窗口 WebView2 未就绪时借任一存活窗口 —— cookie store
+      进程内共享);
     - 其它平台返回 0, 由 LoginWatcher 的旧凭证比对兜底.
     """
     if sys.platform == "win32":
-        host = provider_host(provider)
         try:
-            removed = _win_delete_provider_cookies(win, host, COOKIE_PURGE_TIMEOUT)
+            return _win_purge_provider_session(win, provider)
         except Exception as exc:  # noqa: BLE001 清不掉不阻断登录 (有指纹兜底)
             _log(f"[login] cookie purge (win) failed: {exc}")
             return 0
-        if removed:
-            _log(f"[login] purged {removed} stale cookie(s) on {host}")
-        return removed
     if sys.platform != "darwin":
         return 0
     # 主线程调用会与 callAfter 互锁 (自身阻塞等待主线程执行该回调): 放弃清理,
@@ -991,17 +1111,26 @@ class LoginWatcher:
     def _read_cookies(self) -> list:
         """读取窗口 cookie, 供命中目标 cookie 用.
 
-        Windows 不走 pywebview 的 get_cookies: 它内部用无超时信号量等 UI 线程
-        回调, 且以 EdgeChrome 自己跟踪的 URL 作 GetCookiesAsync 入参 —— 轮询
-        恰好撞上导航时该值可能为 None, .NET 抛异常后信号量不再释放, 监听线程
-        会永久挂死 (单飞守卫再也不释放, 用户再点登录被静默拦截). 这里改走
-        带超时的按域读取, 语义等价 (目标 cookie 就在该 provider 域下).
+        Windows 主路径不走 pywebview 的 get_cookies: 它内部用无超时信号量等
+        UI 线程回调, 且以 EdgeChrome 自己跟踪的 URL 作 GetCookiesAsync 入参 ——
+        轮询恰好撞上导航时该值可能为 None, .NET 抛异常后信号量不再释放, 监听
+        线程会永久挂死 (单飞守卫再也不释放, 用户再点登录被静默拦截).
+
+        但读取是登录能否被识别的唯一通道: 自带的按域读取不可用 (返回 None)
+        时仍回退到 pywebview 的实现 —— 此刻 URL 已确认在 provider 域、页面
+        也已加载完, 挂起风险低, 总比永远读不到 cookie 强.
         """
         if sys.platform == "win32":
             values = _win_read_provider_cookies(
                 self.win, self._target_host(), self._target_cookie_name(), COOKIE_READ_TIMEOUT
             )
-            return [{"name": self._target_cookie_name(), "value": value} for value in values]
+            if values is None:
+                _log("[login] win cookie read unavailable -> falling back to pywebview")
+                return self.win.get_cookies() or []
+            return [
+                {"name": self._target_cookie_name(), "value": value}
+                for value in values
+            ]
         return self.win.get_cookies() or []
 
     def _is_stale(self, value: str) -> bool:

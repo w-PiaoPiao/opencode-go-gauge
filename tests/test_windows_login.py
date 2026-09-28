@@ -57,13 +57,19 @@ class _FakeCookieManager:
         self.cookies = list(cookies)
         self.deleted: list = []
         self.uris: list[str] = []
+        self.delete_all_calls = 0
 
     def GetCookiesAsync(self, uri: str) -> _FakeTask:
         self.uris.append(uri)
         return _FakeTask(list(self.cookies))
 
+    def DeleteAllCookies(self) -> None:
+        self.delete_all_calls += 1
+        self.cookies = []
+
     def DeleteCookie(self, cookie) -> None:
         self.deleted.append(cookie)
+        self.cookies = [c for c in self.cookies if c is not cookie]
 
 
 class _FakeCore:
@@ -84,12 +90,21 @@ class _FakeCore:
 
 class _FakeForm:
     """模拟 pywebview 的 BrowserForm: 既是 WinForms 控件 (Invoke/InvokeRequired),
-    又挂着 browser (EdgeChrome) -> webview (WebView2 控件) -> CoreWebView2."""
+    又挂着 browser (EdgeChrome) -> webview (WebView2 控件) -> CoreWebView2.
 
-    def __init__(self, core: _FakeCore | None, invoke_required: bool = True) -> None:
+    browser.url 对应 EdgeChrome 自己跟踪的当前 URL —— Windows 侧读它判断
+    "登录页是否被残留会话带离了登录入口".
+    """
+
+    def __init__(
+        self,
+        core: _FakeCore | None,
+        invoke_required: bool = True,
+        url: str = "https://commandcode.ai/signin",
+    ) -> None:
         self.InvokeRequired = invoke_required
         self.invocations = 0
-        self.browser = SimpleNamespace(webview=SimpleNamespace(CoreWebView2=core))
+        self.browser = SimpleNamespace(webview=SimpleNamespace(CoreWebView2=core), url=url)
 
     def Invoke(self, delegate) -> None:
         self.invocations += 1
@@ -105,12 +120,19 @@ class _FakeWin:
         invoke_required: bool = True,
         url: str = "https://commandcode.ai/signin",
     ) -> None:
-        self.native = _FakeForm(core, invoke_required=invoke_required)
-        self.url = url
+        self.native = _FakeForm(core, invoke_required=invoke_required, url=url)
 
     @property
     def control(self) -> _FakeForm:
         return self.native
+
+    @property
+    def url(self) -> str:
+        return self.native.browser.url
+
+    @url.setter
+    def url(self, value: str) -> None:
+        self.native.browser.url = value
 
     def get_current_url(self):
         return self.url
@@ -145,21 +167,48 @@ def win_platform(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_win_purge_only_touches_provider_domain(win_platform):
+def test_win_purge_clears_store_via_delete_all_and_verifies(win_platform):
+    """Windows 清残留会话 = DeleteAllCookies (profile 级) + 回读验证.
+
+    刻意不走"GetCookiesAsync -> Task -> 逐条 DeleteCookie": 那条链路真机上
+    任何一环失败都是静默跳过 (实测残留会话仍在, 登录页被带到官网).
+    """
     cm = _FakeCookieManager([
         _FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", ".commandcode.ai"),
-        _FakeCookie("other", "KEEP", "commandcode.ai"),
-        _FakeCookie("auth", "KEEP", "opencode.ai"),
+        _FakeCookie("other", "KEEP", "example.com"),
     ])
     win = _FakeWin(_FakeCore(cm))
 
     removed = auth.clear_provider_cookies("commandcode", win)
 
-    # 两条 commandcode 域的 cookie 都被删 (含无前缀域), opencode 域不受影响
-    assert removed == 2
-    assert {c.Name for c in cm.deleted} == {auth.CC_AUTH_COOKIE_NAME, "other"}
-    # 查询必须带有效 URL: GetCookiesAsync(null) 是 pywebview 旧实现挂死的根因
-    assert cm.uris == ["https://commandcode.ai/"]
+    assert removed == 1, "应报告清掉的 provider 域会话条数"
+    assert cm.delete_all_calls == 1, "必须走 DeleteAllCookies"
+    assert cm.cookies == [], "store 必须真的空了"
+    assert cm.deleted == [], "不再依赖逐条 DeleteCookie"
+    assert cm.uris == ["https://commandcode.ai/"] * 2, "清前/清后回读都要带有效 URL"
+
+
+def test_win_purge_reports_zero_when_verification_still_sees_session(win_platform):
+    """清完回读仍有残留 (页面 JS 续写等) 必须如实报 0, 不能谎报已清."""
+
+    class _StubbornCM(_FakeCookieManager):
+        def DeleteAllCookies(self) -> None:
+            self.delete_all_calls += 1  # 假装清了, 但 cookie 还在
+
+    cm = _StubbornCM([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    win = _FakeWin(_FakeCore(cm))
+
+    assert auth.clear_provider_cookies("commandcode", win) == 0
+    assert cm.cookies, "残留仍在时不得假装成功"
+
+
+def test_win_read_distinguishes_empty_from_unavailable(win_platform):
+    """空列表 = 确实没有残留; None = 读不到 —— 验证逻辑必须能区分."""
+    win = _FakeWin(_FakeCore(_FakeCookieManager([])))
+    assert auth._win_read_provider_cookies(win, "commandcode.ai", "auth", 1.0) == []
+
+    no_core = _FakeWin(None)
+    assert auth._win_read_provider_cookies(no_core, "commandcode.ai", "auth", 1.0) is None
 
 
 def test_win_purge_skips_when_no_window_and_none_alive(win_platform):
@@ -173,7 +222,7 @@ def test_win_purge_never_runs_on_ui_thread(win_platform):
     win = _FakeWin(_FakeCore(cm), invoke_required=False)
 
     assert auth.clear_provider_cookies("opencode", win) == 0
-    assert cm.deleted == []
+    assert cm.delete_all_calls == 0
     assert win.control.invocations == 0
 
 
@@ -185,7 +234,7 @@ def test_win_purge_falls_back_to_any_alive_window(win_platform):
     win_platform.setattr(auth.webview, "windows", [alive])
 
     assert auth.clear_provider_cookies("commandcode", dead) == 1
-    assert len(cm.deleted) == 1
+    assert cm.delete_all_calls == 1
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +271,54 @@ def test_win_baseline_feeds_stale_detection(win_platform, monkeypatch):
     watcher = auth.LoginWatcher(win, "commandcode", lambda *a: None, baseline_value=baseline)
     assert watcher._is_stale("OLDSESSION") is True
     assert watcher._is_stale("FRESHSESSION") is False
+
+
+def test_win_purge_still_clears_when_verification_unavailable(win_platform):
+    """回读验证不可用不影响清理本身: DeleteAllCookies 是 profile 级操作.
+
+    真机上"读得到但删不掉"和"读不到"是两种不同的失败: 前者要如实上报,
+    后者不能因为验证手段不可用就放弃清理 (或谎报失败).
+    """
+
+    class _OnceReadableCM(_FakeCookieManager):
+        def __init__(self, cookies: list) -> None:
+            super().__init__(cookies)
+            self.reads = 0
+
+        def GetCookiesAsync(self, uri: str):
+            self.reads += 1
+            if self.reads > 1:  # 清前可读, 清后回读不可用
+                raise RuntimeError("verification unavailable")
+            return super().GetCookiesAsync(uri)
+
+    cm = _OnceReadableCM([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    win = _FakeWin(_FakeCore(cm))
+
+    assert auth.clear_provider_cookies("commandcode", win) == 1
+    assert cm.delete_all_calls == 1
+    assert cm.cookies == []
+
+
+def test_win_watcher_falls_back_to_pywebview_when_read_unavailable(win_platform, monkeypatch):
+    """自带读取不可用时监听线程必须回退到 pywebview 的 get_cookies.
+
+    读取是"登录能否被识别"的唯一通道 —— 宁可走备选通道, 也不能永远读不到
+    凭证 (登录窗会一直不关).
+    """
+    monkeypatch.setattr(auth, "COOKIE_POLL_SEC", 0.02)
+    win = _FakeWin(None)  # 无 CoreWebView2 → 自带按域读取返回 None
+    win.get_cookies = lambda: [{"name": auth.CC_AUTH_COOKIE_NAME, "value": "FRESHSESSION"}]
+    win_platform.setattr(auth.webview, "windows", [win])
+
+    seen: list[tuple] = []
+    watcher = auth.LoginWatcher(win, "commandcode", lambda *a: seen.append(a))
+    watcher.start()
+    try:
+        assert _wait_until(lambda: bool(seen)), "回退通道拿到的凭证未被识别"
+        assert seen[0][0] == f"{auth.CC_AUTH_COOKIE_NAME}=FRESHSESSION"
+        assert watcher.done is True
+    finally:
+        watcher.stop()
 
 
 def test_win_watcher_reads_cookies_without_pywebview(win_platform, monkeypatch):
@@ -323,6 +420,59 @@ def test_win_snapshot_reads_page_state(win_platform):
     snapshot = auth.page_snapshot(_FakeWin(core))
     assert snapshot == "complete"  # ExecuteScriptAsync 的 JSON 字符串被解码
     assert core.scripts, "快照脚本必须真的下发到页面"
+
+
+# ---------------------------------------------------------------------------
+# 残留会话把登录页带离入口 (commandcode 停在官网/控制台)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://commandcode.ai/signin", False),
+        ("https://commandcode.ai/signin?next=%2F", False),
+        ("https://commandcode.ai/", True),
+        ("https://commandcode.ai/dashboard", True),
+        ("https://github.com/login?client_id=x", False),  # 授权流程在别的域
+        ("about:blank", False),
+        ("", False),
+    ],
+)
+def test_login_entry_lost_flags_only_commandcode_off_entry(win_platform, url, expected):
+    win = _FakeWin(_FakeCore(_FakeCookieManager([])), url=url)
+    assert auth.login_entry_lost(win, "commandcode") is expected
+
+
+def test_login_entry_lost_ignores_other_providers(win_platform):
+    """opencode 的 OAuth 会合法地跨域跨路径, 不做判定 (避免误清刚建立的会话)."""
+    win = _FakeWin(_FakeCore(_FakeCookieManager([])), url="https://opencode.ai/workspace/wrk_1")
+    assert auth.login_entry_lost(win, "opencode") is False
+
+
+def test_reset_login_session_purges_and_reloads_entry(win_platform):
+    """被带到官网/控制台时: 清 store + 清页面存储 + 重新加载登录入口."""
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    win = _FakeWin(_FakeCore(cm), url="https://commandcode.ai/")
+    reloaded: list[str] = []
+    win.load_url = lambda url: reloaded.append(url)
+
+    assert auth.reset_login_session(win, "commandcode") is True
+    assert cm.delete_all_calls == 1
+    assert reloaded == [auth.build_login_url("commandcode")]
+    scripts = win.control.browser.webview.CoreWebView2.scripts
+    assert any("localStorage.clear" in s for s in scripts), (
+        "还要清 localStorage/sessionStorage —— 控制台可能据此在客户端直接跳后台"
+    )
+
+
+def test_reset_login_session_noop_when_still_on_entry(win_platform):
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    win = _FakeWin(_FakeCore(cm), url="https://commandcode.ai/signin")
+    win.load_url = lambda url: pytest.fail("仍在登录入口时不该重新加载")
+
+    assert auth.reset_login_session(win, "commandcode") is False
+    assert cm.delete_all_calls == 0, "仍在登录入口时不得清会话"
 
 
 # ---------------------------------------------------------------------------

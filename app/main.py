@@ -20,7 +20,7 @@ from typing import Optional
 
 import webview
 
-from . import db, server
+from . import __version__, db, server
 from .auth import (
     BOOT_SETTLE_SEC,
     LoginWatcher,
@@ -32,6 +32,7 @@ from .auth import (
     nudge_window_repaint,
     page_snapshot,
     read_provider_cookie,
+    reset_login_session,
 )
 
 APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
@@ -44,6 +45,8 @@ _IS_WIN = sys.platform == "win32"
 _quitting = False  # 托盘"退出"标志: 为 True 时关闭窗口=真正退出
 _tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退出, 避免无法关闭)
 _main_win_ref: dict[str, object] = {"win": None}  # 主窗口引用 (macOS delegate 恢复用)
+# 登录页被残留会话带离登录入口 (commandcode 停在官网/控制台) 时的重置重试上限
+_LOGIN_ENTRY_RETRIES = 2
 
 
 # ── Win32 窗口辅助 (仅 Windows 运行时使用; ctypes 为跨平台标准库) ──
@@ -827,6 +830,11 @@ def main() -> None:
         _ensure_single_instance_mac()
 
     db.get_db()  # 初始化数据库
+    # 版本号落在日志首行: 真机排查时先确认跑的到底是不是修复版
+    _mlog(
+        f"=== GoGauge {__version__} starting "
+        f"(platform={sys.platform}, frozen={bool(getattr(sys, 'frozen', False))}) ==="
+    )
 
     host, port = server.start_server()
     dashboard_url = f"http://{host}:{port}/"
@@ -1118,6 +1126,16 @@ def main() -> None:
         _start_watcher(lw, provider)
         _arm_login_window(lw, provider)
 
+    def _login_still_pending() -> bool:
+        """本次登录是否还没拿到凭证 (允许重置会话的前提).
+
+        watcher 引用为 None 或 done=True 都说明登录已成功/已清理: 此时页面上
+        的"离开登录入口"是登录成功的正常跳转, 绝不能清会话 (会把刚建立的
+        会话清掉).
+        """
+        w = watcher.get("ref")
+        return isinstance(w, LoginWatcher) and not w.done
+
     def _arm_login_window(lw, provider: str) -> None:
         """后台为登录窗口做三件事: 装请求拦截 → 打开登录页 → 盯加载进度.
 
@@ -1127,13 +1145,15 @@ def main() -> None:
         3. 放后台线程, 避免编译规则/看门狗的等待阻塞 open_login 的调用方.
         """
         def worker() -> None:
-            # 先渲染本地引导页: 缺这一步, WKWebView 对登录页这种复杂 SPA 不做
-            # 首次合成, 页面加载得再完整窗口也只显示背景色 (白屏根治手段)
-            try:
-                render_login_boot_page(lw)
-            except Exception as exc:  # noqa: BLE001
-                _mlog(f"[main] login boot page ERROR: {exc}")
-            time.sleep(BOOT_SETTLE_SEC)
+            # 引导页是 macOS 专属的白屏补救 (WKWebView 首帧合成缺陷, 见 auth
+            # 模块注释): Windows/WebView2 无此问题, 跳过可少一次导航, 也让复用
+            # 窗口里残留的旧页面更早停止运行 (旧页面可能正在续写会话 cookie)
+            if _IS_MAC:
+                try:
+                    render_login_boot_page(lw)
+                except Exception as exc:  # noqa: BLE001
+                    _mlog(f"[main] login boot page ERROR: {exc}")
+                time.sleep(BOOT_SETTLE_SEC)
             try:
                 ok = install_login_network_rules(lw)
                 _mlog(f"[main] login network rules: {'on' if ok else 'skipped'}")
@@ -1149,6 +1169,21 @@ def main() -> None:
                 _mlog(f"[main] login page loaded: {loaded}")
             except Exception as exc:  # noqa: BLE001
                 _mlog(f"[main] login load watchdog ERROR: {exc}")
+            # 残留会话兜底: 清 cookie 若因页面 JS 续写而部分失效, 登录入口仍会
+            # 把页面带到后台 (实测 commandcode 停在官网/控制台), 用户在那种
+            # 页面上根本没法登录. 检出"已离开登录入口"就清会话再回来, 最多
+            # _LOGIN_ENTRY_RETRIES 次; 登录已成功则立即收手.
+            for attempt in range(_LOGIN_ENTRY_RETRIES):
+                try:
+                    if not _login_still_pending():
+                        break
+                    if not reset_login_session(lw, provider):
+                        break
+                    _mlog(f"[main] login fell off sign-in entry -> session reset #{attempt + 1}")
+                    ensure_login_page_loaded(lw)
+                except Exception as exc:  # noqa: BLE001
+                    _mlog(f"[main] login entry check ERROR: {exc}")
+                    break
             # 页面内部状态快照: 用来区分"页面没渲染"与"渲染了但没显示"
             try:
                 _mlog(f"[main] login page snapshot: {page_snapshot(lw)}")
