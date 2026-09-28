@@ -41,7 +41,6 @@
 - **Built-in WebView login**: independent login window opens the opencode.ai console sign-in page, auto-captures session & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)
-- **System tray**: closing the window minimizes to tray; brand logo icons
 - **Local-first**: all data stays in local SQLite; credentials are only used to sync official APIs
 
 ## 🖥 Quick Start
@@ -54,7 +53,9 @@ Download `GoGauge.exe` from [Releases](../../releases) (single file, no install)
 2. After login, the dashboard loads and usage data syncs automatically
 3. Data is stored in the `data\` folder next to the exe
 
-> Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window minimizes to the system tray.
+> Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window quits the app.
+
+> ⚠️ **Upgrading from v2.1.0 or earlier**: opencode.ai switched to its new console API, so the stored session is void. The stale credential is cleared automatically, the app returns to the welcome page — just log in once (local history is kept).
 
 > ⚠️ **Upgrading from v2.1.0 or earlier**: opencode.ai switched to its new console API, so the stored session is void. The stale credential is cleared automatically, the app returns to the welcome page — just log in once (local history is kept).
 
@@ -71,7 +72,7 @@ python entry.py
 build.bat
 ```
 
-Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon and tray support included).
+Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon included).
 
 ## 📊 Data Notes
 

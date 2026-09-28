@@ -13,9 +13,11 @@ import os
 import re
 import tempfile
 import threading
+import time
 import uuid
 from http.cookies import SimpleCookie as SimpleCookieCls
 from typing import Callable, Optional
+from urllib.parse import parse_qsl, unquote, urlencode
 
 import webview
 
@@ -88,6 +90,11 @@ class LoginWatcher:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.done = False
+        # GitHub 卡死自动续跑状态
+        self._oauth_entry: Optional[str] = None  # 最近一次授权入口 URL
+        self._stuck_since: Optional[float] = None  # 停在无关 GitHub 页面的起始时刻
+        self._reloads = 0  # 已自动续跑次数
+        self._github_cls: Optional[str] = None  # 上次记录的 GitHub 页面分类 (去重日志)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -118,6 +125,7 @@ class LoginWatcher:
                 continue
 
             if url.startswith("https://opencode.ai"):
+                self._stuck_since = None  # 已回到 opencode 域, 卡死计时清除
                 try:
                     cookies = self.win.get_cookies() or []
                     raw_desc = [str(c) for c in cookies]
