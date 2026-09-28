@@ -8,7 +8,13 @@
 重新登录前必须清掉残留会话 (见 ``clear_provider_cookies``): pywebview 的
 private_mode 只在 create_window 时清理网站数据, 而复用的登录窗口里上一轮的
 cookie 还在 —— 既让登录页直接跳转后台 (无法切换账号), 也让 LoginWatcher 把
-旧凭证误判为本次登录成功 (窗口秒关 + 凭证未刷新).
+旧凭证误判为本次登录成功 (窗口秒关 + 凭证未刷新). macOS 走 WKHTTPCookieStore、
+Windows 走 WebView2 CookieManager, 都按 provider 域精确删除.
+
+两平台的底层实现都是"直接问 WebView", 不经 pywebview 的窗口方法: 后者的
+get_cookies/evaluate_js 用**无超时**信号量等 UI 线程回调, 任一环节异常都会
+永久挂起调用线程 (WKWebView 页面加载中、WebView2 的 GetCookiesAsync 拿到
+null URL 时都会触发).
 """
 from __future__ import annotations
 
@@ -117,7 +123,268 @@ def _domain_matches(domain: str, host: str) -> bool:
     return bool(d) and (d == host or d.endswith("." + host))
 
 
-def clear_provider_cookies(provider: str) -> int:
+# ── Windows (WebView2) 辅助 ────────────────────────────────────────────────
+# pywebview 的 winforms 后端把 WebView2 挂在 window.native (BrowserForm) 上:
+#   native -> .browser (EdgeChrome) -> .webview (WebView2 控件) -> .CoreWebView2
+# 所有窗口共享同一 UserDataFolder (后端的 cache_dir 是进程级全局), cookie store
+# 因此也是同一份 —— 登录窗口刚重建 (WebView2 还在异步初始化) 或已被销毁时,
+# 借主窗口的实例同样能读到/清掉目标域 cookie.
+#
+# 为什么不直接调 pywebview 的窗口方法: get_cookies 内部用**无超时**的
+# Semaphore.acquire() 等 UI 线程回调, 且读取用 GetCookiesAsync(self.url) ——
+# 窗口刚渲染过引导页 (load_html) 时 self.url 为 None, .NET 侧抛异常后信号量
+# 不再释放, 调用线程会永久挂起; evaluate_js 同理. 这里自己走 Control.Invoke
+# + Task, 每一步都有超时, 任一环节失败只降级不阻塞.
+
+
+def _win_core_webview(win):
+    """Windows: 取窗口底层 WebView2 的 CoreWebView2 (未就绪返回 None)."""
+    try:
+        native = getattr(win, "native", None)          # BrowserForm
+        browser = getattr(native, "browser", None)     # EdgeChrome
+        control = getattr(browser, "webview", None)    # WebView2 控件
+        return getattr(control, "CoreWebView2", None)  # 未初始化时 .NET null -> None
+    except Exception:  # noqa: BLE001 窗口已销毁/pywebview 内部结构变化
+        return None
+
+
+def _win_webview_pair(win, allow_fallback: bool = False):
+    """Windows: 返回 (core, control) —— 优先传入窗口.
+
+    ``allow_fallback=True`` 时传入窗口取不到 core 就借其它存活窗口, 仅用于
+    cookie 读写: 所有窗口共享同一 cookie store (后端的 cache_dir 是进程级
+    全局), 借来的实例效果完全相同, 且登录窗口刚重建 (WebView2 还在异步
+    初始化) 或已销毁时这是唯一能清残留的通道.
+    页面状态类操作 (执行 JS/加载判定/reload) 必须用窗口自己的实例, 否则会
+    读到另一个窗口的页面 (例如把主窗口面板的 readyState 当成登录页的).
+    """
+    candidates: list = [win] if win is not None else []
+    if allow_fallback:
+        try:
+            candidates += [w for w in list(webview.windows) if w is not win]
+        except Exception:  # noqa: BLE001
+            pass
+    for cand in candidates:
+        if cand is None:
+            continue
+        core = _win_core_webview(cand)
+        if core is None:
+            continue
+        control = getattr(cand, "native", None)
+        if control is not None:
+            return core, control
+    return None, None
+
+
+def _win_ui_delegate(fn):
+    """pythonnet: 把 Python 函数包成 .NET delegate 供 Control.Invoke 使用.
+
+    单独成函数便于测试替身 (非 Windows 平台无 pythonnet).
+    """
+    from System import Func, Type  # noqa: E402 仅 Windows 运行时可导入
+
+    return Func[Type](fn)
+
+
+def _win_invoke_bounded(control, fn, timeout: float) -> bool:
+    """在 Windows UI 线程执行 fn, 超时即放弃 (不阻塞调用方).
+
+    底层 Control.Invoke 从非 UI 线程调用会阻塞到执行完; UI 线程被模态对话框/
+    同步加载占住时会一直等. 因此放进 daemon 子线程并 join 超时 —— 超时后 fn
+    仍可能稍后执行 (消息队列排空后), 所以只用于幂等的读取/清理.
+
+    已在 UI 线程时直接放弃: 调用方都要在非 UI 线程等 .NET Task, 在 UI 线程
+    等一个需要 UI 线程泵消息才能完成的 Task 会互锁 (与 macOS 侧的 callAfter
+    规避同一原理).
+    """
+    try:
+        if not bool(control.InvokeRequired):
+            return False
+    except Exception:  # noqa: BLE001 句柄未创建/fake 控件
+        return False
+    outcome: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            control.Invoke(_win_ui_delegate(fn))
+            outcome["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            outcome["error"] = repr(exc)
+
+    thread = threading.Thread(target=worker, daemon=True, name="gousage-win-ui-invoke")
+    thread.start()
+    thread.join(timeout)
+    return outcome.get("ok") is True
+
+
+def _remaining(deadline: float, minimum: float = 0.05) -> float:
+    """距 deadline 的剩余秒数 (下限兜底, 供多步操作共享一个总超时预算)."""
+    return max(minimum, deadline - time.time())
+
+
+def _win_wait_task(task, timeout: float) -> bool:
+    """等 .NET Task 完成 (必须从非 UI 线程调用, 否则与 UI 线程互锁)."""
+    try:
+        return bool(task.Wait(max(1, int(timeout * 1000))))
+    except Exception:  # noqa: BLE001 任务自身失败/超时
+        return False
+
+
+def _win_cookie_operation(win, host: str, handler, timeout: float):
+    """Windows: 取 provider 域 cookie 列表并在 UI 线程交给 handler 处理.
+
+    时序: UI 线程发起 GetCookiesAsync -> 调用线程 Wait(Task) -> UI 线程处理
+    (WebView2 的 cookie 对象有线程亲和性, 必须在 UI 线程读写). 返回
+    (ok, handler 的返回值); 任何一步异常/超时都返回 (False, None).
+
+    允许借其它存活窗口的 core: cookie store 进程内共享 (见 _win_webview_pair).
+    """
+    core, control = _win_webview_pair(win, allow_fallback=True)
+    if core is None or control is None:
+        return False, None
+    deadline = time.time() + timeout
+    box: dict[str, object] = {}
+
+    def start() -> None:
+        try:
+            box["task"] = core.CookieManager.GetCookiesAsync(f"https://{host}/")
+        except Exception as exc:  # noqa: BLE001 WebView2 未就绪等
+            box["error"] = repr(exc)
+
+    if not _win_invoke_bounded(control, start, _remaining(deadline)):
+        return False, None
+    task = box.get("task")
+    if task is None or not _win_wait_task(task, _remaining(deadline)):
+        return False, None
+    result: dict[str, object] = {}
+
+    def handle() -> None:
+        try:
+            result["value"] = handler(list(task.Result), core.CookieManager)
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = repr(exc)
+
+    if not _win_invoke_bounded(control, handle, _remaining(deadline)):
+        return False, None
+    if "error" in result:
+        return False, None
+    return True, result.get("value")
+
+
+def _win_read_provider_cookies(win, host: str, cookie_name: str, timeout: float) -> list[str]:
+    """Windows: 读取 provider 域指定名 cookie 的值列表."""
+
+    def collect(cookies, _cm) -> list[str]:
+        values: list[str] = []
+        for cookie in cookies:
+            try:
+                if str(cookie.Name) == cookie_name and str(cookie.Value):
+                    values.append(str(cookie.Value))
+            except Exception:  # noqa: BLE001 单个 cookie 异常不影响整体
+                continue
+        return values
+
+    ok, values = _win_cookie_operation(win, host, collect, timeout)
+    return list(values or []) if ok else []
+
+
+def _win_delete_provider_cookies(win, host: str, timeout: float) -> int:
+    """Windows: 删除 provider 域的 cookie, 返回删除条数 (按域过滤, 不碰其它域)."""
+
+    def purge(cookies, cm) -> int:
+        removed = 0
+        for cookie in cookies:
+            try:
+                if not _domain_matches(str(cookie.Domain), host):
+                    continue
+                cm.DeleteCookie(cookie)
+                removed += 1
+            except Exception:  # noqa: BLE001 单个 cookie 失败不中断其余
+                continue
+        return removed
+
+    ok, removed = _win_cookie_operation(win, host, purge, timeout)
+    return int(removed or 0) if ok else 0
+
+
+def _win_run_js(win, script: str, timeout: float):
+    """Windows: 在窗口里执行 JS 并取回结果, 失败/超时返回 None.
+
+    自带超时的 ExecuteScriptAsync 封装 (pywebview 的 evaluate_js 用无超时
+    信号量, 页面加载中会永久挂起).
+    """
+    core, control = _win_webview_pair(win)
+    if core is None or control is None:
+        return None
+    deadline = time.time() + timeout
+    box: dict[str, object] = {}
+
+    def start() -> None:
+        try:
+            box["task"] = core.ExecuteScriptAsync(script)
+        except Exception as exc:  # noqa: BLE001
+            box["error"] = repr(exc)
+
+    if not _win_invoke_bounded(control, start, _remaining(deadline)):
+        return None
+    task = box.get("task")
+    if task is None or not _win_wait_task(task, _remaining(deadline)):
+        return None
+    raw: dict[str, object] = {}
+
+    def read() -> None:
+        try:
+            raw["value"] = str(task.Result)
+        except Exception as exc:  # noqa: BLE001
+            raw["error"] = repr(exc)
+
+    if not _win_invoke_bounded(control, read, _remaining(deadline)) or "error" in raw:
+        return None
+    try:
+        return json.loads(str(raw.get("value")))
+    except Exception:  # noqa: BLE001 非 JSON 结果 (如 undefined)
+        return raw.get("value")
+
+
+def _win_page_load_state(win) -> Optional[dict]:
+    """Windows: 用 document.readyState + 当前 Source 判定登录页加载状态.
+
+    WebView2 没有 estimatedProgress/IsLoading. readyState='complete' 表示文档
+    及同步子资源就绪; Source 仍为空/about:blank 说明导航还没落地 (引导页阶段),
+    视为加载中, 避免看门狗把引导页误判成登录页已加载.
+    """
+    ready = _win_run_js(win, "document.readyState", COOKIE_PURGE_TIMEOUT)
+    if ready is None:
+        return None
+    core, _control = _win_webview_pair(win)
+    try:
+        source = str(getattr(core, "Source", "") or "")
+    except Exception:  # noqa: BLE001
+        source = ""
+    loading = str(ready) != "complete" or not source.lower().startswith("http")
+    return {"progress": 0.0 if loading else 1.0, "loading": loading}
+
+
+def _win_reload_window(win) -> bool:
+    """Windows: 让 WebView2 重新加载当前页."""
+    core, control = _win_webview_pair(win)
+    if core is None or control is None:
+        return False
+    done: dict[str, object] = {}
+
+    def do_reload() -> None:
+        try:
+            core.Reload()
+            done["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            done["error"] = repr(exc)
+
+    if not _win_invoke_bounded(control, do_reload, COOKIE_PURGE_TIMEOUT):
+        return False
+    return done.get("ok") is True
+
+
+def clear_provider_cookies(provider: str, win=None) -> int:
     """删除 WebView cookie store 中该 provider 域的会话 cookie, 返回删除条数.
 
     必须在加载登录页之前调用. pywebview 的 private_mode 只在 create_window 时
@@ -125,9 +392,21 @@ def clear_provider_cookies(provider: str) -> int:
     store 里, 会让登录页据旧凭证直接跳转后台 (无法重新选择账号), 并让
     LoginWatcher 把这份残留凭证当成"刚登录成功".
 
-    仅 macOS 有精确删除能力 (WKHTTPCookieStore 逐条删除, 不触碰其它域与
-    localStorage); 其它平台返回 0, 由 LoginWatcher 的旧凭证比对兜底.
+    - macOS: WKHTTPCookieStore 逐条删除, 不触碰其它域与 localStorage;
+    - Windows: WebView2 CookieManager 按域删除 (win 为目标登录窗口; 传 None
+      或该窗口 WebView2 未就绪时借任一存活窗口, cookie store 进程内共享);
+    - 其它平台返回 0, 由 LoginWatcher 的旧凭证比对兜底.
     """
+    if sys.platform == "win32":
+        host = provider_host(provider)
+        try:
+            removed = _win_delete_provider_cookies(win, host, COOKIE_PURGE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 清不掉不阻断登录 (有指纹兜底)
+            _log(f"[login] cookie purge (win) failed: {exc}")
+            return 0
+        if removed:
+            _log(f"[login] purged {removed} stale cookie(s) on {host}")
+        return removed
     if sys.platform != "darwin":
         return 0
     # 主线程调用会与 callAfter 互锁 (自身阻塞等待主线程执行该回调): 放弃清理,
@@ -230,9 +509,13 @@ def login_block_rules_json() -> str:
 def page_load_state(win):
     """读取窗口页面的加载状态 {"progress", "loading"}; 读不到返回 None.
 
-    直接问底层 WKWebView, 不走 pywebview 的窗口方法 —— 后者用无超时信号量
-    等主线程回调, 页面加载中调用会一直挂住 (get_current_url/evaluate_js 都是).
+    不走 pywebview 的窗口方法 —— 后者用无超时信号量等主线程回调, 页面加载中
+    调用会一直挂住 (get_current_url/evaluate_js 都是):
+    - macOS: 直接问底层 WKWebView 的 estimatedProgress/isLoading;
+    - Windows: ExecuteScriptAsync 读 document.readyState (自带超时).
     """
+    if sys.platform == "win32":
+        return _win_page_load_state(win)
     if sys.platform != "darwin":
         return None
     # 主线程调用会与 callAfter 互锁
@@ -268,7 +551,9 @@ def page_load_state(win):
 
 
 def reload_window(win) -> bool:
-    """让窗口重新加载当前页 (需在主线程之外调用)."""
+    """让窗口重新加载当前页 (需在主线程之外调用; macOS/Windows 均有实现)."""
+    if sys.platform == "win32":
+        return _win_reload_window(win)
     if sys.platform != "darwin":
         return False
     if threading.current_thread() is threading.main_thread():
@@ -340,12 +625,14 @@ _SNAPSHOT_JS = (
 
 
 def page_snapshot(win) -> Optional[str]:
-    """读登录页的内部状态 (诊断用): 直接问 WKWebView, 不经 pywebview.
+    """读登录页的内部状态 (诊断用): 直接问底层 WebView, 不经 pywebview.
 
     pywebview 的 evaluate_js 会挂在无超时信号量上 (页面加载中必挂), 这里用
-    pyobjc 的 completion handler 自己收结果, 用来区分"页面没渲染"和
-    "渲染了但没显示出来".
+    pyobjc 的 completion handler / WebView2 的 Task 自己收结果, 用来区分
+    "页面没渲染"和"渲染了但没显示出来".
     """
+    if sys.platform == "win32":
+        return _win_run_js(win, _SNAPSHOT_JS, _SNAPSHOT_TIMEOUT)
     if sys.platform != "darwin":
         return None
     if threading.current_thread() is threading.main_thread():
@@ -451,16 +738,25 @@ def ensure_login_page_loaded(
     实测: commandcode 登录页在 WKWebView 里首次加载常停在中途 (progress 不再
     前进但 loading 恒为 True), 窗口因此一直是纯白; 主动 reload 一次即可正常
     加载完成. 这里用"进度停滞"而非固定时长判定, 慢网络下不会误伤.
+
+    连续读不到加载状态 (窗口尚未就绪/WebView 不可用) 就提前放弃, 不再空转到
+    总超时 —— 登录本身由 LoginWatcher 独立完成, 看门狗只是兜底.
     """
     started = time.time()
     last_progress = -1.0
     last_change = time.time()
     reloads = 0
+    unavailable = 0
     while time.time() - started < total_sec:
         state = page_load_state(win)
         if state is None:
+            unavailable += 1
+            if unavailable >= 3:
+                _log("[login] page load watchdog: state unavailable, giving up")
+                return False
             time.sleep(1.0)
             continue
+        unavailable = 0
         progress = float(state.get("progress") or 0.0)
         if not state.get("loading") or progress >= 0.999:
             _log(f"[login] page loaded (progress={progress:.2f}, reloads={reloads})")
@@ -486,6 +782,12 @@ def install_login_network_rules(win) -> bool:
     背景: 部分网络环境下这些域连接超时 (facebook/twitter 广告、Cloudflare
     前端分析), 请求一直 pending 会让页面 load 事件永不触发, 登录窗口停在
     纯白 (实测屏蔽后立即完整渲染). 失败只是降级为原来的行为, 不影响登录.
+
+    Windows 不实现: WebView2 没有等价的导航前规则列表 (要在 UI 线程给每个域
+    注册 WebResourceRequested 过滤器并构造空响应, 一旦异常会打到 UI 线程,
+    有拖垮整个进程的风险); Chromium 对 pending 第三方资源的容忍度也更高
+    (首屏不依赖 load 事件). 登录页卡死的场景由 ensure_login_page_loaded 的
+    readyState 看门狗兜底.
     """
     if sys.platform != "darwin":
         return False
@@ -590,11 +892,23 @@ def read_provider_cookie(win, provider: str, timeout: float = COOKIE_READ_TIMEOU
     调用方在打开登录窗口的确定时刻(加载登录页之前)调用, 拿到的值即"残留
     会话"基线.
 
-    必须带超时: pywebview 的 get_cookies 用**无超时**信号量等待主线程回调,
-    窗口刚创建 (BrowserView 还没实例化) 时会一直挂住 —— 直接同步调用会把
-    open_login 卡死在"启动监听"之前, 登录窗口再也等不到 watcher. 读不到
-    (超时/异常)返回 None, 由调用方的旧凭证指纹继续兜底.
+    - Windows: 走 WebView2 CookieManager 按域读取 (GetCookiesAsync 需要有效
+      URL, 而 pywebview 的实现传的 self.url 在窗口刚渲染过引导页时为 None,
+      会抛异常并让无超时信号量永久挂起);
+    - macOS: pywebview 的 get_cookies, 必须带超时 —— 它用**无超时**信号量等待
+      主线程回调, 窗口刚创建 (BrowserView 还没实例化) 时会一直挂住, 直接把
+      open_login 卡死在"启动监听"之前.
+
+    读不到 (超时/异常)返回 None, 由调用方的旧凭证指纹继续兜底.
     """
+    if sys.platform == "win32":
+        host = provider_host(provider)
+        target = CC_AUTH_COOKIE_NAME if provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
+        values = _win_read_provider_cookies(win, host, target, timeout)
+        if values:
+            return values[0]
+        _log("[login] cookie snapshot on win: no stale credential -> no baseline")
+        return None
     target = CC_AUTH_COOKIE_NAME if provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
     box: dict[str, Optional[str]] = {}
 
@@ -674,6 +988,22 @@ class LoginWatcher:
     def _target_cookie_name(self) -> str:
         return CC_AUTH_COOKIE_NAME if self.provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
 
+    def _read_cookies(self) -> list:
+        """读取窗口 cookie, 供命中目标 cookie 用.
+
+        Windows 不走 pywebview 的 get_cookies: 它内部用无超时信号量等 UI 线程
+        回调, 且以 EdgeChrome 自己跟踪的 URL 作 GetCookiesAsync 入参 —— 轮询
+        恰好撞上导航时该值可能为 None, .NET 抛异常后信号量不再释放, 监听线程
+        会永久挂死 (单飞守卫再也不释放, 用户再点登录被静默拦截). 这里改走
+        带超时的按域读取, 语义等价 (目标 cookie 就在该 provider 域下).
+        """
+        if sys.platform == "win32":
+            values = _win_read_provider_cookies(
+                self.win, self._target_host(), self._target_cookie_name(), COOKIE_READ_TIMEOUT
+            )
+            return [{"name": self._target_cookie_name(), "value": value} for value in values]
+        return self.win.get_cookies() or []
+
     def _is_stale(self, value: str) -> bool:
         """该凭证是否为登录开始前就已存在的残留会话 (指纹按库内形态计算)."""
         if self.baseline_value and value == self.baseline_value:
@@ -704,7 +1034,7 @@ class LoginWatcher:
 
             if url.startswith("https://" + target_host):
                 try:
-                    cookies = self.win.get_cookies() or []
+                    cookies = self._read_cookies()
                     # 只记录 cookie 名, 不落值: 日志在公共临时目录, 防会话凭证泄漏
                     raw_desc = [
                         ",".join(c.keys())
@@ -714,7 +1044,7 @@ class LoginWatcher:
                     ]
                 except Exception as exc:  # noqa: BLE001
                     cookies = []
-                    raw_desc = [f"<get_cookies ERROR {type(exc).__name__}: {exc}>"]
+                    raw_desc = [f"<read_cookies ERROR {type(exc).__name__}: {exc}>"]
                 _log(f"[login] on {target_host}, url={url[:120]}, cookie_names={raw_desc}")
 
                 for name, value in _cookie_entries(cookies):

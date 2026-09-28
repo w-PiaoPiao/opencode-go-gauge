@@ -788,6 +788,26 @@ class WindowApi:
         return True
 
 
+def _main_window_close_verdict(hide_window, *, quitting: bool, tray_ready: bool) -> bool:
+    """主窗口原生关闭 (macOS 红点 / Windows Alt+F4) 的裁决.
+
+    返回 pywebview ``closing`` handler 的返回值: True = 允许真正关闭,
+    False = 取消关闭并把窗口隐藏到托盘/菜单栏驻留.
+
+    仅在托盘/菜单栏可用且非退出中时驻留; 否则放行 —— 托盘没起来时若还拒绝
+    关闭, 窗口将彻底无法关闭 (只能强杀进程). Windows 上这条路径尤其重要:
+    主窗口若被真正关闭并成为最后一个 pywebview 窗口, winforms 后端会
+    Application.Exit() 结束整个进程 (登录窗口开着也会被一起带走).
+    """
+    if quitting or not tray_ready:
+        return True
+    try:
+        hide_window()
+    except Exception:  # noqa: BLE001 隐藏失败时放行关闭, 保证窗口关得掉
+        return True
+    return False
+
+
 def _destroy_all_windows() -> None:
     """销毁所有窗口 (含隐藏登录窗), 让 pywebview 事件循环退出, 进程真正结束."""
     for w in list(webview.windows):
@@ -1039,16 +1059,19 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             return False
 
-    def _prepare_login_session(provider: str) -> None:
+    def _prepare_login_session(provider: str, win=None) -> None:
         """加载登录页之前清掉该 provider 域的残留会话.
 
         pywebview 只在 create_window 时清理网站数据 (private_mode), 而登录窗口
         是复用的 (hide/show): 上一轮的会话 cookie 仍在 store 里, 登录页会据旧
         凭证直接跳转后台 (无法重新选择账号), LoginWatcher 也会把这份残留凭证
         误判为本次登录成功 (窗口秒关 + 凭证未刷新).
+
+        win: 目标登录窗口的引用, 供 Windows 用 WebView2 CookieManager 按域清理
+        (传 None 或窗口已销毁时, 内部借任一存活窗口 —— cookie store 进程内共享).
         """
         try:
-            purged = clear_provider_cookies(provider)
+            purged = clear_provider_cookies(provider, win)
             _mlog(f"[main] login session prepared (purged {purged} stale cookie(s))")
         except Exception as exc:  # noqa: BLE001 清理失败不阻断登录
             _mlog(f"[main] cookie purge ERROR: {exc}")
@@ -1085,7 +1108,7 @@ def main() -> None:
         lw = login_win()
         # 清残留会话必须在加载登录页之前完成: 否则登录页带着旧凭证请求, 会被
         # 直接带到套餐后台, 用户根本没有重新选择账号的机会
-        _prepare_login_session(provider)
+        _prepare_login_session(provider, lw)
         try:
             lw.show()
         except Exception as exc:  # noqa: BLE001 窗口可能被用户手动关闭, 重建
@@ -1151,8 +1174,9 @@ def main() -> None:
             except Exception:  # noqa: BLE001
                 pass
         # 新窗口由 pywebview 的 private_mode 清理网站数据, 但那是异步的: 先显式
-        # 清一遍目标域会话, 保证登录页拿到的是未登录态
-        _prepare_login_session(provider)
+        # 清一遍目标域会话, 保证登录页拿到的是未登录态 (old 已销毁, Windows 侧
+        # 会借任一存活窗口的 cookie store —— 进程内共享, 效果相同)
+        _prepare_login_session(provider, old)
         new_win = webview.create_window(
             "GoGauge - Login",
             "about:blank",
@@ -1191,22 +1215,23 @@ def main() -> None:
     main_win.events.shown += on_shown
     main_win.events.restored += on_restored
 
-    if _IS_MAC:
-        def on_closing() -> bool:
-            # macOS 原生红点关闭按钮: 托盘/菜单栏可用时 -> 只隐藏窗口(驻留菜单栏);
-            # 真正退出(托盘退出或欢迎页"退出应用")时 -> 返回 True 允许关闭.
-            global _quitting, _tray_ready
-            if _quitting or not _tray_ready:
-                return True  # 允许真正关闭
-            try:
-                _save_window_frame(main_win)
-                main_win.hide()  # 驻留菜单栏
-            except Exception:  # noqa: BLE001
-                return True
-            return False  # 取消本次关闭
+    # 主窗口原生关闭按钮 (macOS 红点 / Windows Alt+F4、任务栏关闭) 的双平台一致
+    # 行为: 托盘/菜单栏可用且非退出中 -> 取消关闭并隐藏窗口驻留; 真正退出(托盘
+    # 退出/欢迎页"退出应用")时放行.
+    #
+    # Windows 必须也绑定: 此前只有 macOS 绑, Windows 上 Alt+F4 (或任务栏"关闭
+    # 窗口") 会真正关掉主窗口 —— 一旦它成为最后一个 pywebview 窗口, winforms
+    # 后端的 on_close 就 Application.Exit() 结束整个进程, 登录窗口开着也被一起
+    # 带走 (表现为"重新登录途中整个项目闪退"), 且与标题栏 X 按钮的最小化到托盘
+    # 行为不一致.
+    def on_closing() -> bool:
+        _save_window_frame(main_win)  # 仅 macOS 生效: 位置记忆
+        return _main_window_close_verdict(
+            main_win.hide, quitting=_quitting, tray_ready=_tray_ready
+        )
 
-        # 返回 False 即取消原生关闭 (pywebview closing 事件语义)
-        main_win.events.closing += on_closing
+    # pywebview closing 事件语义 (两平台一致): handler 返回 False 即取消关闭
+    main_win.events.closing += on_closing
 
     # 系统托盘 (Windows) / 菜单栏图标 (macOS)
     tray = TrayIcon(_app_icon_path())
