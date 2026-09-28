@@ -191,9 +191,15 @@ def test_clear_provider_cookies_safe_on_main_thread(monkeypatch):
     assert time.time() - started < 1.0
 
 
-def test_clear_provider_cookies_skips_non_macos(monkeypatch):
+def test_clear_provider_cookies_safe_without_window_on_windows(monkeypatch):
+    """Windows 无窗口/WebView2 不可用时安全返回 0 (由指纹比对兜底, 不抛异常).
+
+    Windows 的按域删除实现见 tests/test_windows_login.py.
+    """
     monkeypatch.setattr(auth.sys, "platform", "win32")
+    monkeypatch.setattr(auth.webview, "windows", [])
     assert auth.clear_provider_cookies("opencode") == 0
+    assert auth.clear_provider_cookies("opencode", object()) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +282,10 @@ def test_render_boot_page_survives_closed_window():
     assert auth.render_login_boot_page(_FakeWindow(explode=True)) is False
 
 
-def test_load_state_helpers_safe_off_darwin(monkeypatch):
+def test_load_state_helpers_safe_without_webview2(monkeypatch):
+    """无底层 WebView 时读取加载状态/reload 只降级, 不抛异常也不挂起."""
     monkeypatch.setattr(auth.sys, "platform", "win32")
+    monkeypatch.setattr(auth.webview, "windows", [])
     assert auth.page_load_state(object()) is None
     assert auth.reload_window(object()) is False
 

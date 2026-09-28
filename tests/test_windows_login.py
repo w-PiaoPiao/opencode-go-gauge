@@ -1,0 +1,371 @@
+"""Windows 平台 (WebView2) 登录流程的回归测试.
+
+背景: macOS 已修掉"重新登录跳转后台 + 窗口秒关"的一整套缺陷, 但那些实现
+最初全部限定在 darwin —— ``clear_provider_cookies`` 在其它平台直接 return 0,
+于是 Windows 上残留会话照旧: 复用的登录窗口里还留着上一轮的 commandcode
+会话 cookie, 登录页带着它请求、被服务端直接 302 到 commandcode.ai 主页
+(无法重新选择账号), LoginWatcher 的残留会话基线也采集不到 (pywebview 的
+get_cookies 在 WebView2 上用 self.url 作 GetCookiesAsync 的入参, 窗口刚渲染
+过引导页时该值为 None, .NET 抛异常后无超时信号量不再释放, 调用线程永久挂起).
+
+这里锁定 Windows 侧的等价实现:
+- 按 provider 域读写 WebView2 cookie (CookieManager, 不碰其它域);
+- 登录页加载状态用 document.readyState + Source 判定 (WebView2 没有
+  estimatedProgress/IsLoading);
+- 所有 native 调用都必须带超时/可降级, 且不在 UI 线程上等 .NET Task
+  (会与 UI 线程互锁).
+"""
+from __future__ import annotations
+
+import json
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from app import auth
+
+
+# ---------------------------------------------------------------------------
+# WebView2 替身 (非 Windows 环境没有 pythonnet/WebView2, 按鸭子类型模拟)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCookie:
+    def __init__(self, name: str, value: str, domain: str) -> None:
+        self.Name = name
+        self.Value = value
+        self.Domain = domain
+
+
+class _FakeTask:
+    """模拟 .NET Task[String]/Task[List[Cookie]] (本进程内立即可用)."""
+
+    def __init__(self, result) -> None:
+        self._result = result
+
+    def Wait(self, timeout_ms: int) -> bool:
+        return True
+
+    @property
+    def Result(self):
+        return self._result
+
+
+class _FakeCookieManager:
+    def __init__(self, cookies: list) -> None:
+        self.cookies = list(cookies)
+        self.deleted: list = []
+        self.uris: list[str] = []
+
+    def GetCookiesAsync(self, uri: str) -> _FakeTask:
+        self.uris.append(uri)
+        return _FakeTask(list(self.cookies))
+
+    def DeleteCookie(self, cookie) -> None:
+        self.deleted.append(cookie)
+
+
+class _FakeCore:
+    def __init__(self, cm: _FakeCookieManager, source: str = "https://commandcode.ai/signin") -> None:
+        self.CookieManager = cm
+        self.Source = source
+        self.ready = "complete"
+        self.scripts: list[str] = []
+        self.reloads = 0
+
+    def ExecuteScriptAsync(self, script: str) -> _FakeTask:
+        self.scripts.append(script)
+        return _FakeTask(json.dumps(self.ready))
+
+    def Reload(self) -> None:
+        self.reloads += 1
+
+
+class _FakeForm:
+    """模拟 pywebview 的 BrowserForm: 既是 WinForms 控件 (Invoke/InvokeRequired),
+    又挂着 browser (EdgeChrome) -> webview (WebView2 控件) -> CoreWebView2."""
+
+    def __init__(self, core: _FakeCore | None, invoke_required: bool = True) -> None:
+        self.InvokeRequired = invoke_required
+        self.invocations = 0
+        self.browser = SimpleNamespace(webview=SimpleNamespace(CoreWebView2=core))
+
+    def Invoke(self, delegate) -> None:
+        self.invocations += 1
+        delegate()
+
+
+class _FakeWin:
+    """最小 pywebview 窗口替身: native 即 BrowserForm (与真实结构一致)."""
+
+    def __init__(
+        self,
+        core: _FakeCore | None = None,
+        invoke_required: bool = True,
+        url: str = "https://commandcode.ai/signin",
+    ) -> None:
+        self.native = _FakeForm(core, invoke_required=invoke_required)
+        self.url = url
+
+    @property
+    def control(self) -> _FakeForm:
+        return self.native
+
+    def get_current_url(self):
+        return self.url
+
+    def get_cookies(self):
+        raise AssertionError("Windows 分支不得回落到 pywebview 的 get_cookies (会挂死)")
+
+
+def _wait_until(pred, timeout: float = 3.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return bool(pred())
+
+
+@pytest.fixture()
+def win_platform(monkeypatch):
+    """切到 win32, 并把 Control.Invoke 的 .NET delegate 包装降级为直调.
+
+    其余逻辑 (域过滤 / 超时预算 / UI 线程规避 / 降级路径) 全部走真实实现.
+    """
+    monkeypatch.setattr(auth.sys, "platform", "win32")
+    monkeypatch.setattr(auth, "_win_ui_delegate", lambda fn: fn)
+    monkeypatch.setattr(auth.webview, "windows", [])
+    return monkeypatch
+
+
+# ---------------------------------------------------------------------------
+# 按域清残留会话 (跳转主页的直接原因)
+# ---------------------------------------------------------------------------
+
+
+def test_win_purge_only_touches_provider_domain(win_platform):
+    cm = _FakeCookieManager([
+        _FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", ".commandcode.ai"),
+        _FakeCookie("other", "KEEP", "commandcode.ai"),
+        _FakeCookie("auth", "KEEP", "opencode.ai"),
+    ])
+    win = _FakeWin(_FakeCore(cm))
+
+    removed = auth.clear_provider_cookies("commandcode", win)
+
+    # 两条 commandcode 域的 cookie 都被删 (含无前缀域), opencode 域不受影响
+    assert removed == 2
+    assert {c.Name for c in cm.deleted} == {auth.CC_AUTH_COOKIE_NAME, "other"}
+    # 查询必须带有效 URL: GetCookiesAsync(null) 是 pywebview 旧实现挂死的根因
+    assert cm.uris == ["https://commandcode.ai/"]
+
+
+def test_win_purge_skips_when_no_window_and_none_alive(win_platform):
+    """窗口已销毁且无其它存活窗口时安全返回 0 (由指纹比对兜底)."""
+    assert auth.clear_provider_cookies("opencode", None) == 0
+
+
+def test_win_purge_never_runs_on_ui_thread(win_platform):
+    """已在 UI 线程时必须放弃: 上层要在调用线程等 .NET Task, 会互锁."""
+    cm = _FakeCookieManager([_FakeCookie("auth", "STALE", "opencode.ai")])
+    win = _FakeWin(_FakeCore(cm), invoke_required=False)
+
+    assert auth.clear_provider_cookies("opencode", win) == 0
+    assert cm.deleted == []
+    assert win.control.invocations == 0
+
+
+def test_win_purge_falls_back_to_any_alive_window(win_platform):
+    """登录窗口刚重建 (WebView2 未就绪) 时借其它窗口的 store —— 进程内共享."""
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    dead = _FakeWin(None)  # 新窗口: CoreWebView2 还是 None
+    alive = _FakeWin(_FakeCore(cm))
+    win_platform.setattr(auth.webview, "windows", [alive])
+
+    assert auth.clear_provider_cookies("commandcode", dead) == 1
+    assert len(cm.deleted) == 1
+
+
+# ---------------------------------------------------------------------------
+# 残留会话基线读取 (LoginWatcher 的 stale 比对输入)
+# ---------------------------------------------------------------------------
+
+
+def test_win_read_baseline_returns_first_matching_value(win_platform):
+    cm = _FakeCookieManager([
+        _FakeCookie("unrelated", "x", "commandcode.ai"),
+        _FakeCookie(auth.CC_AUTH_COOKIE_NAME, "OLDSESSION", "commandcode.ai"),
+        _FakeCookie(auth.CC_AUTH_COOKIE_NAME, "ANOTHER", "commandcode.ai"),
+    ])
+    win = _FakeWin(_FakeCore(cm))
+
+    assert auth.read_provider_cookie(win, "commandcode") == "OLDSESSION"
+
+
+def test_win_read_baseline_none_when_store_empty(win_platform):
+    win = _FakeWin(_FakeCore(_FakeCookieManager([])))
+    assert auth.read_provider_cookie(win, "commandcode") is None
+
+
+def test_win_read_baseline_none_without_webview2(win_platform):
+    """窗口/WebView2 未就绪时返回 None, 让库内旧凭证指纹继续兜底."""
+    assert auth.read_provider_cookie(_FakeWin(None), "opencode") is None
+
+
+def test_win_baseline_feeds_stale_detection(win_platform, monkeypatch):
+    """基线采到的残留凭证必须能让 LoginWatcher 判为 stale (闭环)."""
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "OLDSESSION", "commandcode.ai")])
+    win = _FakeWin(_FakeCore(cm))
+    baseline = auth.read_provider_cookie(win, "commandcode")
+    watcher = auth.LoginWatcher(win, "commandcode", lambda *a: None, baseline_value=baseline)
+    assert watcher._is_stale("OLDSESSION") is True
+    assert watcher._is_stale("FRESHSESSION") is False
+
+
+def test_win_watcher_reads_cookies_without_pywebview(win_platform, monkeypatch):
+    """Windows 上监听线程必须走带超时的 WebView2 读取, 且保留残留会话判定.
+
+    pywebview 的 get_cookies 在 WebView2 上可能永久挂起 (无超时信号量 + 导航
+    竞态下 GetCookiesAsync 收到 null URL), 监听线程一挂, 单飞守卫就再也不释放.
+    """
+    monkeypatch.setattr(auth, "COOKIE_POLL_SEC", 0.02)
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "OLDSESSION", "commandcode.ai")])
+    win = _FakeWin(_FakeCore(cm))
+    win_platform.setattr(auth.webview, "windows", [win])
+
+    seen: list[tuple] = []
+    watcher = auth.LoginWatcher(
+        win, "commandcode", lambda *a: seen.append(a),
+        stale_fps=[auth.token_fingerprint(auth.build_token("commandcode", "OLDSESSION"))],
+    )
+    watcher.start()
+    try:
+        time.sleep(0.2)
+        assert seen == [], "残留会话被误判为登录成功"
+
+        cm.cookies = [_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "FRESHSESSION", "commandcode.ai")]
+        assert _wait_until(lambda: bool(seen)), "新凭证未被捕获"
+        assert seen[0][0] == f"{auth.CC_AUTH_COOKIE_NAME}=FRESHSESSION"
+        assert seen[0][2] == "commandcode"
+        assert watcher.done is True
+    finally:
+        watcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# 登录页加载看门狗 (WebView2: readyState + Source)
+# ---------------------------------------------------------------------------
+
+
+def test_win_load_state_complete_on_provider_page(win_platform):
+    core = _FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/signin")
+    core.ready = "complete"
+    assert auth.page_load_state(_FakeWin(core)) == {"progress": 1.0, "loading": False}
+
+
+def test_win_load_state_loading_while_interactive(win_platform):
+    core = _FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/signin")
+    core.ready = "interactive"
+    assert auth.page_load_state(_FakeWin(core)) == {"progress": 0.0, "loading": True}
+
+
+def test_win_load_state_treats_boot_page_as_loading(win_platform):
+    """引导页 (about:blank) 即使 readyState=complete 也不能算登录页加载完成."""
+    core = _FakeCore(_FakeCookieManager([]), source="about:blank")
+    core.ready = "complete"
+    assert auth.page_load_state(_FakeWin(core))["loading"] is True
+
+
+def test_win_load_state_none_without_webview2(win_platform):
+    assert auth.page_load_state(_FakeWin(None)) is None
+
+
+def test_win_reload_calls_webview2_reload(win_platform):
+    core = _FakeCore(_FakeCookieManager([]))
+    assert auth.reload_window(_FakeWin(core)) is True
+    assert core.reloads == 1
+
+
+def test_win_reload_safe_without_webview2(win_platform):
+    assert auth.reload_window(_FakeWin(None)) is False
+
+
+def test_win_page_ops_never_borrow_another_window(win_platform):
+    """页面状态类操作必须用窗口自己的实例.
+
+    cookie 可以借 (store 进程内共享), 但 readyState/reload 借来的实例读到的是
+    另一个窗口的页面 —— 必须退化为"读不到"而不是拿错数据.
+    """
+    other = _FakeWin(_FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/"))
+    win_platform.setattr(auth.webview, "windows", [other])
+    fresh = _FakeWin(None)  # 登录窗口的 WebView2 还在异步初始化
+
+    assert auth.page_load_state(fresh) is None
+    assert auth.reload_window(fresh) is False
+    assert auth.page_snapshot(fresh) is None
+    assert other.native.invocations == 0, "不得把主窗口面板的状态当成登录页的"
+
+
+def test_win_watchdog_gives_up_when_state_unavailable(win_platform, monkeypatch):
+    """连续读不到加载状态时必须提前放弃, 不再空转到总超时 (45s)."""
+    monkeypatch.setattr(auth, "page_load_state", lambda win: None)
+    started = time.time()
+    loaded = auth.ensure_login_page_loaded(_FakeWin(None), stall_sec=0.1, total_sec=45.0)
+    assert loaded is False
+    assert time.time() - started < 10.0
+
+
+def test_win_snapshot_reads_page_state(win_platform):
+    core = _FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/signin")
+    core.ready = "complete"
+    snapshot = auth.page_snapshot(_FakeWin(core))
+    assert snapshot == "complete"  # ExecuteScriptAsync 的 JSON 字符串被解码
+    assert core.scripts, "快照脚本必须真的下发到页面"
+
+
+# ---------------------------------------------------------------------------
+# 主窗口关闭裁决 (Windows 上原生关闭会带走整个进程)
+# ---------------------------------------------------------------------------
+
+
+def test_main_window_close_hides_when_tray_available():
+    from app.main import _main_window_close_verdict
+
+    hidden: list[int] = []
+    # 返回 False = 取消关闭 (pywebview closing 语义), 窗口隐藏驻留托盘
+    assert _main_window_close_verdict(
+        lambda: hidden.append(1), quitting=False, tray_ready=True
+    ) is False
+    assert hidden == [1]
+
+
+def test_main_window_close_allowed_while_quitting():
+    from app.main import _main_window_close_verdict
+
+    hidden: list[int] = []
+    assert _main_window_close_verdict(
+        lambda: hidden.append(1), quitting=True, tray_ready=True
+    ) is True
+    assert hidden == [], "退出流程里不允许再隐藏窗口"
+
+
+def test_main_window_close_allowed_without_tray():
+    from app.main import _main_window_close_verdict
+
+    hidden: list[int] = []
+    # 托盘没起来时若还拒绝关闭, 窗口将彻底关不掉 (只能强杀进程)
+    assert _main_window_close_verdict(
+        lambda: hidden.append(1), quitting=False, tray_ready=False
+    ) is True
+    assert hidden == []
+
+
+def test_main_window_close_allowed_when_hide_fails():
+    from app.main import _main_window_close_verdict
+
+    def boom():
+        raise RuntimeError("window gone")
+
+    assert _main_window_close_verdict(boom, quitting=False, tray_ready=True) is True
