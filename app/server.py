@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -20,14 +20,16 @@ from .opencode_api import (
     fetch_key_names,
     fetch_quota,
     fetch_usage_page,
+    iso_to_ms,
     resolve_workspace_id,
 )
 
-PAGE_SIZE = 50
+PAGE_LIMIT = 100  # /request-logs 单页条数上限
 QUOTA_CACHE_TTL = 30.0
-INCREMENTAL_PAGES = 5  # 增量同步最多拉取的页数 (5*50=250 条)
-MAX_FULL_PAGES = 2000  # 全量同步上限, 防失控
-FETCH_BATCH = 5  # 并发拉取页数 (服务端响应慢, 并发提速)
+INCREMENTAL_PAGES = 10  # 增量同步最多翻页数 (10*100=1000 条)
+MAX_FULL_PAGES = 1000  # 全量同步翻页上限, 防失控 (服务端仅保留 30 天明细)
+PAGE_RETRIES = 2  # 单页失败重试次数 (深页偶尔慢/连接被重置)
+INCREMENTAL_OVERLAP_MS = 3600_000  # 增量同步回溯 1 小时, 防边界漏记
 
 
 def _resource_path(rel: str) -> str:
@@ -141,29 +143,14 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
     threading.Thread(target=worker, daemon=True, name="gousage-quota").start()
 
 
-def _fetch_usage_batch(
-    token: str, workspace_id: str, pages: list[int]
-) -> dict[int, Any]:
-    """并发拉取多页, 返回 {page: records | Exception}."""
-    results: dict[int, Any] = {}
-    with ThreadPoolExecutor(max_workers=FETCH_BATCH) as executor:
-        futures = {
-            executor.submit(fetch_usage_page, token, workspace_id, p): p
-            for p in pages
-        }
-        for future in as_completed(futures):
-            page = futures[future]
-            try:
-                results[page] = future.result()
-            except Exception as exc:  # noqa: BLE001
-                results[page] = exc
-    return results
-
-
 def _sync_one_account(
     account_id: int, name: str, mode: str, window_days: Optional[int]
 ) -> dict[str, Any]:
-    """同步单个账号的用量记录 (原单账号逻辑, 显式传入账号上下文)."""
+    """同步单个账号的用量记录 (原单账号逻辑, 显式传入账号上下文).
+
+    新接口 /console/api/request-logs 为游标分页 (按时间倒序), 无法并发跳页,
+    改为顺序翻页: 每页 100 条, 直到游标耗尽 / 触达同步范围边界 / 连续空页.
+    """
     token = db.get_db().execute(
         "SELECT token, workspace_id, resolved_workspace_id FROM accounts WHERE id = ?",
         (account_id,),
@@ -191,32 +178,59 @@ def _sync_one_account(
         total_inserted = 0
         max_pages = MAX_FULL_PAGES if mode == "full" else INCREMENTAL_PAGES
         page = 0
-        empty_batches = 0
+        cursor: Optional[str] = None
+        empty_pages = 0
         failed_pages = 0
+        page_retries = 0
         window_boundary_reached = False
+        retention_days: Optional[int] = None
+
+        # 增量同步: 只取最新记录之后的一段时间 (重叠 1 小时防边界漏记),
+        # 命中不到旧数据就不会去翻历史页, 既快又少请求
+        since_ms: Optional[int] = None
+        if mode != "full":
+            newest_local = (db.get_sync_state(account_id) or {}).get("newest_record_at")
+            if newest_local:
+                stamp = iso_to_ms(newest_local) - INCREMENTAL_OVERLAP_MS
+                since_ms = stamp if stamp > 0 else None
 
         while page < max_pages:
-            batch_pages = list(range(page, min(page + FETCH_BATCH, max_pages)))
             with _sync_lock:
                 _sync_state["page"] = page
-            results = _fetch_usage_batch(token_str, workspace_id, batch_pages)
-
-            batch_inserted = 0
-            batch_full_pages = 0
-            batch_failed = 0
-            for p in sorted(results):
-                result = results[p]
-                if isinstance(result, Exception):
-                    batch_failed += 1
+            try:
+                usage_page = fetch_usage_page(
+                    token_str, workspace_id, cursor=cursor, limit=PAGE_LIMIT,
+                    since_ms=since_ms,
+                )
+            except AuthError as exc:
+                _set_phase("error", f"[{name}] {exc}")
+                db.update_sync_state("error", str(exc), total_inserted, account_id)
+                return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
+            except OpenCodeAPIError as exc:
+                # 首页即失败 -> 整体报错; 翻页中途失败 -> 同一游标重试, 仍失败则保留已入库数据
+                if page == 0:
+                    _set_phase("error", f"[{name}] {exc}")
+                    db.update_sync_state("error", str(exc), 0, account_id)
+                    return {"ok": False, "error": str(exc)}
+                if page_retries < PAGE_RETRIES:
+                    page_retries += 1
+                    time.sleep(1.5 * page_retries)
                     continue
-                if not result:
-                    continue  # 空页: 数据到底
-                # 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 → 该页整页保留后停止
+                failed_pages += 1
+                break
+
+            page += 1
+            page_retries = 0
+            if usage_page.retention_days:
+                retention_days = usage_page.retention_days
+            records = usage_page.records
+
+            if records:
+                # 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 -> 该页保留后停止
                 if mode == "full" and window_days is not None:
-                    earliest = min((r.created_at for r in result), default="")
+                    earliest = min(r.created_at for r in records if r.created_at)
                     if earliest:
                         try:
-                            from datetime import datetime, timedelta, timezone
                             et = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
                             boundary = datetime.now(timezone.utc) - timedelta(days=window_days)
                             if et < boundary:
@@ -224,37 +238,23 @@ def _sync_one_account(
                         except (ValueError, TypeError):
                             pass
                 inserted = db.insert_usage_records(
-                    [r.to_db_dict() for r in result], account_id
+                    [r.to_db_dict() for r in records], account_id
                 )
                 total_inserted += inserted
-                batch_inserted += inserted
-                if len(result) >= PAGE_SIZE:
-                    batch_full_pages += 1
                 with _sync_lock:
                     _sync_state["inserted"] = total_inserted
+                empty_pages = empty_pages + 1 if inserted == 0 else 0
+            else:
+                empty_pages += 1
 
-            page += FETCH_BATCH
-
+            cursor = usage_page.next_cursor
+            if not cursor:
+                break  # 已到最早一条
             if window_boundary_reached:
                 break
-            if batch_failed:
-                failed_pages += batch_failed
-                if mode == "incremental":
-                    msg = "网络请求失败 (IncompleteRead/超时)"
-                    _set_phase("error", f"[{name}] 第 {page - FETCH_BATCH + 1} 页拉取失败: {msg}")
-                    db.update_sync_state("error", msg, total_inserted, account_id)
-                    return {"ok": False, "error": msg, "partial_inserted": total_inserted}
-
-            # 本批没有任何满页 → 到底了
-            if batch_full_pages == 0:
+            # 增量模式: 连续两页没有新数据 -> 停止
+            if mode == "incremental" and empty_pages >= 2:
                 break
-            # 增量模式: 连续两批全部是旧数据 (插入 0 条) → 停止
-            if mode == "incremental" and batch_inserted == 0:
-                empty_batches += 1
-                if empty_batches >= 2:
-                    break
-            else:
-                empty_batches = 0
 
         # 按同步范围裁剪窗口外记录 (与本次新增数独立)
         if window_days is not None:
@@ -271,12 +271,13 @@ def _sync_one_account(
             pass
 
         if failed_pages:
-            msg = f"完成, 但 {failed_pages} 页拉取失败 (数据不完整, 可再次全量同步补全)"
+            msg = "完成, 但翻页中断 (数据不完整, 可再次全量同步补全)"
             db.update_sync_state("partial", msg, total_inserted, account_id)
             return {"ok": True, "partial": True, "failed_pages": failed_pages,
                     "inserted": total_inserted, "pages": page}
         db.update_sync_state("ok", None, total_inserted, account_id)
-        return {"ok": True, "inserted": total_inserted, "pages": page}
+        return {"ok": True, "inserted": total_inserted, "pages": page,
+                "retention_days": retention_days}
     except Exception as exc:  # noqa: BLE001
         db.update_sync_state("error", str(exc), 0, account_id)
         return {"ok": False, "error": str(exc)}
@@ -685,8 +686,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         key_names = db.get_key_names()
         for rec in records:
             rec["key_name"] = key_names.get(rec.get("key_id") or "", "")
-            # 无 session 的行分组键为 key_id, 前端据此显示"未归属"
-            if rec["session_id"] and rec["session_id"].startswith("key_"):
+            # 无 session 的行分组键为 key_id (key_/sk_ 前缀), 前端据此显示"未归属"
+            if rec["session_id"] and rec["session_id"].startswith(("key_", "sk_")):
                 rec["session_id"] = ""
         _json_response(
             handler,
