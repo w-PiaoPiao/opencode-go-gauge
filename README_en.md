@@ -57,6 +57,8 @@ Download `GoGauge.exe` from [Releases](../../releases) (single file, no install)
 
 > ⚠️ **Upgrading from v2.1.0 or earlier**: opencode.ai switched to its new console API, so the stored session is void. The stale credential is cleared automatically, the app returns to the welcome page — just log in once (local history is kept).
 
+> ⚠️ **Upgrading from v2.1.0 or earlier**: opencode.ai switched to its new console API, so the stored session is void. The stale credential is cleared automatically, the app returns to the welcome page — just log in once (local history is kept).
+
 ### From Source
 
 ```bash
