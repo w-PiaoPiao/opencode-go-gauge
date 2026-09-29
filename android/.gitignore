@@ -14,9 +14,13 @@ captures/
 *.iml
 .vscode/
 
-# Keystore (debug keystore committed for convenience is excluded from version control)
+# Keystore: 正式发布密钥不入库 (通过 keystore.properties 指向仓库外路径);
+# 仓库内的 debug.keystore 是**刻意提交**的 —— 仅供个人侧载签名, 密钥公开,
+# 任何人都能伪造同签名包, 不可用于正式分发 (见 app/build.gradle.kts 的
+# gogauge.strictSigning 与 .github/workflows/release-android.yml 的说明).
 *.keystore
 *.jks
+!debug.keystore
 
 # OS
 .DS_Store

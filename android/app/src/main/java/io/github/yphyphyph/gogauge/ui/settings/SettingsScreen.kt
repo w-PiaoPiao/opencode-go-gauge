@@ -170,10 +170,12 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
             )
             SetRow(
                 s.fullSync,
-                if (vm.progress.running) "${s.syncing} · ${s.pageOf} ${vm.progress.page + 1} · ${s.totalN} ${Fmt.int(vm.progress.inserted)}"
+                // 只读细粒度状态 (syncing/syncPage/syncInserted): 直接读整个 vm.progress
+                // 会让全量同步期间每次 page/inserted 更新都整屏重组, 正是 VM 拆分状态要避免的代价
+                if (vm.syncing) "${s.syncing} · ${s.pageOf} ${vm.syncPage + 1} · ${s.totalN} ${Fmt.int(vm.syncInserted)}"
                 else s.fullSyncDesc,
                 trailing = {
-                    TextButton(onClick = { confirmDialog = ConfirmAction.FullSync }, enabled = !vm.progress.running) {
+                    TextButton(onClick = { confirmDialog = ConfirmAction.FullSync }, enabled = !vm.syncing) {
                         Text(s.startFullSync, fontSize = 13.sp)
                     }
                 },

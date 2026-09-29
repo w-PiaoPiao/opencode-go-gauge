@@ -36,10 +36,11 @@ abstract class ChartDao {
     abstract suspend fun deleteForAccount(accountId: Int)
 
     /**
-     * 裁剪窗口外的聚合桶 (与 usage_records.pruneOldRecords 同口径).
-     * charts 是计费周期快照, 保留窗口由调用方按同步范围传入.
+     * 裁剪窗口外的聚合桶 (与 usage_records.pruneOldRecords 同口径, 走
+     * idx_charts_account_localdate 的日历日边界).
+     * charts 是计费周期快照, 保留窗口由调用方按同步范围传入 ([intervalArg] 形如 "-30 days").
      */
-    @Query("DELETE FROM usage_charts WHERE account_id = :accountId AND datetime(time_bucket) < datetime('now', :intervalArg)")
+    @Query("DELETE FROM usage_charts WHERE account_id = :accountId AND local_date < date('now', 'localtime', :intervalArg)")
     abstract suspend fun pruneOldCharts(accountId: Int, intervalArg: String): Int
 
     @Query("SELECT 1 FROM usage_charts WHERE account_id = :accountId LIMIT 1")
@@ -60,25 +61,31 @@ abstract class ChartDao {
         val args: Array<Any>
         when (period) {
             "5h" -> {
-                clause = "datetime(time_bucket) >= datetime('now', '-5 hours')"
+                // 滚动 5 小时语义: local_date 索引收敛 + datetime() 精确过滤
+                // (与 UsageDao.periodClause / desktop _charts_period_where parity)
+                clause = "(local_date >= date('now', 'localtime', '-1 day')" +
+                    " AND datetime(time_bucket) >= datetime('now', '-5 hours'))"
                 args = emptyArray()
             }
             "today" -> {
-                // local_date 为写入时物化的本地日 (见 MIGRATION_3_4)
+                // local_date 为写入时物化的本地日 (见 MIGRATION_3_4;
+                // date(time_bucket,'localtime') 的落库形态)
                 clause = "local_date = date('now', 'localtime')"
                 args = emptyArray()
             }
             "month" -> if (cycleStart != null) {
-                clause = "datetime(time_bucket) >= datetime(?)"
-                args = arrayOf(cycleStart)
+                // 起点本地日索引收敛 + datetime(time_bucket) 秒级精筛
+                clause = "(local_date >= date(?, 'localtime') AND datetime(time_bucket) >= datetime(?))"
+                args = arrayOf(cycleStart, cycleStart)
             } else {
-                clause = "datetime(time_bucket) >= datetime('now', ?)"
+                clause = "local_date >= date('now', 'localtime', ?)"
                 args = arrayOf("-${MonthlyCycle.PERIOD_DAYS} days")
             }
             "all" -> return null to emptyArray()
             else -> {
+                // "7d"/"30d": 日历日口径, 走 local_date 索引 (与明细表同口径)
                 val days = Regex("^(\\d+)d$").find(period)?.groupValues?.get(1)?.toIntOrNull()?.coerceIn(1, 365) ?: 30
-                clause = "datetime(time_bucket) >= datetime('now', ?)"
+                clause = "local_date >= date('now', 'localtime', ?)"
                 args = arrayOf("-${days} days")
             }
         }
@@ -205,7 +212,9 @@ abstract class ChartDao {
                 GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
-                arrayOf(accountId, "-${clamped} days"),
+                // 显式 Array<Any>: 让 Int 与 String 参数不推断成交集类型
+                // (KT-71420: reified 交集类型在未来版本会变成编译错误)
+                arrayOf<Any>(accountId, "-${clamped} days"),
             )
         )
         // 连续日期补 0 (与 UsageDao.dailyStats 同口径)

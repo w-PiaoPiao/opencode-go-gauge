@@ -87,7 +87,8 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
                     trailing = { Hint(sessions?.let { "${s.totalN} ${Fmt.int(it.total)} ${s.sessions}" } ?: "") },
                 )
                 if (sessions == null || sessions.records.isEmpty()) {
-                    NoDataLine(s.noData)
+                    // 查询失败与"真的没数据"必须区分: 前者此前被静默伪装成"暂无数据"
+                    NoDataLine(vm.sessionsError ?: s.noData, isError = vm.sessionsError != null)
                 }
             }
         }
@@ -119,7 +120,7 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
                     },
                 )
                 if (records == null || records.records.isEmpty()) {
-                    NoDataLine(s.noData)
+                    NoDataLine(vm.recordsError ?: s.noData, isError = vm.recordsError != null)
                 }
             }
         }
@@ -148,11 +149,11 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
 }
 
 @Composable
-private fun NoDataLine(text: String) {
+private fun NoDataLine(text: String, isError: Boolean = false) {
     Text(
         text,
         modifier = Modifier.padding(16.dp),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 @Composable

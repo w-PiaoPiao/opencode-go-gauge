@@ -74,6 +74,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 仅同步运行位 — 见 init 中说明; 供下拉刷新等高频读取点使用. */
     var syncing by mutableStateOf(false)
         private set
+    /** 同步进度文案的派生状态 (page/inserted 单独暴露, 避免设置页读整个 progress 破坏细粒度重组). */
+    var syncPage by mutableIntStateOf(0)
+        private set
+    var syncInserted by mutableIntStateOf(0)
+        private set
 
     // ---- 多账号状态 (desktop /api/accounts parity) ----
     var accounts by mutableStateOf<List<AccountInfo>>(emptyList())
@@ -130,6 +135,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var quotaRefreshJob: Job? = null
     private var runningAutoSyncKey: String? = null
 
+    // dashboard 加载序号守卫: 慢响应晚到时不覆盖新 range 的数据 (loadOverview 的 ovSeq 同范式)
+    private var dashSeq = 0
+
     // 账户总览: 序号守卫丢弃过期响应 + 5s 静默重拉 (desktop ovSeq/ovRetryTimer parity)
     private var ovSeq = 0
     private var ovRetryJob: Job? = null
@@ -137,7 +145,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         scope.launch {
-            repo.progress.collectLatest { progress = it }
+            repo.progress.collectLatest {
+                progress = it
+                // 派生状态单独写: 设置页只读 syncing/syncPage/syncInserted,
+                // 每个 Int 独立失效, 不会因 SyncProgress 对象整体更新而整屏重组
+                syncPage = it.page
+                syncInserted = it.inserted
+            }
         }
         // 只把 running 这一位单独暴露成布尔 state: 五个页面的下拉刷新都读它,
         // 而 Compose 的状态失效粒度是对象级的 —— 若直接读整个 SyncProgress,
@@ -267,12 +281,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------
 
     fun loadDashboard(range: String = homeRange) {
+        // 序号守卫: 慢响应晚到时会覆盖新 range 的数据 (与 loadOverview 的 ovSeq 同范式)
+        val seq = ++dashSeq
         scope.launch {
             try {
                 // Desktop parity: every dashboard load kicks a background quota refresh
                 // (30s cache + re-entry guard inside ensureQuota).
                 repo.ensureQuotaAsync(scope)
-                dashboard = repo.loadDashboard(range)
+                val data = repo.loadDashboard(range)
+                if (seq != dashSeq) return@launch // 丢弃过期响应 (更新的 loadDashboard 已发出)
+                dashboard = data
                 dashboardVersion++
             } catch (e: CancellationException) {
                 throw e // viewModelScope 取消时正常退出, 不当加载失败记录
@@ -508,6 +526,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         .getPackageInfo(getApplication<Application>().packageName, 0).versionName ?: "0.1.0"
                 )
                 updateStatus = if (info.hasUpdate) "${s.updateFound} ${info.latest}" else s.updateNone
+            } catch (e: CancellationException) {
+                throw e // VM 清理/页面销毁时的取消不是"检查更新失败", 不能当成错误文案展示
             } catch (e: Exception) {
                 // 展示真实原因 (desktop: 把具体错误带给前端展示)
                 updateStatus = e.message?.trim()?.takeIf { it.isNotEmpty() } ?: s.updateFailed

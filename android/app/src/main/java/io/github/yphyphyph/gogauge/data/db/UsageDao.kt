@@ -38,7 +38,11 @@ abstract class UsageDao {
 
     /**
      * Batch insert with dedup; returns count of newly inserted rows.
-     * 已存在的记录保留原归属账号 (desktop ON CONFLICT DO UPDATE 不更新 account_id).
+     *
+     * 刻意选择 "保留首次归属": 冲突行的 account_id 不被最新同步者改写
+     * (桌面 db.insert_usage_records 用 account_id = excluded.account_id, Android / HarmonyOS
+     * 本次统一为保留首次归属 —— 增量同步有 1 小时重叠窗口, 转移语义会让同一批记录
+     * 在两个账号之间来回抖动). 因此 SQL 中不得出现 account_id = excluded.account_id.
      */
     @Transaction
     open suspend fun insertUsageRecords(records: List<UsageRecordEntity>, accountId: Int): Int {
@@ -49,9 +53,14 @@ abstract class UsageDao {
         return records.count { it.usgId !in existingAccount }
     }
 
+    /**
+     * 裁剪窗口外的记录 — 日历日口径走 idx_usage_account_localdate
+     * (desktop db.prune_old_records parity; 最多多保留边界当天, 只多不少).
+     * [intervalArg] 形如 "-30 days".
+     */
     @Query(
         "DELETE FROM usage_records WHERE account_id = :accountId" +
-            " AND datetime(created_at) < datetime('now', :intervalArg)"
+            " AND local_date < date('now', 'localtime', :intervalArg)"
     )
     abstract suspend fun pruneOldRecords(intervalArg: String, accountId: Int): Int
 
@@ -75,7 +84,11 @@ abstract class UsageDao {
         val args: Array<Any>
         when (period) {
             "5h" -> {
-                clause = "datetime(created_at) >= datetime('now', '-5 hours')"
+                // 滚动 5 小时窗口: datetime() 包裹索引列无法走索引, 先用 local_date
+                // 把行集收敛到昨/今两天 (索引范围扫), 再叠加 datetime() 保留精确的
+                // 滚动口径 (desktop db._PERIOD_CLAUSES parity)
+                clause = "(local_date >= date('now', 'localtime', '-1 day')" +
+                    " AND datetime(created_at) >= datetime('now', '-5 hours'))"
                 args = emptyArray()
             }
             "today" -> {
@@ -85,16 +98,22 @@ abstract class UsageDao {
                 args = emptyArray()
             }
             "month" -> if (cycleStart != null) {
-                clause = "datetime(created_at) >= datetime(?)"
-                args = arrayOf(cycleStart)
+                // 先以起点的本地日做索引收敛, 再用 datetime() 保留秒级精确口径
+                // (直接比较 datetime 只能全索引扫描) — desktop db._period_where parity
+                clause = "(local_date >= date(?, 'localtime') AND datetime(created_at) >= datetime(?))"
+                args = arrayOf(cycleStart, cycleStart)
             } else {
-                clause = "datetime(created_at) >= datetime('now', ?)"
+                // 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 日历口径一致)
+                clause = "local_date >= date('now', 'localtime', ?)"
                 args = arrayOf("-${MonthlyCycle.PERIOD_DAYS} days")
             }
             "all" -> return null to emptyArray()
             else -> {
+                // "7d"/"30d" 等: 日历日口径 (与 dailyStats/todayTrend 一致), 走索引;
+                // 原先 datetime(created_at) >= datetime('now','-N days') 的滚动窗口
+                // 既用不上索引, 又与桌面的日历日语义不一致
                 val days = Regex("^(\\d+)d$").find(period)?.groupValues?.get(1)?.toIntOrNull()?.coerceIn(1, 365) ?: 30
-                clause = "datetime(created_at) >= datetime('now', ?)"
+                clause = "local_date >= date('now', 'localtime', ?)"
                 args = arrayOf("-${days} days")
             }
         }
@@ -172,7 +191,9 @@ abstract class UsageDao {
                 GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
-                arrayOf(accountId, "-${clamped} days"),
+                // 显式 Array<Any>: 让 Int 与 String 参数不推断成交集类型
+                // (KT-71420: reified 交集类型在未来版本会变成编译错误)
+                arrayOf<Any>(accountId, "-${clamped} days"),
             )
         )
         // 连续日期补 0 (desktop db.daily_stats parity): 无记录的天也占位,
@@ -301,7 +322,8 @@ abstract class UsageDao {
         val whereParts = mutableListOf("account_id = ?")
         val params = mutableListOf<Any>(accountId)
         if (days != null) {
-            whereParts.add("datetime(created_at) >= datetime('now', ?)")
+            // 日历日口径 + local_date 索引 (desktop _period_where parity)
+            whereParts.add("local_date >= date('now', 'localtime', ?)")
             params.add("-${days.coerceIn(1, 365)} days")
         }
         val where = "WHERE ${whereParts.joinToString(" AND ")}"
@@ -362,7 +384,8 @@ abstract class UsageDao {
             params.add(model)
         }
         if (days != null) {
-            whereParts.add("datetime(created_at) >= datetime('now', ?)")
+            // 日历日口径 + local_date 索引 (desktop _period_where parity)
+            whereParts.add("local_date >= date('now', 'localtime', ?)")
             params.add("-${days.coerceIn(1, 365)} days")
         }
         val where = "WHERE ${whereParts.joinToString(" AND ")}"
