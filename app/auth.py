@@ -2,8 +2,21 @@
 
 原理: pywebview (WebView2 / WKWebView) 的 window.get_cookies() 可直接读取 HttpOnly cookie,
 登录完成后窗口位于目标 provider 域, 从中提取会话 cookie:
-- opencode: opencode.ai 域的 ``auth`` cookie + workspace (wrk_xxx) 提示
+- opencode: opencode.ai 域的会话 cookie + workspace (wrk_xxx) 提示
 - commandcode: commandcode.ai 域的 ``__Secure-commandcode_prod_.session_token``
+
+2026-09 opencode.ai 前端改版: 旧授权页 ``auth.opencode.ai/authorize`` 与旧会话
+cookie ``auth`` 已废弃, 现由 ``/console`` 控制台接管登录, 会话 cookie 为
+``__Host-console_session`` (登录入口 https://opencode.ai/console/login)。
+旧 cookie 名 ``auth`` 保留在候选列表尾部兼容 (db 迁移 4 已把旧 token 清空)。
+
+2026-09 GitHub 2FA 卡死修复: 控制台登录页 "Continue with GitHub" 会带
+``client_id``/``code_challenge``/``redirect_uri`` 跳到 github.com/login; 开启
+两步验证 (2FA) 的账号完成验证后, GitHub 可能丢失 OAuth 续跑链路 (return_to),
+把窗口留在 github.com/settings/security 等无关页面且不再回跳 opencode.ai。
+监听器确认 GitHub 已登录、窗口却停在无关 GitHub 页面超过宽限期时, 自动
+重新加载先前记录的授权入口 URL, 依靠刚建立的 GitHub 会话续跑 authorize
+→ 回跳 opencode.ai → 捕获会话 cookie。
 
 重新登录前必须清掉残留会话 (见 ``clear_provider_cookies``): pywebview 的
 private_mode 只在 create_window 时清理网站数据, 而复用的登录窗口里上一轮的
@@ -26,22 +39,23 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from http.cookies import SimpleCookie as SimpleCookieCls
 from typing import Callable, Iterable, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 
 import webview
 
 from .db import PROVIDER_COMMANDCODE, PROVIDER_OPENCODE
 
-# opencode
-LOGIN_BASE = "https://auth.opencode.ai/authorize"
-LOGIN_CLIENT_ID = "app"
-LOGIN_REDIRECT_URI = "https://opencode.ai/auth/callback"
-AUTH_COOKIE_NAME = "auth"
+# opencode: 2026-09 控制台改版后由 /console 接管登录 (旧授权页
+# auth.opencode.ai/authorize 已下线, 登录入口即控制台登录页).
 OPCODE_HOST = "opencode.ai"
-_WORKSPACE_URL_RE = re.compile(r"/workspace/(wrk_[A-Za-z0-9]+)")
+CONSOLE_LOGIN_URL = "https://opencode.ai/console/login"
+LOGIN_NEXT_PATH = "/console/"
+# 会话 cookie: 新版 __Host-console_session 优先, 旧版 auth 兼容历史账号
+SESSION_COOKIE_NAMES = ("__Host-console_session", "auth")
+AUTH_COOKIE_NAME = SESSION_COOKIE_NAMES[-1]  # 旧版兼容名 (清库/日志仍引用)
+_WORKSPACE_URL_RE = re.compile(r"/(?:console|workspace)/(wrk_[A-Za-z0-9]+)")
 
 # commandcode
 CC_LOGIN_BASE = "https://commandcode.ai/signin"
@@ -100,17 +114,45 @@ except OSError:
 
 
 def build_login_url(provider: str = PROVIDER_OPENCODE) -> str:
-    """构造授权登录 URL."""
+    """构造登录入口 URL (opencode: 控制台登录页, next 指向控制台首页)."""
     if provider == PROVIDER_COMMANDCODE:
         return CC_LOGIN_BASE
-    params = {
-        "client_id": LOGIN_CLIENT_ID,
-        "redirect_uri": LOGIN_REDIRECT_URI,
-        "response_type": "code",
-        "state": uuid.uuid4().hex,
-    }
-    from urllib.parse import urlencode
-    return f"{LOGIN_BASE}?{urlencode(params)}"
+    return f"{CONSOLE_LOGIN_URL}?next={quote(LOGIN_NEXT_PATH, safe='')}"
+
+
+def session_cookie_names(provider: str) -> tuple[str, ...]:
+    """provider -> 按优先级排列的会话 cookie 候选名."""
+    if provider == PROVIDER_COMMANDCODE:
+        return (CC_AUTH_COOKIE_NAME,)
+    return SESSION_COOKIE_NAMES
+
+
+def _cookie_value(cookie) -> dict[str, str]:
+    """把 pywebview 返回的 cookie 对象摊平成 {name: value}."""
+    pairs: dict[str, str] = {}
+    if isinstance(cookie, SimpleCookieCls):  # SimpleCookie 是 dict 子类, 需先判断
+        for name in list(cookie.keys()):
+            try:
+                pairs[name] = cookie[name].value
+            except Exception:  # noqa: BLE001
+                continue
+    elif isinstance(cookie, dict):
+        name = cookie.get("name") or ""
+        if name:
+            pairs[name] = cookie.get("value") or ""
+    return pairs
+
+
+def _pick_session_cookie(cookies, provider: str = PROVIDER_OPENCODE) -> Optional[tuple[str, str]]:
+    """按优先级挑选 provider 的会话 cookie, 返回 (cookie名, 值)."""
+    jar: dict[str, str] = {}
+    for cookie in cookies or []:
+        jar.update(_cookie_value(cookie))
+    for name in session_cookie_names(provider):
+        value = jar.get(name) or ""
+        if value.strip():
+            return name, value
+    return None
 
 
 def provider_host(provider: str) -> str:
@@ -122,6 +164,126 @@ def _domain_matches(domain: str, host: str) -> bool:
     """cookie 的 domain 是否属于 host (兼容 ``.host`` 父域写法)."""
     d = (domain or "").strip().lstrip(".").lower()
     return bool(d) and (d == host or d.endswith("." + host))
+
+
+_GITHUB_HOST_RE = re.compile(r"^https://(?:[\w.-]*\.)?github\.com(?:/|$)", re.IGNORECASE)
+_OAUTH_ENTRY_RE = re.compile(
+    r"^https://github\.com/login(?:\?|/oauth/authorize\?)", re.IGNORECASE
+)
+# 登录流程中间页: 登录表单 / 两步验证 / 设备验证等 (这些页面等待用户操作, 不算卡死)
+_GITHUB_FLOW_RE = re.compile(
+    r"^https://github\.com/(?:login(?:[/?]|$)|sessions(?:/|$)|two_factor)", re.IGNORECASE
+)
+_RETURN_TO_RE = re.compile(r"[?&]return_to=(.+)$")
+# 确认 GitHub 已登录后, 停在无关页面等待这么久才自动续跑 (用户反馈 3s 体验更佳)
+_GITHUB_STUCK_GRACE_SEC = 3.0
+_GITHUB_MAX_RELOADS = 3
+
+# 登录窗没有浏览器后退按钮 (WebView2 发布版禁用 Alt+←), GitHub 侧误点后无法返回。
+# 在非 opencode.ai 页面注入悬浮导航: ← 返回 (history.back) / 继续登录 (续跑授权入口)。
+_NAV_HELPER_TEMPLATE = """
+(function(){
+  var resume = '__RESUME_URL__';
+  if (window.__gogaugeNav) { window.__gogaugeResume = resume; return; }
+  window.__gogaugeNav = 1;
+  window.__gogaugeResume = resume;
+  var bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;bottom:10px;left:10px;z-index:2147483647;'
+    + 'font:12px/1.2 system-ui,sans-serif;white-space:nowrap;';
+  var btn = 'padding:5px 10px;margin-right:6px;border-radius:6px;'
+    + 'border:1px solid rgba(0,0,0,.25);background:rgba(255,255,255,.95);'
+    + 'color:#111;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.35);';
+  var back = document.createElement('button');
+  back.textContent = '\\u2190 \\u8fd4\\u56de';
+  back.style.cssText = btn;
+  back.onclick = function(){ history.back(); };
+  bar.appendChild(back);
+  if (resume) {
+    var go = document.createElement('button');
+    go.textContent = '\\u7ee7\\u7eed\\u767b\\u5f55 \\u2192';
+    go.style.cssText = btn;
+    go.onclick = function(){ location.assign(window.__gogaugeResume); };
+    bar.appendChild(go);
+  }
+  document.documentElement.appendChild(bar);
+})();
+"""
+
+
+def _classify_github_url(url: str) -> Optional[str]:
+    """GitHub 页面分类: "entry"(授权入口) / "flow"(登录流程页) / "stuck"(无关页) / None."""
+    if not _GITHUB_HOST_RE.match(url or ""):
+        return None
+    if _OAUTH_ENTRY_RE.match(url) and "client_id=" in url:
+        return "entry"
+    if _GITHUB_FLOW_RE.match(url):
+        return "flow"
+    return "stuck"
+
+
+def _authorize_url_from_entry(entry_url: str) -> Optional[str]:
+    """从 GitHub 登录入口 URL 提取可续跑的 authorize URL.
+
+    入口形如 ``github.com/login?client_id=...&return_to=%2Flogin%2Foauth%2Fauthorize%3F...``
+    (return_to 可能是未编码/编码/混合编码 — WebView2 不同时机返回的地址栏形态不一致);
+    提取 authorize 路径后对 query 值做规范化 (解到不含百分号编码为止, 再统一
+    单层编码), 并去掉 ``prompt=select_account``, 让已登录会话直接续跑授权。
+    """
+    if not entry_url:
+        return None
+    target: Optional[str] = None
+    if "/login/oauth/authorize" in entry_url:
+        target = entry_url[entry_url.find("/login/oauth/authorize"):]
+    else:
+        match = _RETURN_TO_RE.search(entry_url)
+        if match:
+            decoded = unquote(match.group(1))
+            idx = decoded.find("/login/oauth/authorize")
+            if idx >= 0:
+                target = decoded[idx:]
+    if not target:
+        return None
+    return _normalize_authorize_target(target)
+
+
+def _normalize_authorize_target(target: str) -> Optional[str]:
+    """规范化 authorize 目标 URL 的 query (修复混合编码导致的 redirect_uri 失配).
+
+    混合编码形态里 redirect_uri 可能仍是 ``https%253A%252F%252F...`` (双重编码),
+    GitHub 解一层后看到的是编码串, 与注册回调不匹配, 会报
+    "The redirect_uri is not associated with this application"。这里把每个
+    query 值解到不含百分号编码, 再统一单层编码重建 URL。
+    """
+    path, _, query = target.partition("?")
+    pairs: list[tuple[str, str]] = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if key == "prompt" and value == "select_account":
+            continue  # 已登录续跑不需要账号选择器
+        for _ in range(3):
+            if "%" not in value:
+                break
+            try:
+                decoded = unquote(value)
+            except Exception:  # noqa: BLE001 非法编码: 保留原值
+                break
+            if decoded == value:
+                break
+            value = decoded
+        pairs.append((key, value))
+    if not any(key == "client_id" for key, _ in pairs):
+        return None
+    return "https://github.com" + path + "?" + urlencode(pairs)
+
+
+def _github_logged_user(win) -> str:
+    """读取 GitHub 页面的登录用户名 (meta user-login); 未登录/读取失败返回 ''."""
+    try:
+        result = win.evaluate_js(
+            "(document.querySelector('meta[name=user-login]')||{}).content||''"
+        )
+    except Exception:  # noqa: BLE001 页面未就绪/窗口销毁
+        return ""
+    return str(result or "").strip()
 
 
 # ── Windows (WebView2) 辅助 ────────────────────────────────────────────────
@@ -272,29 +434,50 @@ def _win_cookie_operation(win, host: str, handler, timeout: float):
     return True, result.get("value")
 
 
-def _win_read_provider_cookies(
-    win, host: str, cookie_name: str, timeout: float
-) -> Optional[list[str]]:
-    """Windows: 读取 provider 域指定名 cookie 的值列表; 读取失败返回 None.
+def _win_read_provider_cookie_pairs(
+    win, host: str, cookie_names, timeout: float
+) -> Optional[list[tuple[str, str]]]:
+    """Windows: 读取 provider 域指定名 cookie 的 (name, value) 对; 失败返回 None.
+
+    ``cookie_names`` 为单个名字或按优先级排列的候选名元组 (opencode 新版
+    ``__Host-console_session`` 优先, 旧版 ``auth`` 兼容): 同一 store 出现
+    多个候选时, 返回列表按候选名优先级排序.
 
     空列表与 None 必须区分: 前者是"确实没有残留会话", 后者是"读不到" ——
     清 cookie 后的验证若把两者混同, 真机上就分不清"已清干净"和"清理没生效".
     """
+    if isinstance(cookie_names, str):
+        cookie_names = (cookie_names,)
+    wanted = tuple(cookie_names)
 
-    def collect(cookies, _cm) -> list[str]:
-        values: list[str] = []
+    def collect(cookies, _cm) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
         for cookie in cookies:
             try:
-                if str(cookie.Name) == cookie_name and str(cookie.Value):
-                    values.append(str(cookie.Value))
+                name, value = str(cookie.Name), str(cookie.Value)
             except Exception:  # noqa: BLE001 单个 cookie 异常不影响整体
                 continue
-        return values
+            if name in wanted and value:
+                pairs.append((name, value))
+        return pairs
 
-    ok, values = _win_cookie_operation(win, host, collect, timeout)
+    ok, pairs = _win_cookie_operation(win, host, collect, timeout)
     if not ok:
         return None
-    return list(values or [])
+    ordered: list[tuple[str, str]] = []
+    for name in wanted:
+        ordered.extend((n, value) for n, value in (pairs or []) if n == name)
+    return ordered
+
+
+def _win_read_provider_cookies(
+    win, host: str, cookie_names, timeout: float
+) -> Optional[list[str]]:
+    """Windows: 读取 provider 域指定名 cookie 的值列表 (按候选名优先级)."""
+    pairs = _win_read_provider_cookie_pairs(win, host, cookie_names, timeout)
+    if pairs is None:
+        return None
+    return [value for _name, value in pairs]
 
 
 def _win_clear_all_cookies(win, timeout: float) -> bool:
@@ -482,11 +665,11 @@ def _win_purge_provider_session(win, provider: str) -> int:
     未通过" (区分写进日志 —— 真机排查时这一行是关键证据).
     """
     host = provider_host(provider)
-    target = CC_AUTH_COOKIE_NAME if provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
+    targets = session_cookie_names(provider)
     deadline = time.time() + COOKIE_PURGE_TIMEOUT * 2
-    before = _win_read_provider_cookies(win, host, target, _remaining(deadline))
+    before = _win_read_provider_cookies(win, host, targets, _remaining(deadline))
     cleared = _win_clear_all_cookies(win, _remaining(deadline))
-    after = _win_read_provider_cookies(win, host, target, _remaining(deadline))
+    after = _win_read_provider_cookies(win, host, targets, _remaining(deadline))
     if not cleared:
         _log(
             f"[login] cookie purge (win) FAILED on {host}: "
@@ -589,11 +772,15 @@ def token_fingerprint(value: str) -> str:
     return hashlib.sha256((value or "").strip().encode("utf-8")).hexdigest()
 
 
-def build_token(provider: str, cookie_value: str) -> str:
-    """cookie 值 -> 库内凭证形态 (opencode 带 ``auth=`` 前缀, commandcode 带 cookie 名)."""
+def build_token(provider: str, cookie_value: str, cookie_name: str = "") -> str:
+    """cookie 值 -> 库内凭证形态 (``cookie名=值``, 服务端按该名回填请求头).
+
+    opencode 的会话 cookie 名随控制台改版变化 (``__Host-console_session`` /
+    旧版 ``auth``), 捕获时以实际命中的名为准; 旧调用不传名字时按旧版兼容.
+    """
     if provider == PROVIDER_COMMANDCODE:
         return f"{CC_AUTH_COOKIE_NAME}={cookie_value}"
-    return f"auth={cookie_value}"
+    return f"{cookie_name or AUTH_COOKIE_NAME}={cookie_value}"
 
 
 def wait_window_view(win, timeout: float = _VIEW_READY_TIMEOUT):
@@ -1023,13 +1210,13 @@ def read_provider_cookie(win, provider: str, timeout: float = COOKIE_READ_TIMEOU
     """
     if sys.platform == "win32":
         host = provider_host(provider)
-        target = CC_AUTH_COOKIE_NAME if provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
-        values = _win_read_provider_cookies(win, host, target, timeout)
+        targets = session_cookie_names(provider)
+        values = _win_read_provider_cookies(win, host, targets, timeout)
         if values:
             return values[0]
         _log("[login] cookie snapshot on win: no stale credential -> no baseline")
         return None
-    target = CC_AUTH_COOKIE_NAME if provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
+    targets = session_cookie_names(provider)
     box: dict[str, Optional[str]] = {}
 
     def worker() -> None:
@@ -1038,7 +1225,7 @@ def read_provider_cookie(win, provider: str, timeout: float = COOKIE_READ_TIMEOU
         except Exception:  # noqa: BLE001 窗口未加载完成/已销毁
             return
         for name, value in _cookie_entries(cookies):
-            if name == target and value:
+            if name in targets and value:
                 box["value"] = value
                 return
 
@@ -1085,6 +1272,12 @@ class LoginWatcher:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.done = False
+        # GitHub 卡死自动续跑状态 (仅 opencode 的 OAuth 登录用到)
+        self._oauth_entry: Optional[str] = None  # 最近一次授权入口 URL
+        self._stuck_since: Optional[float] = None  # 停在无关 GitHub 页面的起始时刻
+        self._reloads = 0  # 已自动续跑次数
+        self._github_cls: Optional[str] = None  # 上次记录的 GitHub 页面分类 (去重日志)
+        self._last_nav = ""
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -1105,11 +1298,11 @@ class LoginWatcher:
     def _target_host(self) -> str:
         return provider_host(self.provider)
 
-    def _target_cookie_name(self) -> str:
-        return CC_AUTH_COOKIE_NAME if self.provider == PROVIDER_COMMANDCODE else AUTH_COOKIE_NAME
+    def _target_cookie_names(self) -> tuple[str, ...]:
+        return session_cookie_names(self.provider)
 
-    def _read_cookies(self) -> list:
-        """读取窗口 cookie, 供命中目标 cookie 用.
+    def _read_cookie_pairs(self) -> list[tuple[str, str]]:
+        """读取窗口 cookie, 归一为 (name, value) 对, 供命中目标 cookie 用.
 
         Windows 主路径不走 pywebview 的 get_cookies: 它内部用无超时信号量等
         UI 线程回调, 且以 EdgeChrome 自己跟踪的 URL 作 GetCookiesAsync 入参 ——
@@ -1121,23 +1314,22 @@ class LoginWatcher:
         也已加载完, 挂起风险低, 总比永远读不到 cookie 强.
         """
         if sys.platform == "win32":
-            values = _win_read_provider_cookies(
-                self.win, self._target_host(), self._target_cookie_name(), COOKIE_READ_TIMEOUT
+            pairs = _win_read_provider_cookie_pairs(
+                self.win, self._target_host(), self._target_cookie_names(), COOKIE_READ_TIMEOUT
             )
-            if values is None:
+            if pairs is None:
                 _log("[login] win cookie read unavailable -> falling back to pywebview")
-                return self.win.get_cookies() or []
-            return [
-                {"name": self._target_cookie_name(), "value": value}
-                for value in values
-            ]
-        return self.win.get_cookies() or []
+                return _cookie_entries(self.win.get_cookies() or [])
+            return list(pairs)
+        return _cookie_entries(self.win.get_cookies() or [])
 
-    def _is_stale(self, value: str) -> bool:
+    def _is_stale(self, value: str, name: str = "") -> bool:
         """该凭证是否为登录开始前就已存在的残留会话 (指纹按库内形态计算)."""
         if self.baseline_value and value == self.baseline_value:
             return True
-        return token_fingerprint(build_token(self.provider, value)) in self.stale_fps
+        return (
+            token_fingerprint(build_token(self.provider, value, name)) in self.stale_fps
+        )
 
     def _run(self) -> None:
         _log(
@@ -1145,7 +1337,7 @@ class LoginWatcher:
             f"stale={len(self.stale_fps)} baseline={'yes' if self.baseline_value else 'no'}"
         )
         target_host = self._target_host()
-        target_cookie = self._target_cookie_name()
+        targets = self._target_cookie_names()
         while not self._stop.is_set():
             # 每轮主动检查窗口存活: macOS 关闭窗口后 get_current_url() 返回 None
             # 而非抛异常, 仅靠异常分支检测会让线程变僵尸 (阻塞单飞守卫, 无法再次登录)
@@ -1161,41 +1353,130 @@ class LoginWatcher:
                 self._stop.wait(1.0)
                 continue
 
-            if url.startswith("https://" + target_host):
-                try:
-                    cookies = self._read_cookies()
-                    # 只记录 cookie 名, 不落值: 日志在公共临时目录, 防会话凭证泄漏
-                    raw_desc = [
-                        ",".join(c.keys())
-                        if isinstance(c, SimpleCookieCls)
-                        else str(c.get("name") or "?")
-                        for c in cookies
-                    ]
-                except Exception as exc:  # noqa: BLE001
-                    cookies = []
-                    raw_desc = [f"<read_cookies ERROR {type(exc).__name__}: {exc}>"]
-                _log(f"[login] on {target_host}, url={url[:120]}, cookie_names={raw_desc}")
+            if url != self._last_nav:  # 任意域名的 URL 变化都记录 (暴露监听盲区)
+                _log(f"[login] nav: {url[:180]}")
+                self._last_nav = url
 
-                for name, value in _cookie_entries(cookies):
-                    if name != target_cookie:
-                        continue
-                    if self._is_stale(value):
-                        # 残留会话: 用户可能还在授权页, 页面也可能被旧凭证直接
-                        # 带到后台. 继续轮询, 等真正的新凭证落地再收工.
-                        if not self._stale_logged:
-                            self._stale_logged = True
-                            _log("[login] stale session cookie only, waiting for fresh sign-in")
-                        continue
-                    workspace_hint = "Default"
-                    if self.provider == PROVIDER_OPENCODE:
-                        match = _WORKSPACE_URL_RE.search(url)
-                        workspace_hint = match.group(1) if match else "Default"
-                    _log(f"[login] SUCCESS: cookie {name} captured (len={len(value)}), ws={workspace_hint}")
-                    self.done = True
-                    self._stop.set()
-                    token = build_token(self.provider, value)
-                    self.on_success(token, workspace_hint, self.provider)
+            if url.startswith("https://" + target_host):
+                if self._capture_session(url, targets):
                     return
+            elif self.provider == PROVIDER_OPENCODE and _GITHUB_HOST_RE.match(url):
+                self._watch_github(url)
             self._stop.wait(COOKIE_POLL_SEC)
         if not self.done and self.on_cancelled:
             self.on_cancelled()
+
+    def _capture_session(self, url: str, targets: tuple[str, ...]) -> bool:
+        """窗口已在 provider 域: 读 cookie 并尝试捕获本次登录的新会话.
+
+        返回是否捕获成功 (成功即收工, 监听结束).
+        """
+        try:
+            pairs = self._read_cookie_pairs()
+            names_desc = [name for name, _value in pairs]
+        except Exception as exc:  # noqa: BLE001
+            pairs = []
+            names_desc = [f"<read_cookies ERROR {type(exc).__name__}: {exc}>"]
+        _log(f"[login] on {self._target_host()}, url={url[:120]}, cookie_names={names_desc}")
+
+        # 按候选名优先级挑会话 cookie (新版 __Host-console_session 优先)
+        picked: Optional[tuple[str, str]] = None
+        for want in targets:
+            picked = next(((n, v) for n, v in pairs if n == want and v), None)
+            if picked:
+                break
+        if not picked:
+            return False
+        name, value = picked
+        if self._is_stale(value, name):
+            # 残留会话: 用户可能还在授权页, 页面也可能被旧凭证直接
+            # 带到后台. 继续轮询, 等真正的新凭证落地再收工.
+            if not self._stale_logged:
+                self._stale_logged = True
+                _log("[login] stale session cookie only, waiting for fresh sign-in")
+            return False
+        workspace_hint = "Default"
+        if self.provider == PROVIDER_OPENCODE:
+            match = _WORKSPACE_URL_RE.search(url)
+            workspace_hint = match.group(1) if match else "Default"
+        _log(f"[login] SUCCESS: cookie {name} captured (len={len(value)}), ws={workspace_hint}")
+        self.done = True
+        self._stop.set()
+        token = build_token(self.provider, value, name)
+        self.on_success(token, workspace_hint, self.provider)
+        return True
+
+    def _watch_github(self, url: str) -> None:
+        """跟踪 GitHub 页面: 记录授权入口; 已登录却停在无关页面时自动续跑 OAuth."""
+        cls = _classify_github_url(url)
+        if cls != self._github_cls:  # 页面状态变化时记日志 (诊断用)
+            self._github_cls = cls
+            _log(f"[login] github page {cls}: {url[:180]}")
+
+        if cls == "entry":
+            self._oauth_entry = url
+            self._stuck_since = None
+        elif cls != "stuck":  # 登录表单/两步验证/设备验证等流程页: 正常等待用户
+            self._stuck_since = None
+        else:
+            self._stuck_handle_stuck()
+        self._inject_nav_helper(cls or "entry")
+
+    def _stuck_handle_stuck(self) -> None:
+        """已登录 GitHub 但窗口停在无关页面: 宽限后自动重新拉起授权入口."""
+        now = time.monotonic()
+        if self._stuck_since is None:
+            self._stuck_since = now
+        if now - self._stuck_since < _GITHUB_STUCK_GRACE_SEC:
+            return
+        if self._reloads >= _GITHUB_MAX_RELOADS:
+            return
+        if not _github_logged_user(self.win):
+            return  # 仍在登录前状态 (如设置页未登录), 不打扰
+        # 交替目标: 奇数次用重构的 authorize URL (全自动); 偶数次用原始入口
+        # (GitHub 原生链路, 保真不重构 — 重构 URL 因编码问题失败时的兜底)
+        target: Optional[str] = None
+        if self._reloads % 2 == 0:
+            target = _authorize_url_from_entry(self._oauth_entry or "")
+        if not target and self._oauth_entry:
+            target = self._oauth_entry
+        if not target:
+            _log("[login] github signed-in but OAuth entry URL missing; cannot auto-resume")
+            self._reloads = _GITHUB_MAX_RELOADS  # 无入口可续跑, 停止重试
+            return
+        self._reloads += 1
+        self._stuck_since = None
+        _log(f"[login] github signed-in but OAuth stalled -> resume #{self._reloads}: {target[:180]}")
+        try:
+            self.win.load_url(target)
+        except Exception as exc:  # noqa: BLE001 窗口可能正忙, 下轮再试
+            _log(f"[login] resume load_url ERROR: {exc}")
+
+    def _inject_nav_helper(self, cls: str) -> None:
+        """在 GitHub 页面注入导航按钮 (每轮轮询执行, 页面内有去重守卫).
+
+        授权入口/流程页只给 "← 返回"; 真正卡死的页面才显示 "继续登录 →"
+        (授权页上 GitHub 自带 Authorize 按钮, 重复注入续跑按钮容易混淆)。
+        """
+        resume = ""
+        if cls == "stuck":
+            resume = _authorize_url_from_entry(self._oauth_entry or "") or ""
+        js = _NAV_HELPER_TEMPLATE.replace("__RESUME_URL__", resume.replace("'", ""))
+        try:
+            self.win.evaluate_js(js)
+        except Exception:  # noqa: BLE001 页面未就绪/窗口销毁: 下轮再注入
+            pass
+
+
+def clear_login_cookies(win, provider: str = PROVIDER_OPENCODE) -> None:
+    """清空登录窗口的 Cookie (添加新账号时确保出现登录页, 可切换账号).
+
+    上游 v2.2.0 引入的通用入口; 本 fork 的 ``clear_provider_cookies`` 覆盖
+    更多平台分支 (macOS 按域删除 / Windows DeleteAllCookies+回读验证),
+    这里委托之, 保留两套调用方的同名习惯.
+    """
+    try:
+        clear_provider_cookies(provider, win)
+        _log("[login] cookies cleared for fresh sign-in")
+    except Exception as exc:  # noqa: BLE001 清不掉不阻断登录 (有指纹兜底)
+        _log(f"[login] clear cookies unavailable: {exc}")

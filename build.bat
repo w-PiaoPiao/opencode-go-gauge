@@ -9,7 +9,8 @@ echo ============================================
 echo.
 
 echo [1/3] 安装依赖...
-pip install -q pywebview pyinstaller || goto :err
+rem 注意: 必须带 -r requirements.txt, 保证 pywebview>=6.0 (旧版 get_cookies 捕获不到会话 Cookie)
+pip install -q -r requirements.txt pytest pyinstaller || goto :err
 
 echo [2/3] 打包单文件 exe (无控制台窗口, logo 图标)...
 echo       裁剪误收集依赖 (numpy/cryptography/PIL._avif), 体积约减半
