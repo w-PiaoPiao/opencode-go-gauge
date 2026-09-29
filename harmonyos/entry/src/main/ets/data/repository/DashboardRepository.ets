@@ -41,6 +41,12 @@ export class DashboardRepository {
 
   private _progress: SyncProgress = emptySyncProgress()
 
+  /**
+   * 账号级世代号 —— 登出/删除账号时 +1; 在途同步在每次写库前校验世代未变,
+   * 变了就放弃写入, 避免已清除的数据被在途请求写回 (登出→清库→旧同步继续落库)。
+   */
+  private accountGeneration: Map<number, number> = new Map()
+
   get progress(): SyncProgress {
     return this._progress
   }
@@ -58,6 +64,40 @@ export class DashboardRepository {
     }
     fn(next)
     this._progress = next
+  }
+
+  /**
+   * 只清展示字段 (page/inserted/message/account), **不动 running**。
+   *
+   * running 是同步单飞互斥量 (syncUsage 用 `if (this._progress.running) return` 判重),
+   * 只能由 syncUsage 的 finally 复位; 切号/删号/登录成功若整块重置进度 (emptySyncProgress),
+   * 会让在途同步被判定为"未运行"从而并发双跑、互踩进度与写入。
+   */
+  private clearProgressDisplay(): void {
+    this.updateProgress((p) => {
+      p.page = 0
+      p.inserted = 0
+      p.message = ''
+      if (!p.running) {
+        p.phase = 'idle'
+        p.account = ''
+      }
+    })
+  }
+
+  private generationOf(accountId: number): number {
+    const gen = this.accountGeneration.get(accountId)
+    return gen === undefined ? 0 : gen
+  }
+
+  /** 登出/删号: 递增该账号世代, 使在途同步后续写库全部作废。 */
+  private bumpGeneration(accountId: number): void {
+    this.accountGeneration.set(accountId, this.generationOf(accountId) + 1)
+  }
+
+  /** 世代是否未变 (未变才允许写库)。 */
+  private isCurrent(accountId: number, gen: number): boolean {
+    return this.generationOf(accountId) === gen
   }
 
   // ------------------------------------------------------------------
@@ -83,7 +123,7 @@ export class DashboardRepository {
   async switchAccount(accountId: number): Promise<boolean> {
     const ok = await this.syncDao.setActiveAccount(accountId)
     if (ok) {
-      this._progress = emptySyncProgress()
+      this.clearProgressDisplay()
     }
     return ok
   }
@@ -94,19 +134,37 @@ export class DashboardRepository {
 
   /** 返回剩余账号数。 */
   async deleteAccount(accountId: number): Promise<number> {
+    // 先递增世代: 在途同步随后对该账号的任何写库都会被丢弃 (H8)
+    this.bumpGeneration(accountId)
     const remaining = await this.syncDao.deleteAccount(accountId)
-    this._progress = emptySyncProgress()
+    // 配额缓存槽随账号一起清除: 账号 id 由 MAX(id)+1 生成会被复用, 不清则
+    // 之后新建的同 id 账号会继承已删账号的配额 (Android clearQuotaSlot parity)
+    this.quotaCache.delete(accountId)
+    this.clearProgressDisplay()
     return remaining
   }
 
-  /** 登录成功按模式落库: add=新建账号 (同 token 去重) 并切换; relogin=更新活跃账号凭证。 */
-  async loginSuccess(token: string, workspaceHint: string, mode: string): Promise<void> {
+  /**
+   * 登录成功按模式落库: add=新建账号 (同 token 去重) 并切换;
+   * relogin=更新**指定**账号凭证 —— accountId 由设置页「重新登录」按行传入,
+   * 省略/0 时回退活跃账号 (SyncDao.saveToken)。
+   *
+   * 此前 relogin 恒写活跃账号: 在 A 行点「重新登录」而活跃位在 B 时, 凭证落进 B 的行。
+   */
+  async loginSuccess(token: string, workspaceHint: string, mode: string, accountId: number = 0): Promise<void> {
     if (mode === 'add') {
       await this.syncDao.addAccount(token, workspaceHint, true)
     } else {
-      await this.syncDao.saveToken(token, workspaceHint.trim().length > 0 ? workspaceHint.trim() : 'Default')
+      await this.syncDao.saveToken(
+        token, workspaceHint.trim().length > 0 ? workspaceHint.trim() : 'Default', accountId)
+      // 凭证已变更: 丢弃旧凭证拉到的配额槽 (desktop server.invalidate_quota_cache parity),
+      // 否则 TTL 内会把上一个 token 的配额当成新凭证的配额返回
+      const target = accountId > 0 ? accountId : await this.syncDao.getActiveAccountId()
+      if (target !== 0) {
+        this.quotaCache.delete(target)
+      }
     }
-    this._progress = emptySyncProgress()
+    this.clearProgressDisplay()
   }
 
   // ------------------------------------------------------------------
@@ -118,6 +176,8 @@ export class DashboardRepository {
     if (accountId === 0) {
       return
     }
+    // 世代快照: 拉取期间若发生登出/删号, 结果必须丢弃 (见下方写缓存前的校验)
+    const gen = this.generationOf(accountId)
     const now = Date.now() / 1000
     const slot = this.quotaCache.get(accountId)
     if (slot !== undefined && slot.data !== null && now - slot.at < DashboardRepository.QUOTA_CACHE_TTL) {
@@ -141,6 +201,12 @@ export class DashboardRepository {
         target.data = await OpenCodeApi.fetchQuota(token, hint)
       } catch (e) {
         target.data = null
+      }
+      // 登出/删号 (世代已变) => 丢弃本次结果: 不回写缓存、不落月度重置键,
+      // 否则已清除的账号数据会被在途请求重新写回 (desktop _fetch_quota_with_cache 的
+      // "缓存槽已被凭证变更清掉则丢弃本次结果" parity)
+      if (!this.isCurrent(accountId, gen)) {
+        return
       }
       this.quotaCache.set(accountId, target)
       // 配额拉取成功后持久化月度窗口的重置时间 (供「本月」筛选推算周期起点,
@@ -173,10 +239,26 @@ export class DashboardRepository {
     return Number.isNaN(ms) ? null : MonthlyCycle.fmtUtc(ms)
   }
 
+  /**
+   * 当前活跃账号的配额缓存 (只读访问器)。
+   *
+   * TTL 判定与 ensureQuota 的缓存命中条件一致 (data 非空且 30s 内): 过期槽不再当作
+   * "当前配额"返回 (此前无 TTL, 任何时刻都回上次结果, 新凭证/新账号可能读到旧槽),
+   * 同时后台补一次刷新 (不阻塞本次读) —— 刷新完成后由前台定时器/onPageShow
+   * 触发页面重载 (见 pages/Index.ets 的 refreshToken)。
+   */
   async currentQuota(): Promise<QuotaResult | null> {
     const accountId = await this.syncDao.getActiveAccountId()
     const slot = this.quotaCache.get(accountId)
-    return slot !== undefined ? slot.data : null
+    if (slot === undefined || slot.data === null) {
+      return null
+    }
+    if (Date.now() / 1000 - slot.at >= DashboardRepository.QUOTA_CACHE_TTL) {
+      // 过期: 触发后台刷新后返回 null (desktop dashboard 的 _ensure_quota_async 同位置)
+      this.ensureQuota().catch(() => {})
+      return null
+    }
+    return slot.data
   }
 
   private async usdCny(): Promise<number> {
@@ -239,10 +321,11 @@ export class DashboardRepository {
       }
     }
     // 并发跑相互独立的 DB/汇率查询
+    // (dailyStats(7) 的结果过去只填在 DashboardData.daily 里, 全仓无人读取 ——
+    //  首页趋势用的是 30 天 trend / todayTrend, 故移除该次白跑的 7 日聚合)
     const parts = await Promise.all([
       this.usageDao.totals(range, aid, cycleStart),
       this.usageDao.totals('today', aid),
-      this.usageDao.dailyStats(7, aid),
       this.usageDao.dailyStats(30, aid),
       this.usageDao.todayTrend(aid),
       this.usageDao.modelStats(range, aid, cycleStart),
@@ -252,17 +335,16 @@ export class DashboardRepository {
     ])
     return {
       loggedIn: token.length > 0,
-      quota: token.length > 0 ? (parts[8] as QuotaResult | null) : null,
+      quota: token.length > 0 ? (parts[7] as QuotaResult | null) : null,
       totals: parts[0] as Totals,
       today: parts[1] as Totals,
-      daily: parts[2] as DailyStat[],
-      trend: parts[3] as DailyStat[],
-      todayTrend: parts[4] as HourStat[],
-      models: parts[5] as ModelStat[],
-      sync: parts[6] as SyncState,
+      trend: parts[2] as DailyStat[],
+      todayTrend: parts[3] as HourStat[],
+      models: parts[4] as ModelStat[],
+      sync: parts[5] as SyncState,
       progress: this._progress,
       range: range,
-      usdCny: parts[7] as number,
+      usdCny: parts[6] as number,
       serverTime: DashboardRepository.fmtServerTime(),
     }
   }
@@ -347,6 +429,11 @@ export class DashboardRepository {
     }
   }
 
+  /** 账号世代已变 (登出/删号) 时的同步结果。 */
+  private static cancelledResult(): SyncResult {
+    return { ok: false, error: '账号已变更, 同步取消', inserted: 0, pages: 0, partial: false, failedPages: 0 }
+  }
+
   /** 同步单个账号的用量记录。 */
   private async syncOneAccount(
     accountId: number, name: string, mode: string, windowDays: number | null,
@@ -356,6 +443,10 @@ export class DashboardRepository {
       return { ok: false, error: '未登录', inserted: 0, pages: 0, partial: false, failedPages: 0 }
     }
     let workspaceId = await this.syncDao.getWorkspaceHintFor(accountId)
+    // 世代快照 + 写库前校验: 登出/删号会递增世代, 在途同步此后放弃所有写入,
+    // 避免"清库 -> 旧请求落库"把已清除的数据写回 (H8)
+    const gen = this.generationOf(accountId)
+    const cancelled = (): boolean => !this.isCurrent(accountId, gen)
 
     try {
       // 确保工作区 ID 已解析
@@ -363,11 +454,15 @@ export class DashboardRepository {
         const resolved = await OpenCodeApi.resolveWorkspaceId(workspaceId, token)
         if (!workspaceId.startsWith('wrk_')) {
           workspaceId = resolved
-          await this.syncDao.saveResolvedWorkspace(accountId, resolved, new Date().toISOString())
+          if (!cancelled()) {
+            await this.syncDao.saveResolvedWorkspace(accountId, resolved, new Date().toISOString())
+          }
         }
       } catch (e) {
         const msg = `工作区解析失败: ${(e as Error).message}`
-        await this.syncDao.updateSyncStateAndTotals(accountId, 'error', msg, 0)
+        if (!cancelled()) {
+          await this.syncDao.updateSyncStateAndTotals(accountId, 'error', msg, 0)
+        }
         this.updateProgress((p) => { p.phase = 'error'; p.message = msg })
         return { ok: false, error: (e as Error).message, inserted: 0, pages: 0, partial: false, failedPages: 0 }
       }
@@ -422,6 +517,9 @@ export class DashboardRepository {
           }
           const syncedAt = new Date().toISOString()
           const entities: UsageRecordEntity[] = result.map((r) => toEntity(r, syncedAt, accountId))
+          if (cancelled()) {
+            return DashboardRepository.cancelledResult()
+          }
           const inserted = await this.usageDao.insertUsageRecords(entities, accountId)
           totalInserted += inserted
           batchInserted += inserted
@@ -440,6 +538,9 @@ export class DashboardRepository {
           failedPages += batchFailed
           if (mode === 'incremental') {
             const msg = '网络请求失败 (IncompleteRead/超时)'
+            if (cancelled()) {
+              return DashboardRepository.cancelledResult()
+            }
             await this.syncDao.updateSyncStateAndTotals(accountId, 'error', `[${name}] 第 ${page - 4} 页拉取失败: ${msg}`, totalInserted)
             this.updateProgress((p) => {
               p.phase = 'error'
@@ -462,6 +563,9 @@ export class DashboardRepository {
       }
 
       if (windowDays !== null) {
+        if (cancelled()) {
+          return DashboardRepository.cancelledResult()
+        }
         await this.usageDao.pruneOldRecords(`-${windowDays} days`, accountId)
       }
 
@@ -481,14 +585,22 @@ export class DashboardRepository {
 
       if (failedPages > 0) {
         const msg = `完成, 但 ${failedPages} 页拉取失败 (数据不完整, 可再次全量同步补全)`
+        if (cancelled()) {
+          return DashboardRepository.cancelledResult()
+        }
         await this.syncDao.updateSyncStateAndTotals(accountId, 'partial', msg, totalInserted)
         return { ok: true, error: null, inserted: totalInserted, pages: page, partial: true, failedPages: failedPages }
+      }
+      if (cancelled()) {
+        return DashboardRepository.cancelledResult()
       }
       await this.syncDao.updateSyncStateAndTotals(accountId, 'ok', null, totalInserted)
       return { ok: true, error: null, inserted: totalInserted, pages: page, partial: false, failedPages: 0 }
     } catch (e) {
       const errMsg = (e as Error).message !== undefined ? (e as Error).message : '同步失败'
-      await this.syncDao.updateSyncStateAndTotals(accountId, 'error', errMsg, 0)
+      if (!cancelled()) {
+        await this.syncDao.updateSyncStateAndTotals(accountId, 'error', errMsg, 0)
+      }
       return { ok: false, error: errMsg, inserted: 0, pages: 0, partial: false, failedPages: 0 }
     }
   }
@@ -587,6 +699,12 @@ export class DashboardRepository {
 
   /** 退出登录当前活跃账号 (清其数据, 保留账号行)。 */
   async logout(): Promise<void> {
+    // 先递增活跃账号世代: 在途同步/配额刷新此后的一切写库都被丢弃 (H8),
+    // 否则 clearAccount 清掉的数据会被在途请求原样写回
+    const aid = await this.syncDao.getActiveAccountId()
+    if (aid !== 0) {
+      this.bumpGeneration(aid)
+    }
     await this.syncDao.clearAccount()
     // 清空配额缓存槽: 否则重新登录前 UI 可能取到上一个账号的残留配额
     // (Android DashboardRepository.logout 同做法)

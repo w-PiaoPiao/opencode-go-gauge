@@ -16,8 +16,11 @@ const POLL_INTERVAL_MS = 1000
 struct LoginPage {
   controller: webview.WebviewController = new webview.WebviewController()
   private pollTimer: number = -1
+  private backTimer: number = -1
   private currentUrl: string = ''
   private loginMode: string = 'add'
+  /** relogin 的目标账号 id (0 = 未指定, 由 SyncDao.saveToken 回退活跃账号)。 */
+  private reloginAccountId: number = 0
   @State private src: string = Login.buildLoginUrl()
   @State private statusText: string = '正在加载授权页…'
   @State private captured: boolean = false
@@ -26,6 +29,15 @@ struct LoginPage {
     const params = router.getParams() as Record<string, string> | null
     if (params !== null && params['mode'] === 'relogin') {
       this.loginMode = 'relogin'
+      // 设置页按行传入的目标账号 id (router 参数以字符串传递):
+      // relogin 必须写到被点击的账号, 否则凭证会被写进当前活跃账号 (数据污染)
+      const raw: string | undefined = params['accountId']
+      if (raw !== undefined && raw.length > 0) {
+        const n = Number(raw)
+        if (!Number.isNaN(n) && n > 0) {
+          this.reloginAccountId = Math.trunc(n)
+        }
+      }
     } else {
       this.loginMode = 'add'
     }
@@ -33,6 +45,9 @@ struct LoginPage {
 
   aboutToDisappear(): void {
     this.stopPolling()
+    // 与 pollTimer 对称: 捕获成功后 600ms 的延迟返回若不清掉, 用户在这段时间内
+    // 自己点返回时会再 back 一次, 把 Index 也弹出
+    this.clearBackTimer()
   }
 
   build() {
@@ -104,6 +119,13 @@ struct LoginPage {
     }
   }
 
+  private clearBackTimer(): void {
+    if (this.backTimer >= 0) {
+      clearTimeout(this.backTimer)
+      this.backTimer = -1
+    }
+  }
+
   private async tryCapture(): Promise<void> {
     if (this.captured) {
       return
@@ -125,9 +147,11 @@ struct LoginPage {
     // cookie 已落入账号表, 无需继续留在应用持久化 Web 数据里
     await DashboardRepository.clearWebCookies()
     try {
-      await Repo.get().loginSuccess(segment, hint, this.loginMode)
+      await Repo.get().loginSuccess(segment, hint, this.loginMode, this.reloginAccountId)
       this.statusText = I18n.t('login_success')
-      setTimeout(() => {
+      this.clearBackTimer()
+      this.backTimer = setTimeout(() => {
+        this.backTimer = -1
         router.back()
       }, 600)
     } catch (e) {

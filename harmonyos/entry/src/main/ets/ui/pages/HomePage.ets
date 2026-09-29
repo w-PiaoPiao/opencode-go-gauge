@@ -14,6 +14,8 @@ import { Theme } from '../theme/Theme'
 export struct HomePage {
   @State private data: DashboardData | null = null
   @State private currency: string = 'USD'
+  /** 配额补齐只做一次: ensureQuota 拉取失败 (data=null) 时缓存不生效, 无标志会死循环。 */
+  private quotaHealPending: boolean = false
   @Prop @Watch('onRefresh') refreshToken: number = 0
 
   aboutToAppear(): void {
@@ -35,6 +37,24 @@ export struct HomePage {
       this.data = await Repo.get().loadDashboard('all')
     } catch (e) {
       this.data = null
+    }
+    const d = this.data
+    if (d === null || !d.loggedIn) {
+      this.quotaHealPending = false
+      return
+    }
+    if (d.quota !== null) {
+      this.quotaHealPending = false
+      return
+    }
+    // 配额为空: 可能是缓存槽过期 (currentQuota 的 TTL 与 ensureQuota 一致) 或尚未拉过。
+    // 补一次刷新, 到位后重载本页, 避免配额卡片一直空到下次定时同步。
+    // 同时在场时 ensureQuota 自带防重入会直接返回, 那种情况由 Index 的统一通知补刷。
+    if (!this.quotaHealPending) {
+      this.quotaHealPending = true
+      Repo.get().ensureQuota().then(() => {
+        this.load()
+      }).catch(() => {})
     }
   }
 

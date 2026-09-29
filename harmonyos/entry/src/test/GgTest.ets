@@ -7,6 +7,7 @@ import { QuotaParser } from '../main/ets/data/remote/QuotaParser'
 import { UsageParser } from '../main/ets/data/remote/UsageParser'
 import { Fmt } from '../main/ets/common/util/Fmt'
 import { SyncDao } from '../main/ets/data/db/SyncDao'
+import { SettingsDao } from '../main/ets/data/db/SettingsDao'
 import { Login } from '../main/ets/common/auth/Login'
 import { UpdateApi } from '../main/ets/data/remote/UpdateApi'
 
@@ -201,6 +202,22 @@ $R[1] = {id: "usg_no_time", model: "x", inputTokens: 1, outputTokens: 1};`
     })
   })
 
+  describe('SettingsWindowDaysTest', () => {
+    it('missing_key_falls_back_to_default_window', 0, () => {
+      // 老 payload (种子行 '{}') 缺 window_days: 回退默认 60 天, 而不是"所有"
+      expect(SettingsDao.decode('{}').windowDays).assertEqual(60)
+      expect(SettingsDao.decode('{"auto_sync":true}').windowDays).assertEqual(60)
+      expect(SettingsDao.decode('not-json').windowDays).assertEqual(60)
+    })
+
+    it('explicit_null_means_all_number_is_clamped', 0, () => {
+      expect(SettingsDao.decode('{"window_days":null}').windowDays).assertEqual(null)
+      expect(SettingsDao.decode('{"window_days":30}').windowDays).assertEqual(30)
+      expect(SettingsDao.decode('{"window_days":0}').windowDays).assertEqual(1)
+      expect(SettingsDao.decode('{"window_days":-5}').windowDays).assertEqual(1)
+    })
+  })
+
   describe('LoginDomainTest', () => {
     it('accepts_opencode_root_and_subdomains', 0, () => {
       expect(Login.isOnOpencodeDomain('https://opencode.ai/workspace/x')).assertTrue()
@@ -229,6 +246,13 @@ $R[1] = {id: "usg_no_time", model: "x", inputTokens: 1, outputTokens: 1};`
       expect(UpdateApi.isPlatformTag('v2.1.0-android')).assertFalse()
       expect(UpdateApi.isPlatformTag('v2.1.0-macos')).assertFalse()
       expect(UpdateApi.isPlatformTag('v2.1.0')).assertFalse()
+    })
+
+    it('release_url_is_built_from_tag', 0, () => {
+      // 回归: release JSON 里 html_url 位于 tag_name **之前**, 旧实现从 tag_name
+      // 往后切 scope 取 html_url, 命中的是相邻 (更旧, 可能是其他平台的) release
+      expect(UpdateApi.releasePageUrl('v2.1.0-harmony'))
+        .assertEqual('https://github.com/w-PiaoPiao/opencode-go-gauge/releases/tag/v2.1.0-harmony')
     })
 
     it('letter_suffix_orders_after_plain_release', 0, () => {

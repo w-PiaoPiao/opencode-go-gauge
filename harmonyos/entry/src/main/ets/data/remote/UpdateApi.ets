@@ -62,15 +62,48 @@ export class UpdateApi {
     return v.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
   }
 
+  /** release 页 URL —— 由 tag 直接构造 (GitHub 规则固定, 见 parseReleaseJson 注释)。 */
+  static releasePageUrl(tag: string): string {
+    return `https://github.com/${UpdateApi.REPO}/releases/tag/${tag}`
+  }
+
+  /** 解析输入上限: 两个接口的响应都在几百 KB 内, 超限即视为异常响应。 */
+  private static readonly MAX_PARSE_CHARS = 2 * 1024 * 1024
+
+  /**
+   * 解析前尺寸/结构预检。
+   *
+   * ArkTS 侧没有可配置的 XML 解析 API (无法显式关掉 DOCTYPE 与外部实体),
+   * Releases Atom 流只能以正则解析。因此在解析前把输入挡住:
+   * 超限响应直接判错, 含 DOCTYPE/ENTITY 声明的响应一律拒绝 —— 不做任何实体展开,
+   * 从输入侧消掉 XXE / billion-laughs 这类"先声明实体再诱导解析器展开"的面。
+   */
+  private static precheck(text: string, label: string): void {
+    if (text.length > UpdateApi.MAX_PARSE_CHARS) {
+      throw new Error(`${label}响应过大, 已放弃解析`)
+    }
+    if (/<!(?:DOCTYPE|ENTITY)/i.test(text)) {
+      throw new Error(`${label}包含不受支持的 DOCTYPE/ENTITY 声明`)
+    }
+  }
+
   /**
    * 从 API JSON 列表中提取首个本平台 release 的 tag/html_url/body
    * (正则解析, 规避 JSON 库类型限制)。
    *
    * 接口为列表 (releases?per_page=30), 按创建时间倒序 —— 首个 -harmony 条目
    * 即最新本平台版本; 非本平台条目直接跳过。
+   *
+   * html_url 不做字符串切片定位: GitHub 的 release 对象里 html_url 位于
+   * tag_name **之前**, 从 tag_name 往后切 scope 取到的是下一个 (更旧的, 可能是
+   * 其他平台的) release 的 html_url。release 页 URL 直接由 tag 构造。
    */
   private static parseReleaseJson(text: string): [string, string, string] {
-    // 逐个 release 对象切分: 以 "tag_name" 为锚点向前后取字段
+    UpdateApi.precheck(text, 'Releases 列表')
+    if (!/^\s*\[/.test(text)) {
+      throw new Error('Releases 列表响应不是 JSON 数组')
+    }
+    // 逐个 release 对象切分: 以 "tag_name" 为锚点取本对象范围内的 body
     const tagRe = /"tag_name"\s*:\s*"([^"]+)"/g
     let m: RegExpExecArray | null
     while ((m = tagRe.exec(text)) !== null) {
@@ -78,22 +111,17 @@ export class UpdateApi {
       if (!UpdateApi.isPlatformTag(tag)) {
         continue
       }
-      // 在本 release 对象范围内取 html_url 与 body (对象以 "}," 或末尾 "}" 收束;
-      // 取到下一个 tag_name 之前即可, 避免跨 release 误匹配)
+      // body 位于 tag_name 之后 (GitHub release 对象的字段顺序稳定), 取到下一个
+      // tag_name 之前即可, 不会跨 release 误匹配
       const rest = text.slice(m.index)
       const nextIdx = rest.indexOf('"tag_name"', 1)
       const scope = nextIdx > 0 ? rest.slice(0, nextIdx) : rest
-      let url = UpdateApi.RELEASE_PAGE_URL
       let body = ''
-      const um = /"html_url"\s*:\s*"([^"]+)"/.exec(scope)
-      if (um !== null) {
-        url = um[1]
-      }
       const bm = /"body"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(scope)
       if (bm !== null) {
         body = UpdateApi.unescapeBody(bm[1]).slice(0, 600)
       }
-      return [tag, url, body]
+      return [tag, UpdateApi.releasePageUrl(tag), body]
     }
     return ['', UpdateApi.RELEASE_PAGE_URL, '']
   }
@@ -111,6 +139,8 @@ export class UpdateApi {
    * Android UpdateApi.parseAtom parity)。
    */
   private static parseAtom(text: string): [string, string, string] {
+    // 尺寸/DOCTYPE 预检 (ArkTS 无 XML 解析器配置项, 见 precheck 注释)
+    UpdateApi.precheck(text, 'Releases 订阅流')
     const entryRe = /<entry>([\s\S]*?)<\/entry>/g
     let em: RegExpExecArray | null
     let sawEntry = false

@@ -20,6 +20,17 @@ export class AppPrefs {
   static readonly KEY_DARK_MODE: string = 'dark_mode'           // '0' | '1'
   static readonly KEY_CURRENCY: string = 'currency'             // 'USD' | 'CNY'
 
+  // ------------------------------------------------------------------
+  // AppStorage 键 (外观广播): 设置页写入后会同步到这里, @StorageLink 组件随之刷新。
+  // 组件侧的装饰器参数必须是编译期字面量, 因此这些键的实际取值固定为下面的字符串,
+  // 本处常量仅用于非装饰器调用 (publish/读取), 两边必须保持一致。
+  // ------------------------------------------------------------------
+  static readonly AS_KEY_DARK: string = 'gg_dark'
+  static readonly AS_KEY_LANG: string = 'gg_lang'
+  static readonly AS_KEY_CURRENCY: string = 'gg_currency'
+  /** 外观版本号: 任意外观项变化即 +1, 供 @StorageLink 订阅 (值本身无业务含义)。 */
+  static readonly AS_KEY_APPEARANCE: string = 'gg_appearance'
+
   private static store: preferences.Preferences | null = null
 
   /** 需在 UIAbility/页面上下文可用后调用一次。 */
@@ -29,8 +40,27 @@ export class AppPrefs {
     }
     try {
       AppPrefs.store = preferences.getPreferencesSync(context, { name: AppPrefs.PREFS_NAME })
+      // 启动时把持久化偏好发布到 AppStorage: @StorageLink 组件才能拿到上次的主题/语言
+      AppPrefs.publish()
     } catch (e) {
       AppPrefs.store = null
+    }
+  }
+
+  /**
+   * 把当前外观偏好写入 AppStorage 并推进外观版本号。
+   * 主题色板/文案在 build 期求值, 只有让组件感知到变化才会重新渲染 (见 AppRoot)。
+   * 内部吞异常: AppStorage 不可用时外观仅失去即时广播, preferences 本体不受影响。
+   */
+  private static publish(): void {
+    try {
+      AppStorage.setOrCreate(AppPrefs.AS_KEY_DARK, AppPrefs.isDarkMode())
+      AppStorage.setOrCreate(AppPrefs.AS_KEY_LANG, AppPrefs.getLanguage())
+      AppStorage.setOrCreate(AppPrefs.AS_KEY_CURRENCY, AppPrefs.getCurrency())
+      const cur = AppStorage.get<number>(AppPrefs.AS_KEY_APPEARANCE)
+      AppStorage.setOrCreate(AppPrefs.AS_KEY_APPEARANCE, (cur === undefined ? 0 : cur) + 1)
+    } catch (e) {
+      // 忽略: Theme.isDark 会回退读 preferences
     }
   }
 
@@ -60,6 +90,7 @@ export class AppPrefs {
 
   static setLanguage(value: string): void {
     AppPrefs.put(AppPrefs.KEY_LANGUAGE, value === 'zh' ? 'zh' : 'en')
+    AppPrefs.publish()
   }
 
   static isDarkMode(): boolean {
@@ -71,6 +102,7 @@ export class AppPrefs {
 
   static setDarkMode(dark: boolean): void {
     AppPrefs.put(AppPrefs.KEY_DARK_MODE, dark ? '1' : '0')
+    AppPrefs.publish()
   }
 
   static getCurrency(): string {
@@ -83,6 +115,7 @@ export class AppPrefs {
 
   static setCurrency(value: string): void {
     AppPrefs.put(AppPrefs.KEY_CURRENCY, value === 'CNY' ? 'CNY' : 'USD')
+    AppPrefs.publish()
   }
 
   private static put(key: string, value: string): void {
