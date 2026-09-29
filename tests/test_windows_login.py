@@ -440,6 +440,10 @@ def test_win_snapshot_reads_page_state(win_platform):
         ("https://commandcode.ai/", True),
         ("https://commandcode.ai/dashboard", True),
         ("https://github.com/login?client_id=x", False),  # 授权流程在别的域
+        # OAuth 成功回调 (带 code=): 服务端正要据此种会话, 不得判偏离清会话
+        ("https://commandcode.ai/api/auth/callback/github?code=abc&state=st", False),
+        # 失败回调 (error= 不带 code=): 清会话拉回登录页正是期望行为
+        ("https://commandcode.ai/auth/github?error=access_denied", True),
         ("about:blank", False),
         ("", False),
     ],
@@ -527,6 +531,36 @@ def test_watcher_entry_reset_is_rate_limited(win_platform, monkeypatch):
         assert _wait_until(lambda: w._entry_resets >= 1)
         time.sleep(0.12)  # 若干轮轮询过去 (间隔远小于 _ENTRY_RESET_INTERVAL_SEC)
         assert w._entry_resets == 1, "限流窗口内不得连续 reset"
+    finally:
+        w.stop()
+
+
+def test_watcher_github_resume_works_for_commandcode(win_platform, monkeypatch):
+    """GitHub 2FA 卡死续跑对 commandcode 同样生效 (登录页也有 Continue with GitHub).
+
+    2FA 后 GitHub 丢 return_to 把窗口留在无关页面 (settings/security), 监听器
+    确认已登录后应自动续跑授权入口 —— 授权 URL 重构只依赖 github.com 通用
+    形态, 与 provider 无关.
+    """
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    core = _FakeCore(cm, source="https://github.com/settings/security")
+    win = _FakeWin(core, url="https://github.com/settings/security")
+    monkeypatch.setattr(auth, "COOKIE_POLL_SEC", 0.02)
+    monkeypatch.setattr(auth, "_GITHUB_STUCK_GRACE_SEC", 0.05)
+    monkeypatch.setattr(auth.webview, "windows", [win])
+    w = auth.LoginWatcher(
+        win, "commandcode",
+        lambda token, ws, provider: None,
+        stale_fps=[auth.token_fingerprint(auth.build_token("commandcode", "STALE"))],
+    )
+    w._oauth_entry = "https://github.com/login?client_id=abc&state=st_flow"  # 已记录的授权入口
+    w.start()
+    try:
+        # watcher 先记录授权入口; 已登录 (_win_run_js 读到页面内容) + 卡在
+        # 无关页面超宽限 -> 自动续跑 (Windows 走有界 core.Navigate)
+        ok = _wait_until(lambda: core.navigations and w._reloads >= 1)
+        assert ok, "commandcode 登录在 GitHub 卡住时也应自动续跑"
+        assert core.navigations[-1].startswith("https://github.com/")
     finally:
         w.stop()
 
