@@ -17,11 +17,16 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read  # 构建 job 只需要读仓库; 写权限下放到 release job
 
 jobs:
   build:
     runs-on: ubuntu-latest  # 或自托管 (已装 DevEco 命令行工具链)
+    # 提到 job 级: 步骤级 if 读不到本步骤自己 env 中定义的值
+    env:
+      HAP_STORE_PASSWORD: ${{ secrets.HAP_STORE_PASSWORD }}
+      HAP_KEY_ALIAS: ${{ secrets.HAP_KEY_ALIAS }}
+      HAP_KEY_PASSWORD: ${{ secrets.HAP_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,14 +42,41 @@ jobs:
         working-directory: harmonyos
         run: ohpm install
 
+      # 签名脚本 (scripts/inject-signing.sh) 要的是**文件路径**, 而 Secrets 存的是
+      # 材料内容 —— 原先直接把 secret 当路径传给脚本, 三个文件类 secret 全部落空,
+      # inject-signing.sh 的 ': "${VAR:?}"' 直接退出, build job 必然失败,
+      # 依赖它的 release job 也就永远发不出 HAP。
+      - name: Materialize signing material
+        if: env.HAP_STORE_PASSWORD != ''
+        working-directory: harmonyos
+        env:
+          HAP_STORE_FILE_RAW: ${{ secrets.HAP_STORE_FILE }}
+          HAP_PROFILE_P7B_RAW: ${{ secrets.HAP_PROFILE_P7B }}
+          HAP_SIGN_CER_RAW: ${{ secrets.HAP_SIGN_CER }}
+        run: |
+          set -euo pipefail
+          mkdir -p .signing
+          # 兼容两种形态: 值以 / 开头且文件存在 -> 自托管 runner 直接给路径;
+          # 否则视为 base64 材料内容, 解码落盘后导出路径。
+          materialize() {
+            local raw="$1" out="$2"
+            if [[ "$raw" == /* && -f "$raw" ]]; then printf '%s' "$raw"; return; fi
+            printf '%s' "$raw" | base64 -d > ".signing/$out"
+            printf '%s' "$PWD/.signing/$out"
+          }
+          {
+            echo "HAP_STORE_FILE=$(materialize "$HAP_STORE_FILE_RAW" release.p12)"
+            echo "HAP_PROFILE_P7B=$(materialize "$HAP_PROFILE_P7B_RAW" release.p7b)"
+            echo "HAP_SIGN_CER=$(materialize "$HAP_SIGN_CER_RAW" release.cer)"
+          } >> "$GITHUB_ENV"
+
       - name: Inject signing config (if secrets present)
         working-directory: harmonyos
         if: env.HAP_STORE_PASSWORD != ''
         env:
-          HAP_STORE_FILE: ${{ secrets.HAP_STORE_FILE }}
-          HAP_STORE_PASSWORD: ${{ secrets.HAP_STORE_PASSWORD }}
-          HAP_KEY_ALIAS: ${{ secrets.HAP_KEY_ALIAS }}
-          HAP_KEY_PASSWORD: ${{ secrets.HAP_KEY_PASSWORD }}
+          HAP_STORE_FILE: ${{ env.HAP_STORE_FILE }}
+          HAP_PROFILE_P7B: ${{ env.HAP_PROFILE_P7B }}
+          HAP_SIGN_CER: ${{ env.HAP_SIGN_CER }}
         run: bash scripts/inject-signing.sh
 
       - name: Build signed HAP
@@ -61,6 +93,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 写权限只给真正创建/更新 release 的 job
     steps:
       - uses: actions/download-artifact@v4
         with:
