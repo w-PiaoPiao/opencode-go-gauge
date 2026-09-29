@@ -125,50 +125,68 @@ def _frozen() -> bool:
 
 
 def _dpapi_protect(data: bytes) -> Optional[bytes]:
-    """Windows DPAPI CryptProtectData (用户作用域), 失败返回 None."""
+    """Windows DPAPI CryptProtectData (用户作用域), 失败返回 None.
+
+    DATA_BLOB.pbData 必须用 c_void_p: c_char_p 的字段读取按 C 字符串语义
+    (遇 NUL 截断), 而 DPAPI 的输出 blob 是二进制 —— 旧实现存进库的是被
+    NUL 截断再混入 Python 对象内部内存的垃圾, 且 LocalFree 收到的是 bytes
+    对象的内部地址 (野指针 free → 堆损坏 → 进程随机闪退).
+    """
     try:
         import ctypes
         from ctypes import wintypes
 
         class _BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_char_p)]
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_void_p)]
 
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        crypt32.CryptProtectData.argtypes = [
+            ctypes.POINTER(_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_BLOB),
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_BLOB),
+        ]
+        crypt32.CryptProtectData.restype = wintypes.BOOL
         buf = ctypes.create_string_buffer(bytes(data), len(data))
-        pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_char_p))
+        pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_void_p))
         pout = _BLOB(0, None)
         # CRYPTPROTECT_UI_FORBIDDEN = 0x01
-        ok = ctypes.windll.crypt32.CryptProtectData(
+        ok = crypt32.CryptProtectData(
             ctypes.byref(pin), None, None, None, None, 0x01, ctypes.byref(pout))
-        if not ok:
+        if not ok or not pout.pbData:
             return None
         try:
             return ctypes.string_at(pout.pbData, pout.cbData)
         finally:
-            ctypes.windll.kernel32.LocalFree(pout.pbData)
+            ctypes.windll.kernel32.LocalFree(ctypes.c_void_p(pout.pbData))
     except Exception:  # noqa: BLE001 加密失败走明文回退
         return None
 
 
 def _dpapi_unprotect(data: bytes) -> Optional[bytes]:
-    """Windows DPAPI CryptUnprotectData, 失败返回 None."""
+    """Windows DPAPI CryptUnprotectData, 失败返回 None (pbData 用 c_void_p, 见 _dpapi_protect)."""
     try:
         import ctypes
         from ctypes import wintypes
 
         class _BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_char_p)]
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_void_p)]
 
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        crypt32.CryptUnprotectData.argtypes = [
+            ctypes.POINTER(_BLOB), ctypes.POINTER(wintypes.LPCWSTR), ctypes.POINTER(_BLOB),
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_BLOB),
+        ]
+        crypt32.CryptUnprotectData.restype = wintypes.BOOL
         buf = ctypes.create_string_buffer(bytes(data), len(data))
-        pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_char_p))
+        pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_void_p))
         pout = _BLOB(0, None)
-        ok = ctypes.windll.crypt32.CryptUnprotectData(
+        ok = crypt32.CryptUnprotectData(
             ctypes.byref(pin), None, None, None, None, 0x01, ctypes.byref(pout))
-        if not ok:
+        if not ok or not pout.pbData:
             return None
         try:
             return ctypes.string_at(pout.pbData, pout.cbData)
         finally:
-            ctypes.windll.kernel32.LocalFree(pout.pbData)
+            ctypes.windll.kernel32.LocalFree(ctypes.c_void_p(pout.pbData))
     except Exception:  # noqa: BLE001
         return None
 
@@ -583,6 +601,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # 置空凭证让应用回到欢迎页引导重新登录 (新格式 __Host-console_session=… 不受影响);
     # 仅清凭证不删历史记录, 幂等
     conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'auth=%'")
+    # 迁移 7: 旧版 DPAPI 封装有 bug (DATA_BLOB.pbData 误用 c_char_p), 存入的
+    # enc:v1: 凭证是截断+混入对象内存的垃圾, 永远解不出来 (读回为空) 且解密
+    # 链路本身还会野指针 free. 全部置空引导重新登录, 幂等.
+    conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'enc:v1:%'")
     conn.commit()
 
 
