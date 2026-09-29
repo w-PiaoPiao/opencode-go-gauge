@@ -55,7 +55,7 @@
 - **Multi-account support**: user management (add / switch / rename / remove / re-login), usage isolated per account, key-name column on records & sessions; accounts can come from OpenCode or Command Code (with source badge)
 - **Command Code GOAT support**: after logging into a Command Code account, view 5h / weekly / monthly quota windows and request-level details (GOAT source badge)
 - **Accounts overview panel**: toggle in settings, aggregates each account's quota windows and today's usage with cross-account summary KPIs and a 7-day cost trend comparison
-- **Built-in WebView login**: independent login window opens the official auth page, auto-fills cookie & workspace — no manual copy-paste
+- **Built-in WebView login**: independent login window opens the opencode.ai console sign-in page, auto-captures session & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)
 - **System tray / menu bar**: closing the window minimizes to the system tray (Windows) or the menu bar (macOS); brand logo icons
@@ -68,11 +68,13 @@
 
 Download `GoGauge-vX.X.X-windows.exe` (single file, no install) from [Releases](releases):
 
-1. Double-click to run, click "Login Now" on the welcome page — an official auth window pops up
+1. Double-click to run, click "Login Now" on the welcome page — the opencode.ai console sign-in window pops up
 2. After login, the dashboard loads and usage data syncs automatically
 3. Data is stored in the `data\` folder next to the exe
 
-> Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window minimizes to the system tray.
+> Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window quits the app.
+
+> ⚠️ **Upgrading from v2.1.0 or earlier**: opencode.ai switched to its new console API, so the stored session is void. The stale credential is cleared automatically, the app returns to the welcome page — just log in once (local history is kept).
 
 ### macOS
 
@@ -102,7 +104,7 @@ python entry.py
 build.bat
 ```
 
-Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon and tray support included).
+Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon included).
 
 **macOS**
 
@@ -117,10 +119,11 @@ Output: `dist/GoGauge.app` (no console window; `.icns` icon and menu-bar tray su
 
 ## 📊 Data Notes
 
-- **Source**: OpenCode Go = opencode.ai workspace usage API (`/_server` server-fn) + quota page HTML parsing; Command Code GOAT = api.commandcode.ai internal API (credits / usage)
+- **Source**: OpenCode Go = opencode.ai console API (`/console/api`) — `go/status` quota + `request-logs` usage detail + `service-accounts` key names; Command Code GOAT = api.commandcode.ai internal API (credits / usage)
 - **Total tokens** = input (incl. cache hits) + output + reasoning
 - **Cache hit rate** = hits / (hits + misses)
 - **Cost**: raw USD; CNY converted via open.er-api.com live FX rate (24h cache)
+- **Detail range**: the official API only retains the last 30 days of request detail (quota windows are unaffected)
 
 ## 🔒 Privacy
 

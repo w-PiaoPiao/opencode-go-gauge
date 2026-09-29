@@ -55,7 +55,7 @@
 - **多账号支持**：用户管理（添加 / 切换 / 重命名 / 删除 / 重新登录），用量按账号隔离，记录与会话表显示 Key 名称列；账号可来自 OpenCode 或 Command Code（带来源徽标）
 - **Command Code GOAT 支持**：登录 Command Code 账号后展示 5 小时 / 每周 / 每月三窗口配额与请求级明细（来源徽标 GOAT）
 - **账户总览面板**：设置中可开关，聚合展示各账户配额三窗口、今日用量与跨账号合计 KPI、7 日费用趋势对比
-- **内置 WebView 登录**：独立登录窗口打开官方授权页，自动回填 cookie 与工作区，无需手动复制
+- **内置 WebView 登录**：独立登录窗口打开 opencode.ai 控制台登录页，自动回填会话凭证与工作区，无需手动复制
 - **自动同步**：增量同步（1/5/15/30 分钟可选）+ 同步范围设置（30/60/90/180 天 / 所有）
 - **双主题**：亮色 / 深色一键切换；中英双语界面
 - **系统托盘 / 菜单栏**：Windows 关闭窗口最小化到托盘，macOS 关闭窗口最小化到菜单栏；应用图标使用品牌 Logo
@@ -68,11 +68,13 @@
 
 从本仓库 [Releases](releases) 下载 `GoGauge-vX.X.X-windows.exe`（单文件，无需安装）：
 
-1. 双击运行，欢迎页点击「立即登录」弹出官方授权窗口
+1. 双击运行，欢迎页点击「立即登录」弹出 opencode.ai 控制台登录窗口
 2. 完成登录后自动进入面板并同步用量数据
 3. 数据保存在 exe 同目录 `data\` 文件夹
 
-> 需要 Windows 10/11（自带 WebView2 Runtime）。关闭窗口会最小化到系统托盘。
+> 需要 Windows 10/11（自带 WebView2 Runtime）。关闭窗口即退出应用。
+
+> ⚠️ **从 v2.1.0 及更早版本升级**：opencode.ai 已改用新的控制台接口，登录态随之失效。旧凭证会被自动清除，应用会回到欢迎页，重新登录一次即可（本地历史数据保留）。
 
 ### macOS
 
@@ -102,7 +104,7 @@ python entry.py
 build.bat
 ```
 
-输出 `dist\GoGauge.exe`（约 38 MB，--noconsole 无黑窗，含 logo 图标与托盘支持）。
+输出 `dist\GoGauge.exe`（约 38 MB，--noconsole 无黑窗，含 logo 图标）。
 
 **macOS**
 
@@ -117,10 +119,11 @@ build.bat
 
 ## 📊 数据说明
 
-- **数据来源**：OpenCode Go = opencode.ai 工作区用量接口（`/_server` server-fn）+ 配额页 HTML 解析；Command Code GOAT = api.commandcode.ai internal API（credits / usage）
+- **数据来源**：OpenCode Go = opencode.ai 控制台接口（`/console/api`）—— `go/status` 配额 + `request-logs` 请求明细 + `service-accounts` Key 名称；Command Code GOAT = api.commandcode.ai internal API（credits / usage）
 - **总 TOKEN** = 输入（含缓存命中）+ 输出 + 推理
 - **缓存命中率** = 命中 /（命中 + 未命中）
 - **费用**：USD 原始值，人民币按 open.er-api.com 实时汇率换算（24h 缓存）
+- **明细范围**：官方接口仅保留最近 30 天请求明细（配额窗口不受影响）
 
 ## 🔒 隐私
 

@@ -355,7 +355,7 @@ _LOCK_FILE_NAME = "GoGauge.lock"
 _MUTEX_NAME = "GoGauge_SingleInstance_Mutex"
 _ERROR_ALREADY_EXISTS = 183  # GetLastError: 命名对象已存在
 _ACTIVATE_RETRY_INTERVAL = 0.5  # 激活旧实例窗口的重试间隔(秒)
-_ACTIVATE_RETRY_TIMES = 30  # 重试次数 (共约15秒, 覆盖旧实例 onefile 解压+启动耗时)
+_SINGLE_INSTANCE_WAIT_SEC = 8.0  # 快速重启竞态: 等待旧实例释放互斥体的最长时间
 _SW_SHOW = 5
 _SW_RESTORE = 9
 _MB_ICONINFORMATION = 0x40
@@ -477,23 +477,6 @@ def _read_valid_lock_pid() -> int:
     return 0
 
 
-def _activate_with_retry() -> bool:
-    """带重试激活旧实例窗口.
-
-    第二实例与首实例几乎同时启动时 (快速连击双击), 首实例可能仍在 onefile
-    解压/初始化, 窗口尚未创建. 此时需轮询等待其窗口就绪后再激活,
-    否则会误弹提示框并残留为第二个可见窗口.
-
-    Returns:
-        True=成功激活旧实例窗口 False=超时仍未找到窗口
-    """
-    for _ in range(_ACTIVATE_RETRY_TIMES):
-        if _activate_existing_instance(_read_valid_lock_pid()):
-            return True
-        time.sleep(_ACTIVATE_RETRY_INTERVAL)
-    return False
-
-
 def _ensure_single_instance() -> None:
     """单实例守卫: 命名互斥体原子判定, 已有实例时激活其窗口并结束当前进程.
 
@@ -501,29 +484,44 @@ def _ensure_single_instance() -> None:
     无锁文件方案的竞态窗口 (双击过快/系统卡顿时两个实例互相看不到对方),
     进程崩溃时内核自动回收互斥体, 无残留无 PID 复用问题.
     锁文件降级为辅助: 记录首实例 PID 供激活窗口定位; 失效时按标题全局枚举兜底.
+
+    快速重启竞态处理 (上游 v2.2.0): 用户退出后立刻再次双击时, 旧进程可能仍在
+    收尾 (atexit 关服务器/数据库), 窗口已销毁但互斥体尚未释放 — 旧版此时会
+    激活一个不存在的窗口后直接退出, 表现为"连开两次窗口都闪退, 第三次才
+    正常"。现在激活不到可见窗口时, 先按重试节奏继续尝试 (覆盖旧实例 onefile
+    解压/启动中窗口未创建的场景), 到最后再等待互斥体释放 (最多
+    _SINGLE_INSTANCE_WAIT_SEC), 由当前进程接管成为首实例, 避免空启动。
     """
     global _mutex_handle
     # use_last_error=True: ctypes 每次调用后私有捕获错误码, 避免被 Python 中间系统调用污染
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
-    if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
-        # 互斥体已存在 = 旧实例一定在运行, 激活其窗口后退出
+    deadline = time.time() + _SINGLE_INSTANCE_WAIT_SEC
+    while True:
+        handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+        if ctypes.get_last_error() != _ERROR_ALREADY_EXISTS:
+            # 首实例: 持有互斥体 (全局引用防回收, 进程退出由内核自动释放)
+            _mutex_handle = handle
+            # 锁文件记录当前 PID, 供后续实例激活窗口定位
+            try:
+                with open(os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME), "w") as fh:
+                    fh.write(str(os.getpid()))
+            except OSError:
+                _mlog("[single-instance] 写锁文件失败")
+            return
         if handle:
             kernel32.CloseHandle(handle)
-        if not _activate_with_retry():
+        # 已有实例在运行: 激活其窗口后退出 (托盘隐藏窗口也能被找到并唤起)
+        if _activate_existing_instance(_read_valid_lock_pid()):
+            sys.exit(0)
+        if time.time() >= deadline:
             # 超时仍定位不到窗口 (极端情况): 提示从托盘操作
             ctypes.windll.user32.MessageBoxW(
                 0, "GoGauge 已在运行, 请从系统托盘打开窗口。", "GoGauge", _MB_ICONINFORMATION
             )
-        sys.exit(0)
-    # 首实例: 持有互斥体 (全局引用防回收, 进程退出由内核自动释放)
-    _mutex_handle = handle
-    # 锁文件记录当前 PID, 供后续实例激活窗口定位
-    try:
-        with open(os.path.join(tempfile.gettempdir(), _LOCK_FILE_NAME), "w") as fh:
-            fh.write(str(os.getpid()))
-    except OSError:
-        _mlog("[single-instance] 写锁文件失败")
+            sys.exit(0)
+        # 旧实例找不到窗口 (可能正在退出): 等互斥体释放后由本进程接管
+        _mlog("[single-instance] no visible window on existing instance, wait for release")
+        time.sleep(_ACTIVATE_RETRY_INTERVAL)
 
 
 _TRAY_I18N = {

@@ -579,6 +579,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
 
+    # 迁移 4: opencode.ai 2026-09 改版后旧会话 Cookie (auth=…) 已失效,
+    # 置空凭证让应用回到欢迎页引导重新登录 (新格式 __Host-console_session=… 不受影响);
+    # 仅清凭证不删历史记录, 幂等
+    conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'auth=%'")
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # settings payload 底层读写 (key_names 与 active_account_id 等共用一个 JSON)
