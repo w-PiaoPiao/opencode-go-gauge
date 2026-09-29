@@ -79,6 +79,7 @@ class _FakeCore:
         self.ready = "complete"
         self.scripts: list[str] = []
         self.reloads = 0
+        self.navigations: list[str] = []
 
     def ExecuteScriptAsync(self, script: str) -> _FakeTask:
         self.scripts.append(script)
@@ -86,6 +87,10 @@ class _FakeCore:
 
     def Reload(self) -> None:
         self.reloads += 1
+
+    def Navigate(self, url: str) -> None:
+        self.navigations.append(url)
+        self.Source = url
 
 
 class _FakeForm:
@@ -451,15 +456,15 @@ def test_login_entry_lost_ignores_other_providers(win_platform):
 
 
 def test_reset_login_session_purges_and_reloads_entry(win_platform):
-    """被带到官网/控制台时: 清 store + 清页面存储 + 重新加载登录入口."""
+    """被带到官网/控制台时: 先驶离旧页 (终止其 JS) → 清 store → 清页面存储 → 回登录入口."""
     cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
-    win = _FakeWin(_FakeCore(cm), url="https://commandcode.ai/")
-    reloaded: list[str] = []
-    win.load_url = lambda url: reloaded.append(url)
+    core = _FakeCore(cm)
+    win = _FakeWin(core, url="https://commandcode.ai/")
 
     assert auth.reset_login_session(win, "commandcode") is True
     assert cm.delete_all_calls == 1
-    assert reloaded == [auth.build_login_url("commandcode")]
+    # about:blank 先行: 终止旧页面 JS, 防其定时请求把会话 cookie 续写回来
+    assert core.navigations == ["about:blank", auth.build_login_url("commandcode")]
     scripts = win.control.browser.webview.CoreWebView2.scripts
     assert any("localStorage.clear" in s for s in scripts), (
         "还要清 localStorage/sessionStorage —— 控制台可能据此在客户端直接跳后台"
@@ -468,11 +473,62 @@ def test_reset_login_session_purges_and_reloads_entry(win_platform):
 
 def test_reset_login_session_noop_when_still_on_entry(win_platform):
     cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
-    win = _FakeWin(_FakeCore(cm), url="https://commandcode.ai/signin")
-    win.load_url = lambda url: pytest.fail("仍在登录入口时不该重新加载")
+    core = _FakeCore(cm)
+    win = _FakeWin(core, url="https://commandcode.ai/signin")
 
     assert auth.reset_login_session(win, "commandcode") is False
     assert cm.delete_all_calls == 0, "仍在登录入口时不得清会话"
+    assert core.navigations == [], "仍在登录入口时不得导航"
+
+
+def _drift_watcher(cm, core, win, monkeypatch):
+    """起一个 commandcode watcher: 旧凭证指纹命中 STALE, 窗口被带离 /signin."""
+    monkeypatch.setattr(auth, "COOKIE_POLL_SEC", 0.02)
+    monkeypatch.setattr(auth.webview, "windows", [win])  # 窗口存活判定用
+    w = auth.LoginWatcher(
+        win, "commandcode",
+        lambda token, ws, provider: None,
+        stale_fps=[auth.token_fingerprint(auth.build_token("commandcode", "STALE"))],
+    )
+    w.start()
+    return w
+
+
+def test_watcher_pulls_back_when_off_signin_entry(win_platform, monkeypatch):
+    """回归: 客户端路由把窗口带到官网后, 监听器持续拉回登录入口.
+
+    _arm 侧自愈只覆盖"页面加载完成时"的快照判定, 客户端路由慢跳 (登录页
+    加载完成后 JS 才跳官网) 会错过 —— 此前窗口从此停在官网, 监听器在原地
+    永远等新凭证, 表现为"打开官网后卡住".
+    """
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    core = _FakeCore(cm, source="https://commandcode.ai/")
+    win = _FakeWin(core, url="https://commandcode.ai/")
+    w = _drift_watcher(cm, core, win, monkeypatch)
+    try:
+        ok = _wait_until(lambda: "about:blank" in core.navigations)
+        assert ok, "watcher 应检测到入口偏离并自动重置会话拉回登录页"
+        assert cm.delete_all_calls >= 1
+        assert core.navigations[0] == "about:blank", "先驶离旧页终止其 JS 再清 cookie"
+        assert core.navigations[-1] == auth.build_login_url("commandcode")
+        assert w._entry_resets >= 1
+        assert not w.done, "旧凭证不算登录成功, 监听继续等真正的新凭证"
+    finally:
+        w.stop()
+
+
+def test_watcher_entry_reset_is_rate_limited(win_platform, monkeypatch):
+    """自愈限流: 一次 reset 后的间隔窗口内不重复清会话 (防与 arm 侧自愈打环)."""
+    cm = _FakeCookieManager([_FakeCookie(auth.CC_AUTH_COOKIE_NAME, "STALE", "commandcode.ai")])
+    core = _FakeCore(cm, source="https://commandcode.ai/")
+    win = _FakeWin(core, url="https://commandcode.ai/")
+    w = _drift_watcher(cm, core, win, monkeypatch)
+    try:
+        assert _wait_until(lambda: w._entry_resets >= 1)
+        time.sleep(0.12)  # 若干轮轮询过去 (间隔远小于 _ENTRY_RESET_INTERVAL_SEC)
+        assert w._entry_resets == 1, "限流窗口内不得连续 reset"
+    finally:
+        w.stop()
 
 
 # ---------------------------------------------------------------------------
