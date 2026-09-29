@@ -107,7 +107,9 @@ def db_path() -> str:
 #
 # accounts.token 的存储形态:
 #   ""                      未登录
-#   "enc:v1:<base64>"       DPAPI 密文 (仅 Windows frozen)
+#   "enc:v2:<base64>"       DPAPI 密文 (仅 Windows frozen)
+#   "enc:v1:<base64>"       旧版 DPAPI 密文 — 均为 pbData bug 写入的垃圾,
+#                           由迁移 7 清空 (见 _init_schema), 解码侧仅保留兼容
 #   "kc:"                   凭证在钥匙串 (service=_KC_SERVICE, account=<账号 id>)
 #   其他                    历史明文 (读取兼容, 下次登录时被加密形态覆盖)
 #
@@ -116,7 +118,10 @@ def db_path() -> str:
 # ---------------------------------------------------------------------------
 
 _KC_SERVICE = "GoGauge"
-_ENC_PREFIX = "enc:v1:"
+# 迁移 7 每次启动都清 enc:v1:, 新前缀 v2 是好凭证与旧版垃圾的分界 ——
+# 修复版凭证若仍写 v1 会被它一并清掉 (重启即掉登录)
+_ENC_PREFIX = "enc:v2:"
+_LEGACY_ENC_PREFIX = "enc:v1:"
 _KC_PREFIX = "kc:"
 
 
@@ -254,9 +259,12 @@ def _storage_decode(aid: int, stored: str) -> str:
         return ""
     if stored.startswith(_KC_PREFIX):
         return _keychain_get(aid)
-    if stored.startswith(_ENC_PREFIX):
+    # v2 是当前形态; v1 仅为旧库兼容 (垃圾凭证已在迁移 7 清空, 理论上读不到)
+    enc_prefix = next(
+        (p for p in (_ENC_PREFIX, _LEGACY_ENC_PREFIX) if stored.startswith(p)), None)
+    if enc_prefix:
         try:
-            blob = base64.b64decode(stored[len(_ENC_PREFIX):])
+            blob = base64.b64decode(stored[len(enc_prefix):])
             plain = _dpapi_unprotect(blob)
             if plain is not None:
                 return plain.decode("utf-8", errors="replace")
@@ -604,6 +612,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # 迁移 7: 旧版 DPAPI 封装有 bug (DATA_BLOB.pbData 误用 c_char_p), 存入的
     # enc:v1: 凭证是截断+混入对象内存的垃圾, 永远解不出来 (读回为空) 且解密
     # 链路本身还会野指针 free. 全部置空引导重新登录, 幂等.
+    # 修复版凭证改用 enc:v2: 前缀, 与垃圾分界 —— 本语句每次启动都会执行,
+    # 修复版若仍写 v1 会在这里被一并清掉 (曾致重启即两账号同时掉登录).
     conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'enc:v1:%'")
     conn.commit()
 

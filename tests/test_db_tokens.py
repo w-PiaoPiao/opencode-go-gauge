@@ -122,6 +122,53 @@ def test_keychain_failure_falls_back_to_plaintext(tmp_db, monkeypatch):
     assert db.get_token() == "tok-plain"
 
 
+def _win_frozen_dpapi(monkeypatch):
+    """模拟 Windows frozen DPAPI 环境 (加解密基元用可逆替身)."""
+    monkeypatch.setattr(db, "_frozen", lambda: True)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(db, "_dpapi_protect", lambda data: b"blob-" + data)
+    monkeypatch.setattr(
+        db, "_dpapi_unprotect", lambda blob: blob[len(b"blob-"):])
+
+
+def _restart_app(tmp_db):
+    """模拟进程重启: 关闭连接并重置 schema 就绪标记, 下次访问重跑迁移."""
+    db.close_db()
+    db._schema_init_path = None
+
+
+def test_dpapi_v2_token_survives_restart_migration(tmp_db, monkeypatch):
+    """Windows frozen: 新凭证存 enc:v2:, 模拟重启 (重跑迁移 7) 后仍解得回.
+
+    回归: DPAPI 修复 (687f204) 换了实现但没换前缀, 修复版新凭证仍写 enc:v1:,
+    与旧版垃圾同前缀 —— 迁移 7 每次启动都清 enc:v1:, 结果修复版用户一重启
+    所有 DPAPI 凭证被清空 (两账号同时掉登录).
+    """
+    _win_frozen_dpapi(monkeypatch)
+    aid = db.add_account("tok-secret", switch=True)
+    row = db.get_db().execute(
+        "SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
+    assert row["token"].startswith("enc:v2:")
+
+    _restart_app(tmp_db)
+    assert db.get_token() == "tok-secret"
+
+
+def test_legacy_dpapi_v1_token_still_purged(tmp_db, monkeypatch):
+    """旧版写入的 enc:v1: 垃圾凭证仍在启动迁移中被清空 (迁移 7 原语义)."""
+    _win_frozen_dpapi(monkeypatch)
+    aid = db.add_account("tok-x", switch=True)
+    db.get_db().execute(
+        "UPDATE accounts SET token = 'enc:v1:Z2FyYmFnZQ==' WHERE id = ?", (aid,))
+    db.get_db().commit()
+
+    _restart_app(tmp_db)
+    db.get_db().execute("SELECT 1").fetchone()  # 触发 _init_schema
+    row = db.get_db().execute(
+        "SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
+    assert row["token"] == ""
+
+
 # ---------------------------------------------------------------------------
 # 账号删除的 payload 残留清理
 # ---------------------------------------------------------------------------
