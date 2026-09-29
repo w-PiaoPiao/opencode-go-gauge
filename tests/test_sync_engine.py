@@ -121,13 +121,12 @@ def test_insert_usage_records_counts_only_new_ids(two_accounts):
     assert dup == 1
 
 
-def test_insert_usage_records_reassigns_owner_on_conflict(two_accounts):
-    """桌面端 UPSERT 语义: 冲突时 account_id 取 excluded (后写覆盖归属).
+def test_insert_usage_records_keeps_original_owner_on_conflict(two_accounts):
+    """三端统一语义: 冲突时**保留首次归属**, 不改写 account_id.
 
-    注意与 Android 的差异: Android 的 insertUsageRecords 刻意保留原归属
-    (existingOwnership)。两边都在各自平台自洽 —— usg_id 是服务端按请求生成的
-    全局唯一值, 正常数据流下同一 id 不会落进两个账号, 因此该分支只在异常数据
-    下触发. 此用例锁定桌面端行为, 防止今后无意改动.
+    增量同步带 1 小时重叠窗口, 若按"最新同步者拥有"转移归属, 同一批记录会在
+    两个账号之间来回抖动 (统计忽多忽少). 桌面 / Android / HarmonyOS 现统一为
+    保留首次归属, 此用例锁定该行为.
     """
     a1 = db.add_account("tok1", "ws1", switch=True, provider=db.PROVIDER_OPENCODE)
     a2 = db.add_account("tok2", "ws2", switch=False, provider=db.PROVIDER_OPENCODE)
@@ -138,7 +137,7 @@ def test_insert_usage_records_reassigns_owner_on_conflict(two_accounts):
     row = db.get_db().execute(
         "SELECT account_id FROM usage_records WHERE usg_id = 'shared'"
     ).fetchone()
-    assert row["account_id"] == a2
+    assert row["account_id"] == a1
 
 
 def test_period_filter_uses_local_date(two_accounts):

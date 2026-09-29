@@ -280,21 +280,11 @@ def _normalize_authorize_target(target: str) -> Optional[str]:
 
 def _github_logged_user(win) -> str:
     """读取 GitHub 页面的登录用户名 (meta user-login); 未登录/读取失败返回 ''."""
-    if sys.platform == "win32":
-        # pywebview 的 evaluate_js 用无超时信号量, 页面加载中调用会永久挂起
-        # 监听线程 —— 走自带超时的 ExecuteScriptAsync 封装
-        result = _win_run_js(
-            win,
-            "(document.querySelector('meta[name=user-login]')||{}).content||''",
-            COOKIE_READ_TIMEOUT,
-        )
-        return str(result or "").strip()
-    try:
-        result = win.evaluate_js(
-            "(document.querySelector('meta[name=user-login]')||{}).content||''"
-        )
-    except Exception:  # noqa: BLE001 页面未就绪/窗口销毁
-        return ""
+    # 带超时执行: pywebview 的 evaluate_js 两平台都是无超时信号量, 页面加载中
+    # 调用会把监听线程永久挂起
+    result = run_js_bounded(
+        win, "(document.querySelector('meta[name=user-login]')||{}).content||''"
+    )
     return str(result or "").strip()
 
 
@@ -952,6 +942,119 @@ def reload_window(win) -> bool:
     return bool(box.get("ok"))
 
 
+def _mac_run_js(win, script: str, timeout: float):
+    """macOS: 带超时执行 JS 并取回结果, 失败/超时返回 None.
+
+    pywebview 的 evaluate_js 在 cocoa 后端是 ``AppHelper.callAfter`` +
+    ``Semaphore.acquire()``, 而 acquire 没有超时 —— 页面正在导航或主线程被
+    占时, 调用线程会永久挂起. 这里用 pyobjc 的 completion handler 自己收结果,
+    每一步都有界 (与 page_snapshot 同一套路).
+    """
+    if sys.platform != "darwin":
+        return None
+    view = wait_window_view(win, timeout=0.5)
+    if view is None:
+        # 视图尚未实例化 (含测试替身): pywebview 的 cocoa 实现在这一阶段
+        # 直接返回 None —— BrowserView.instances 找不到窗口, 不做无超时等待,
+        # 回退它是安全的
+        try:
+            return win.evaluate_js(script)
+        except Exception:  # noqa: BLE001
+            return None
+    # 视图已实例化: 主线程调用会与 callAfter 互锁 (自身阻塞等主线程执行该
+    # 回调), 直接放弃; 非主线程走下面的有界 pyobjc 通道
+    if threading.current_thread() is threading.main_thread():
+        return None
+    box: dict[str, object] = {}
+    done = threading.Event()
+
+    def run() -> None:
+        def handler(result, error):
+            box["result"] = result
+            box["error"] = str(error) if error else None
+            done.set()
+
+        try:
+            view.webview.evaluateJavaScript_completionHandler_(script, handler)
+        except Exception as exc:  # noqa: BLE001
+            box["error"] = repr(exc)
+            done.set()
+
+    try:
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(run)
+    except Exception:  # noqa: BLE001
+        return None
+    if not done.wait(timeout):
+        return None
+    if box.get("error"):
+        return None
+    return box.get("result")
+
+
+def _mac_current_url(win) -> str:
+    """macOS: 带超时读取窗口当前 URL (读不到返回空串).
+
+    pywebview 的 get_current_url 在 cocoa 后端同样是 ``callAfter`` + 无超时
+    ``acquire()``; 而 LoginWatcher 每轮轮询都要读 URL 做判定 —— 主线程被
+    模态框/同步加载占住时, 监听线程会挂死在这里.
+    """
+    if sys.platform != "darwin":
+        return ""
+    view = wait_window_view(win, timeout=0.5)
+    if view is None:
+        # 视图尚未实例化 (含测试替身): pywebview 的实现在这一阶段不做无超时
+        # 等待 (instances 里找不到该窗口直接返回 None), 回退是安全的
+        try:
+            return win.get_current_url() or ""
+        except Exception:  # noqa: BLE001
+            return ""
+    # 视图已实例化: 主线程调用会与 callAfter 互锁, 直接放弃 (调用方按空 URL 降级)
+    if threading.current_thread() is threading.main_thread():
+        return ""
+    box: dict[str, str] = {}
+    done = threading.Event()
+
+    def read() -> None:
+        try:
+            box["url"] = str(view.webview.URL() or "")
+        except Exception as exc:  # noqa: BLE001
+            box["error"] = repr(exc)
+        finally:
+            done.set()
+
+    try:
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(read)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not done.wait(COOKIE_READ_TIMEOUT):
+        return ""
+    return box.get("url") or ""
+
+
+def run_js_bounded(win, script: str, timeout: float = COOKIE_READ_TIMEOUT):
+    """跨平台地带超时执行 JS —— 供"尽力而为"的通知/注入类脚本使用.
+
+    pywebview 的 ``evaluate_js`` 在两个后端都用**无超时**信号量等 UI 线程回调
+    (cocoa: ``Semaphore.acquire()``; winforms: 等 .NET Task), 页面导航中调用会
+    把调用线程永久挂起. 这里统一分流到自带超时的实现.
+
+    失败/超时返回 None. 需要确切结果的判定逻辑请改用 ``page_snapshot`` 一类
+    自带超时的读取函数, 不要把 None 当结果用.
+    """
+    if sys.platform == "win32":
+        return _win_run_js(win, script, timeout)
+    if sys.platform == "darwin":
+        return _mac_run_js(win, script, timeout)
+    try:
+        return win.evaluate_js(script)
+    except Exception:  # noqa: BLE001 其它平台/窗口未就绪
+        return None
+
+
 # 登录窗口的引导页: 纯本地内容, 用来触发 WKWebView 的首次合成.
 # 背景: 窗口创建后直接加载登录页这种复杂 SPA 时, 首次合成可能根本不发生 ——
 # 页面 DOM/样式/文本全都正常 (实测 readyState=interactive、无 pending 资源),
@@ -1365,6 +1468,24 @@ class LoginWatcher:
     def _target_cookie_names(self) -> tuple[str, ...]:
         return session_cookie_names(self.provider)
 
+    def _current_url(self) -> str:
+        """窗口当前 URL —— 一律走带超时的实现.
+
+        Windows 的 winforms 后端 get_current_url 是纯属性读取, 可直接用;
+        macOS 的 cocoa 后端用无超时信号量等主线程回调, 主线程被占时会挂死
+        监听线程, 改走 _mac_current_url (pyobjc 直读 + 有界等待).
+        读不到返回空串: 本轮跳过判定, 下轮再试 —— 刻意不回退 pywebview,
+        那正是要规避的挂起点.
+        """
+        if sys.platform == "win32":
+            return _win_current_url(self.win)
+        if sys.platform == "darwin":
+            return _mac_current_url(self.win)
+        try:
+            return self.win.get_current_url() or ""
+        except Exception:  # noqa: BLE001 其它平台: 保持旧行为
+            return ""
+
     def _read_cookie_pairs(self) -> list[tuple[str, str]]:
         """读取窗口 cookie, 归一为 (name, value) 对, 供命中目标 cookie 用.
 
@@ -1409,7 +1530,7 @@ class LoginWatcher:
                 _log("[login] window gone, watcher exits")
                 break
             try:
-                url = self.win.get_current_url() or ""
+                url = self._current_url()
             except Exception as exc:  # noqa: BLE001 窗口未加载完成或已销毁
                 if not self._window_alive():
                     _log("[login] window closed, watcher exits")
@@ -1561,10 +1682,9 @@ class LoginWatcher:
         if cls == "stuck":
             resume = _authorize_url_from_entry(self._oauth_entry or "") or ""
         js = _NAV_HELPER_TEMPLATE.replace("__RESUME_URL__", resume.replace("'", ""))
-        try:
-            self.win.evaluate_js(js)
-        except Exception:  # noqa: BLE001 页面未就绪/窗口销毁: 下轮再注入
-            pass
+        # 一律走带超时的执行通道: pywebview 的 evaluate_js 在两个平台都用无超时
+        # 信号量等 UI 线程回调, 页面导航中调用会把监听线程挂死
+        run_js_bounded(self.win, js)
 
 
 def clear_login_cookies(win, provider: str = PROVIDER_OPENCODE) -> None:

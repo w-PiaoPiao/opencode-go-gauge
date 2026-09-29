@@ -97,11 +97,20 @@ def _fetch(url: str, headers: dict[str, str], timeout: float = REQUEST_TIMEOUT) 
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise AuthError("认证失败 (HTTP %d)，请重新登录" % exc.code) from exc
-            raise CommandCodeAPIError(f"请求返回 HTTP {exc.code}") from exc
+            # 4xx 是确定性失败 (重试无意义); 5xx 与 429 按可恢复处理, 退避重试.
+            # 原先非 401/403 的 HTTPError 一律直接抛出 —— 服务端一次 502 就让
+            # 整轮同步失败, 而 opencode 客户端对 5xx 是会重试的 (两者对齐).
+            if 400 <= exc.code < 500 and exc.code != 429:
+                raise CommandCodeAPIError(f"请求返回 HTTP {exc.code}") from exc
+            last_exc = exc
+            if attempt < FETCH_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_exc = exc
             if attempt < FETCH_RETRIES - 1:
                 time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
+    if isinstance(last_exc, urllib.error.HTTPError):
+        raise CommandCodeAPIError(f"请求返回 HTTP {last_exc.code}") from last_exc
     raise CommandCodeAPIError(f"网络错误: {last_exc}") from last_exc
 
 
@@ -219,7 +228,7 @@ def _parse_window_percent(
     return QuotaWindow(
         label="",  # 由调用方回填
         used=used_pct,
-        remaining=round(100.0 - used_pct, 1),
+        remaining=round(100.0 - used_pct, 2),  # 与 opencode 的百分比精度一致
         total=cap_value,
         unit="$",  # 底层按金额计
         reset_at=reset_at,
@@ -298,7 +307,7 @@ def parse_credits_response(
             QuotaWindow(
                 label=LABEL_MONTHLY,
                 used=used_pct,
-                remaining=round(100.0 - used_pct, 1),
+                remaining=round(100.0 - used_pct, 2),  # 与 opencode 的百分比精度一致
                 total=plan_total,
                 unit="$",
                 reset_at=reset_at_iso,

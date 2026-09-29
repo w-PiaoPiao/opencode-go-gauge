@@ -33,6 +33,7 @@ from .auth import (
     page_snapshot,
     read_provider_cookie,
     reset_login_session,
+    run_js_bounded,
 )
 
 APP_TITLE = "GoGauge - OpenCode Go Usage Panel"
@@ -967,21 +968,27 @@ def main() -> None:
                 _mlog("  login window hidden")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  hide ERROR: {exc}")
+        # 首次全量同步先于窗口 UI 通知触发: 下面的 main_win 调用走的是 WebView
+        # 通道, 页面正在加载时可能长时间阻塞 (pywebview 的窗口方法无超时, 虽已
+        # 尽可能换成有界实现). 放在最后一旦卡住, 用户登录成功却永远不触发同步.
+        server.sync_all_async("full")
         try:
             main_win.load_url(dashboard_url)
             _mlog("  dashboard load_url called")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  load_url ERROR: {exc}")
         # 同 URL 的 load_url 可能被 WebView 跳过 (不重载): 显式通知前端就地刷新,
-        # 否则停留在设置页时看不到新增账号 (需手动切页才会拉取)
+        # 否则停留在设置页时看不到新增账号 (需手动切页才会拉取).
+        # 走带超时的执行通道: 通知失败无害 (load_url 已重载页面), 但不该让监听
+        # 线程在这里挂住.
         try:
-            main_win.evaluate_js(
-                "window.gousageOnLoginSuccess && window.gousageOnLoginSuccess();"
+            run_js_bounded(
+                main_win,
+                "window.gousageOnLoginSuccess && window.gousageOnLoginSuccess();",
             )
             _mlog("  evaluate_js gousageOnLoginSuccess sent")
         except Exception as exc:  # noqa: BLE001
             _mlog(f"  evaluate_js ERROR: {exc}")
-        server.sync_all_async("full")
 
     def _stale_credential_fps(provider: str) -> list[str]:
         """该 provider 名下已知凭证的指纹 (库内旧 token).

@@ -291,6 +291,7 @@ def _sync_one_account(
     with _sync_lock:
         _sync_state.update(account=name)
 
+    total_inserted = 0  # 供 opencode 分支与兜底 except 使用 (cc 分支内部另有同名变量)
     try:
         # commandcode: 无 workspace 概念, 游标翻页; opencode: 页式 + workspace 解析
         if provider == PROVIDER_COMMANDCODE:
@@ -308,7 +309,6 @@ def _sync_one_account(
             db.update_sync_state("error", str(exc), 0, account_id)
             return {"ok": False, "error": str(exc)}
 
-        total_inserted = 0
         max_pages = _max_pages_for(mode)
         page = 0
         cursor: Optional[str] = None
@@ -411,8 +411,9 @@ def _sync_one_account(
         return _finish_sync(account_id, total_inserted, page,
                             failed_pages=failed_pages, retention_days=retention_days)
     except Exception as exc:  # noqa: BLE001
-        db.update_sync_state("error", str(exc), 0, account_id)
-        return {"ok": False, "error": str(exc)}
+        # 传已入库条数而非 0: 与 _finish_sync 的口径一致, 部分成功时计数不丢
+        db.update_sync_state("error", str(exc), total_inserted, account_id)
+        return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
 
 
 def _sync_one_cc_account(
@@ -433,9 +434,18 @@ def _sync_one_cc_account(
                 _sync_state["page"] = pages
             try:
                 records, next_cursor = cc_fetch_usage_page(token, cursor, PAGE_SIZE)
-            except (CCAuthError, CommandCodeAPIError) as exc:
-                if mode == "incremental":
-                    _set_phase("error", f"[{name}] 第 {pages + 1} 页拉取失败: {exc}")
+            except CCAuthError as exc:
+                # 认证失败: 重试无意义, 该账号整体失败
+                _set_phase("error", f"[{name}] {exc}")
+                db.update_sync_state("error", str(exc), total_inserted, account_id)
+                return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
+            except CommandCodeAPIError as exc:
+                # 与 opencode 路径同语义: 首页失败即整体报错; 翻页中途失败只计入
+                # failed_pages, 由 _finish_sync 落 partial 成功 (已入库数据保留).
+                # 原先增量模式下任何一页失败都让整账号失败, 单个深页网络抖动
+                # 就会触发整轮重试.
+                if pages == 0:
+                    _set_phase("error", f"[{name}] 第 1 页拉取失败: {exc}")
                     db.update_sync_state("error", str(exc), total_inserted, account_id)
                     return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
                 failed_pages += 1
@@ -625,6 +635,37 @@ def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200
     handler.wfile.write(body)
 
 
+# WebView 只加载这几类资源, 显式给出类型比信任系统映射可靠: Windows 的
+# mimetypes 会读注册表, HKEY_CLASSES_ROOT 被第三方软件改写后 .js 可能返回
+# text/plain, 浏览器会拒绝执行模块.
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".ico": "image/x-icon",
+    ".webp": "image/webp",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+def _guess_content_type(path: str) -> str:
+    """按扩展名给出 MIME 类型; 未收录的扩展名回退 mimetypes."""
+    known = _CONTENT_TYPES.get(os.path.splitext(path)[1].lower())
+    if known:
+        return known
+    return mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+
 def _static_response(handler: BaseHTTPRequestHandler, rel: str) -> None:
     # 防目录穿越: 单纯过滤 '..' 不够 —— Windows 下 os.path.join 遇到盘符绝对
     # 组件会丢弃前缀 (GET /C:/Users/.../gousage.db 可读任意文件). 解码后做
@@ -642,7 +683,7 @@ def _static_response(handler: BaseHTTPRequestHandler, rel: str) -> None:
     if not os.path.isfile(path):
         handler.send_error(404)
         return
-    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    ctype = _guess_content_type(path)
     try:
         st = os.stat(path)
     except OSError:
@@ -748,15 +789,15 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         # 时间范围: today / 7d / 30d / month / all
         range_param = query.get("range", ["today"])[0]
         if range_param == "today":
-            period, days = "today", 1
+            period = "today"
         elif range_param == "7d":
-            period, days = "7d", 7
+            period = "7d"
         elif range_param == "month":
-            period, days = "month", 31
+            period = "month"
         elif range_param == "all":
-            period, days = "all", 365
+            period = "all"
         else:
-            period, days = "30d", 30
+            period = "30d"
         token = db.get_token()
         # quota 使用缓存 (按账号分槽), 过期时后台刷新, 不阻塞 dashboard 响应
         active_id = db.get_active_account_id()

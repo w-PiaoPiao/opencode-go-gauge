@@ -213,12 +213,16 @@ let state = {
   syncTimer: null,
   quotaRetryTimer: null,
   ovRetryTimer: null,
-  records: { page: 1, pageSize: 7, total: 0, model: "" },
-  sessions: { page: 1, pageSize: 7, total: 0 },
+  records: { page: 1, pageSize: PAGE_SIZE, total: 0, model: "" },
+  sessions: { page: 1, pageSize: PAGE_SIZE, total: 0 },
   settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true },
 };
 
 const COLOR = { input: "#4f8ef7", output: "#22c55e", reasoning: "#a78bfa", cache: "#06b6d4", cost: "#d97706" };
+
+/* 记录/会话列表分页大小 — 单一来源: 请求参数、总页数推算、翻页上限、
+   设置页"功能"文案 (N 条/页) 必须一致, 否则用户按文案预期与实际条数对不上 */
+const PAGE_SIZE = 10;
 
 /* 图表动画由设置 chart_animation 控制 (默认关闭: 低配设备上每次刷新重建
    动画要在 N100 级小主机/软件渲染的 WebView 里重合成上百帧, 是掉帧大头).
@@ -287,9 +291,15 @@ function escapeHtml(s) {
 const API_TIMEOUT_MS = 15000;  // 本地服务异常时避免永久"加载中"
 async function api(path, opts = {}) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  // 允许调用方覆盖超时: 例如"检查更新"在后端会重试 3 次并退避 (最坏 ~26s),
+  // 用默认 15s 会在后端仍可能成功的情况下先 abort, 前端报超时与服务端能力不符
+  const { timeoutMs, ...fetchOpts } = opts;
+  const timer = setTimeout(
+    () => ctrl.abort(),
+    Number(timeoutMs) > 0 ? Number(timeoutMs) : API_TIMEOUT_MS,
+  );
   try {
-    const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, signal: ctrl.signal, ...opts });
+    const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, signal: ctrl.signal, ...fetchOpts });
     if (!resp.ok) {
       let msg = "HTTP " + resp.status;
       try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch (e) { /* 无 body 或非 JSON 时保持默认 */ }
@@ -520,7 +530,8 @@ function renderUsageBlocks(quota) {
     const used = Number(w.used) || 0;
     blocks.push({
       cls: w.label === "5h Rolling" ? "c-rolling" : w.label === "Weekly" ? "c-week" : "c-month",
-      label: (QUOTA_LABEL[w.label] || (() => w.label))(),
+      // 未知 label 直接来自上游配额响应, 进 innerHTML 前必须转义
+      label: QUOTA_LABEL[w.label] ? QUOTA_LABEL[w.label]() : escapeHtml(w.label),
       used: used,
       remaining: (Number(w.remaining) || 0).toFixed(0) + "%",
       reset: `${t("resetsIn")} ${fmtDur(w.reset_in_sec)}`,
@@ -690,7 +701,7 @@ async function loadSessions() {
   const seq = ++sesSeq;
   const body = $("sessions-body");
   try {
-    const q = new URLSearchParams({ page: state.sessions.page, page_size: 7 });
+    const q = new URLSearchParams({ page: state.sessions.page, page_size: PAGE_SIZE });
     const data = await api(`/api/usage/sessions?${q}`);
     if (seq !== sesSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
     state.sessions.total = data.total;
@@ -715,7 +726,7 @@ async function loadSessions() {
       }
       body.innerHTML = html;
     }
-    const totalPages = Math.max(1, Math.ceil(data.total / 7));
+    const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
     $("ses-pager").textContent = `${t("pageOf")} ${state.sessions.page} ${t("ofPages")} ${totalPages}`;
     $("ses-prev").disabled = state.sessions.page <= 1;
     $("ses-next").disabled = state.sessions.page >= totalPages;
@@ -745,7 +756,7 @@ async function loadRecords() {
   const seq = ++recSeq;
   const body = $("records-body");
   try {
-    const q = new URLSearchParams({ page: state.records.page, page_size: 7 });
+    const q = new URLSearchParams({ page: state.records.page, page_size: PAGE_SIZE });
     if (state.records.model) q.set("model", state.records.model);
     const data = await api(`/api/usage/records?${q}`);
     if (seq !== recSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
@@ -773,7 +784,7 @@ async function loadRecords() {
       }
       body.innerHTML = html;
     }
-    const totalPages = Math.max(1, Math.ceil(data.total / 7));
+    const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
     $("rec-pager").textContent = `${t("pageOf")} ${state.records.page} ${t("ofPages")} ${totalPages}`;
     $("pg-prev").disabled = state.records.page <= 1;
     $("pg-next").disabled = state.records.page >= totalPages;
@@ -845,7 +856,17 @@ function maskWs(data) {
 async function startSync(mode) {
   $("tb-refresh").disabled = true;
   $("btn-full-sync").disabled = true;
-  try { await api("/api/sync?mode=" + mode, { method: "POST" }); } catch (e) { console.error(e); }
+  try {
+    await api("/api/sync?mode=" + mode, { method: "POST" });
+  } catch (e) {
+    // 未登录 (401) / 服务异常: 必须给出反馈并复位按钮, 否则用户看到的是
+    // "点了同步但什么都没发生", 误以为同步成功只是没新数据
+    console.error(e);
+    $("tb-refresh").disabled = false;
+    $("btn-full-sync").disabled = false;
+    toast(e.message || t("loadFailed"), "err");
+    return;  // 不启动轮询: 同步请求根本没被接受
+  }
   pollUntilIdle();
 }
 function pollUntilIdle() {
@@ -864,6 +885,8 @@ function pollUntilIdle() {
         await loadDashboard();
         if (state.page === "settings") renderSettings();
         if (state.page === "overview") loadOverview(true).catch(() => {});
+        // 停留在记录页时同样要刷新: 否则刚同步到的记录要切页/翻页才会出现
+        if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
       }
     } catch (e) {
       // 连续失败 3 次 (本地服务异常): 解除按钮禁用并停止轮询, 避免永久卡死
@@ -960,7 +983,7 @@ function renderAccountCard(a) {
       const used = Number(w.used) || 0;
       const cls = w.label === "5h Rolling" ? "c-rolling" : w.label === "Weekly" ? "c-week" : "c-month";
       return `<div class="ub ${cls} ov-ub">
-        <div class="ub-head"><span class="ub-l">${(QUOTA_LABEL[w.label] || (() => w.label))()}</span><span class="ub-rem">${t("remaining")} ${(Number(w.remaining) || 0).toFixed(0)}%</span></div>
+        <div class="ub-head"><span class="ub-l">${QUOTA_LABEL[w.label] ? QUOTA_LABEL[w.label]() : escapeHtml(w.label)}</span><span class="ub-rem">${t("remaining")} ${(Number(w.remaining) || 0).toFixed(0)}%</span></div>
         <div class="ub-bar"><div class="ub-bar-fill" style="width:${used}%"></div></div>
         <div class="ub-meta"><span>${t("used")} ${used.toFixed(0)}%</span><span>${t("resetsIn")} ${fmtDur(w.reset_in_sec)}</span></div>
       </div>`;
@@ -1190,6 +1213,7 @@ function startLoginWatch() {
       }
       if (sig !== baseline) {
         stopLoginWatch();
+        resetRecordFilters();  // 登录可能落到另一个账号: 同切号, 清掉旧筛选
         await loadDashboard();
         if (state.page === "settings") renderSettings().catch(() => {});
         else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
@@ -1209,8 +1233,8 @@ function stopLoginWatch() {
   if (loginWatchTimer) { clearInterval(loginWatchTimer); loginWatchTimer = null; }
 }
 /* 分页上限: 按后端返回的 total 与固定 page_size 推算, 防连点越过末页出空表 */
-function recPageMax() { return Math.max(1, Math.ceil((state.records.total || 0) / 7)); }
-function sesPageMax() { return Math.max(1, Math.ceil((state.sessions.total || 0) / 7)); }
+function recPageMax() { return Math.max(1, Math.ceil((state.records.total || 0) / PAGE_SIZE)); }
+function sesPageMax() { return Math.max(1, Math.ceil((state.sessions.total || 0) / PAGE_SIZE)); }
 /* 切换/删除/退出账号后复位记录页筛选: 新账号可能没有旧筛选的模型, 避免列表恒空 */
 function resetRecordFilters() {
   state.records.page = 1;
@@ -1257,6 +1281,9 @@ function renderUserMenu(accounts, activeId) {
       try {
         await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
         toast(t("switchedAccount"));
+        // 新账号可能没有上一个账号的筛选模型: 不复位会让记录页恒空, 且下拉框
+        // 停在已不存在的模型上, 用户无法通过"全部模型"清除该条件
+        resetRecordFilters();
         await loadDashboard();
         if (state.page === "settings") renderSettings().catch(() => {});
         else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
@@ -1503,7 +1530,7 @@ function bindEvents() {
     btn.disabled = true;
     btn.textContent = t("checkingUpdate");
     try {
-      const r = await api("/api/update/check");
+      const r = await api("/api/update/check", { timeoutMs: 40000 });
       if (r.error) throw new Error(r.error);
       if (r.has_update) {
         desc.textContent = `${t("updateFound")} ${r.latest}`;
@@ -1528,16 +1555,27 @@ function bindEvents() {
   });
 
   document.querySelectorAll("#set-interval-pills .pill").forEach((b) => b.addEventListener("click", async () => {
-    await api("/api/settings", { method: "PUT", body: JSON.stringify({ sync_interval_sec: Number(b.dataset.v) }) });
-    state.settings = await api("/api/settings");
-    syncSettingsPills(); restartAutoSync(); toast(`${t("syncIntervalSet")} ${b.textContent}`);
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ sync_interval_sec: Number(b.dataset.v) }) });
+      state.settings = await api("/api/settings");
+      syncSettingsPills(); restartAutoSync(); toast(`${t("syncIntervalSet")} ${b.textContent}`);
+    } catch (e) {
+      // 本地服务重启/异常时不能只留一条未捕获 rejection: 提示并让界面回读真实值
+      toast(e.message || t("loadFailed"), "err");
+      syncSettingsPills();
+    }
   }));
   document.querySelectorAll("#set-window-pills .pill").forEach((b) => b.addEventListener("click", async () => {
-    const v = b.dataset.v === "all" ? null : Number(b.dataset.v);
-    await api("/api/settings", { method: "PUT", body: JSON.stringify({ window_days: v }) });
-    state.settings = await api("/api/settings");
-    syncSettingsPills();
-    toast(t("syncRangeUpdated"));
+    try {
+      const v = b.dataset.v === "all" ? null : Number(b.dataset.v);
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ window_days: v }) });
+      state.settings = await api("/api/settings");
+      syncSettingsPills();
+      toast(t("syncRangeUpdated"));
+    } catch (e) {
+      toast(e.message || t("loadFailed"), "err");
+      syncSettingsPills();
+    }
   }));
   document.querySelectorAll("#set-theme-pills .pill").forEach((b) => b.addEventListener("click", () => applyDarkMode(b.dataset.v === "dark")));
   document.querySelectorAll("#set-currency-pills .pill").forEach((b) => b.addEventListener("click", () => applyCurrency(b.dataset.v)));
@@ -1599,8 +1637,10 @@ function restartAutoSync() {
   if (state.settings.auto_sync === false) return;
   const sec = Math.max(30, Number(state.settings?.sync_interval_sec) || 300) * 1000;
   autoSyncTimer = setInterval(() => {
-    if (state.data && state.data.logged_in === false) return;  // 未登录: 不自动同步
-    const prog = state.data && state.data.progress;
+    // 未登录 (logged_in === false) 或还没拿到过 /api/state (state.data 为 null,
+    // 如欢迎页) 都不自动同步: 否则每轮空发一次 401 并进入 2.5s 轮询
+    if (!state.data || state.data.logged_in === false) return;
+    const prog = state.data.progress;
     if (!prog || !prog.running) startSync("incremental");
   }, sec);
 }

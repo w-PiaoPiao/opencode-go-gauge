@@ -606,14 +606,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.commit()
 
     # 迁移 4: opencode.ai 2026-09 改版后旧会话 Cookie (auth=…) 已失效,
-    # 置空凭证让应用回到欢迎页引导重新登录 (新格式 __Host-console_session=… 不受影响);
-    # 仅清凭证不删历史记录, 幂等
-    conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'auth=%'")
+    # 置空凭证让应用回到欢迎页引导重新登录 (新格式 __Host-console_session=… 不受影响).
+    # **一次性执行**: 此前每次启动都跑, 会把登录流程新捕获的 auth= 形态凭证在下次
+    # 启动时一并清掉 —— 用户刚重登成功, 重启后又掉登录.
+    if not _migration_done(conn, "purge_legacy_auth"):
+        conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'auth=%'")
+        _mark_migration(conn, "purge_legacy_auth")
     # 迁移 7: 旧版 DPAPI 封装有 bug (DATA_BLOB.pbData 误用 c_char_p), 存入的
     # enc:v1: 凭证是截断+混入对象内存的垃圾, 永远解不出来 (读回为空) 且解密
-    # 链路本身还会野指针 free. 全部置空引导重新登录, 幂等.
-    # 修复版凭证改用 enc:v2: 前缀, 与垃圾分界 —— 本语句每次启动都会执行,
-    # 修复版若仍写 v1 会在这里被一并清掉 (曾致重启即两账号同时掉登录).
+    # 链路本身还会野指针 free. 全部置空引导重新登录.
+    # 这条**每次启动都执行**: 它是垃圾前缀的兜底清理, 而修复版写的是 enc:v2:,
+    # 前缀即分界, 不会被误伤 (见 _ENC_PREFIX 注释).
     conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'enc:v1:%'")
     conn.commit()
 
@@ -639,6 +642,25 @@ def _write_payload(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
         "UPDATE settings SET payload = ?, updated_at = ? WHERE id = 1",
         (json.dumps(data, ensure_ascii=False), _now_iso()),
     )
+
+
+def _migration_done(conn: sqlite3.Connection, name: str) -> bool:
+    """该一次性迁移是否已执行过 (标记持久化在 settings payload 的 _migrations 下)."""
+    with _payload_lock:
+        done = _raw_payload(conn).get("_migrations")
+    return bool(isinstance(done, dict) and done.get(name))
+
+
+def _mark_migration(conn: sqlite3.Connection, name: str) -> None:
+    """记录一次性迁移已执行 (save_settings 写回时保留非白名单键, 标记不会被清)."""
+    with _payload_lock:
+        data = _raw_payload(conn)
+        done = data.get("_migrations")
+        if not isinstance(done, dict):
+            done = {}
+        done[name] = True
+        data["_migrations"] = done
+        _write_payload(conn, data)
 
 
 # ---------------------------------------------------------------------------
@@ -1026,6 +1048,18 @@ def clear_account() -> None:
         " oldest_record_at = NULL, newest_record_at = NULL WHERE account_id = ?",
         (aid,),
     )
+    # 一并丢弃该账号的计费周期残留键 (与 delete_account 同口径): 数据已清空,
+    # 陈旧的周期起点会让重新登录后的「本月」视图按错误的边界取数.
+    with _payload_lock:
+        data = _raw_payload(conn)
+        orphan_keys = [
+            k for k in data
+            if k in (f"period_start:{aid}", f"period_end:{aid}", f"monthly_reset:{aid}")
+        ]
+        if orphan_keys:
+            for k in orphan_keys:
+                data.pop(k, None)
+            _write_payload(conn, data)
     conn.commit()
     _keychain_cleanup(aid)
     _invalidate_cred_cache(aid)
@@ -1041,6 +1075,11 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
 
     若记录 dict 带 ``provider`` 字段则一并写入 (usage_records.provider 为
     来源快照, 查询不受影响); 不带时回填账号当前 provider.
+
+    冲突行的 ``account_id`` **保留首次归属**: 同一 usg_id 被另一个账号
+    同步到时不改写归属. 增量同步有 1 小时重叠窗口, 若按最新同步者转移
+    归属, 同一批记录会在两个账号之间来回抖动 (统计忽多忽少). 三端
+    (桌面 / Android / HarmonyOS) 统一采用保留首次归属.
     """
     if not records:
         return 0
@@ -1069,7 +1108,7 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " cache_write_1h_tokens = excluded.cache_write_1h_tokens,"
         " cost_raw = excluded.cost_raw, cost_usd = excluded.cost_usd,"
         " key_id = excluded.key_id, session_id = excluded.session_id, plan = excluded.plan,"
-        " account_id = excluded.account_id, synced_at = excluded.synced_at,"
+        " synced_at = excluded.synced_at,"
         " local_date = excluded.local_date"
     )
     inserted = 0
@@ -1690,7 +1729,10 @@ def _charts_period_where(period: str, account_id: int) -> tuple[str, list[Any]]:
         match = _NUM_DAYS_RE.match(period or "")
         if match:
             days = max(1, int(match.group(1)))
-        clauses.append("datetime(time_bucket) >= datetime('now', ?)")
+        # 日历日口径: 与 daily_stats 的 charts 分支、明细表的 _period_where 一致.
+        # 原先用 datetime(time_bucket) >= datetime('now','-N days') 是滚动 N×24h,
+        # 会让同一账号的"总览 KPI"与"每日趋势合计"差出最多一天的数据.
+        clauses.append("local_date >= date('now', 'localtime', ?)")
         params.append(f"-{days} days")
     return "WHERE " + " AND ".join(clauses), params
 

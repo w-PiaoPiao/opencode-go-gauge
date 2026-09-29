@@ -10,6 +10,7 @@ import html as _html
 import hashlib
 import json
 import os
+import platform
 import re
 import sys
 import time
@@ -53,6 +54,23 @@ _IS_WIN = sys.platform == "win32"
 _PLATFORM_SUFFIX = "-windows" if _IS_WIN else "-macos"
 _ASSET_EXT = ".exe" if _IS_WIN else ".zip"
 _ASSET_NAME = f"gogauge{_PLATFORM_SUFFIX}{_ASSET_EXT}"  # release 资产的标准文件名 (小写比较)
+
+
+def _machine_arch() -> str:
+    """本机 CPU 架构后缀 (macOS 分发包按架构拆分: -arm64 / -x86_64)."""
+    m = (platform.machine() or "").lower()
+    if m in ("arm64", "aarch64"):
+        return "arm64"
+    if m in ("x86_64", "amd64", "i386", "i686"):
+        return "x86_64"
+    return ""
+
+
+# macOS 资产实际命名带架构后缀 (GoGauge-vX.Y.Z-macos-arm64.zip / -x86_64.zip),
+# 与精确名 gogauge-macos.zip 不匹配, 也与 "-macos.zip" 回退规则不匹配. 少了按
+# 架构挑选这一步, 回退会落到"取第一个 .zip" —— 上传顺序里 arm64 在前, Intel
+# 机器会下到跑不起来的包, 且 SHA-256 校验仍能通过 (它确实是那个资产), 故障静默.
+_ARCH = _machine_arch()
 _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 _TIMEOUT = 8  # 秒; GitHub 直连可能超时, 快速失败避免卡住 UI
 _MAX_ATTEMPTS = 3  # 境内直连 GitHub 间歇性 502/超时/重置, 自动重试提高成功率
@@ -265,6 +283,7 @@ def fetch_asset_info(tag: str) -> tuple[str, str]:
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"无法获取 release {tag} 的资产信息: {exc}") from exc
     fallback = ("", "")
+    arch_match = ("", "")
     for asset in data.get("assets") or []:
         name = str(asset.get("name") or "").strip().lower()
         url = str(asset.get("browser_download_url") or "")
@@ -273,12 +292,19 @@ def fetch_asset_info(tag: str) -> tuple[str, str]:
             continue
         if name == _ASSET_NAME:
             return url, digest
+        # 次优: 本机架构对应的分发包 (macOS 双架构发布时唯一正确的选择)
+        if (
+            _ARCH
+            and not arch_match[0]
+            and name.endswith(f"{_PLATFORM_SUFFIX}-{_ARCH}{_ASSET_EXT}")
+        ):
+            arch_match = (url, digest)
         if not fallback[0] and (
             name.endswith(_PLATFORM_SUFFIX + _ASSET_EXT)
             or (not _IS_WIN and name.endswith(".zip"))
         ):
             fallback = (url, digest)
-    return fallback
+    return arch_match if arch_match[0] else fallback
 
 
 def _verify_digest(path: str, digest: str) -> None:
@@ -332,7 +358,11 @@ def download_update(dest_dir: str) -> dict[str, Any]:
         # tag 来自远端 API, 仅做白名单字符过滤后再拼路径: _TAG_RE 的尾部
         # (?:[-+].*)? 允许 "/" 与 "..", 直接拼接可写到 dest_dir 之外.
         safe_tag = re.sub(r"[^A-Za-z0-9._-]", "_", result["latest"]).strip(".") or "update"
-        dest = os.path.join(dest_dir, f"GoGauge-{safe_tag}{_PLATFORM_SUFFIX}{_ASSET_EXT}")
+        # 文件名带上架构后缀: 与 CI 产物命名一致, 用户下载后能直接分辨拿到的是哪个包
+        arch_suffix = f"-{_ARCH}" if (not _IS_WIN and _ARCH) else ""
+        dest = os.path.join(
+            dest_dir, f"GoGauge-{safe_tag}{_PLATFORM_SUFFIX}{arch_suffix}{_ASSET_EXT}"
+        )
         req = urllib.request.Request(
             url, headers={"User-Agent": f"GoGauge/{__version__}"})
         with urllib.request.urlopen(req, timeout=60) as resp:
