@@ -333,10 +333,21 @@ export class SyncDao {
     await this.settings().dropAccountKeys(aid)
   }
 
-  /** 重新登录语义: 更新活跃账号凭证并重置其增量游标。 */
-  async saveToken(token: string, workspaceId: string): Promise<void> {
-    const aid = await this.getActiveAccountId()
+  /**
+   * 重新登录语义: 写入指定账号的凭证并重置其增量游标。
+   *
+   * accountId 为显式目标账号 (设置页「重新登录」按行传入); 省略/0 时回退活跃账号
+   * (既有调用方兼容)。此前内部恒取活跃账号, 导致在 A 行点「重新登录」而活跃位在 B
+   * 时, 凭证被写进 B 的行 (数据污染)。
+   */
+  async saveToken(token: string, workspaceId: string, accountId: number = 0): Promise<void> {
+    const aid = accountId > 0 ? accountId : await this.getActiveAccountId()
     if (aid === 0) {
+      return
+    }
+    const target = await this.accountRowById(aid)
+    if (target === null) {
+      // 目标账号在登录期间被删除: 不落任何行 (也不复活它的同步状态行)
       return
     }
     await this.updateCredential(aid, token.trim(), workspaceId.trim().length > 0 ? workspaceId.trim() : 'Default',

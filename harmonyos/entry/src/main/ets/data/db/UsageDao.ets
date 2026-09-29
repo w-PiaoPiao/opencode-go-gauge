@@ -51,51 +51,98 @@ export class UsageDao {
     return parts.join(',')
   }
 
-  /** 批量插入去重; 返回新增行数。已存在的记录保留原归属账号 (desktop ON CONFLICT 语义)。 */
+  /** 单条多值 upsert 的列清单 (local_date 由 SQLite 末位从 created_at 派生)。 */
+  private static readonly UPSERT_COLUMNS =
+    'usg_id, created_at, model, provider, input_tokens, output_tokens, reasoning_tokens,' +
+    ' cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cost_raw, cost_usd,' +
+    ' key_id, session_id, plan, synced_at, account_id, local_date'
+
+  /** 单行占位模板: 17 个绑定值 + 末位 created_at 绑定给 date(?, 'localtime')。 */
+  private static readonly UPSERT_ROW_VALUES = `(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,date(?,'localtime'))`
+
+  /**
+   * 多值 VALUES 的分片行数: 18 个绑定值/行, 老版本 SQLite 的
+   * SQLITE_MAX_VARIABLE_NUMBER 为 999 (40 行 = 720 个参数, 留足余量)。
+   */
+  private static readonly UPSERT_CHUNK_ROWS = 40
+
+  /** 冲突时的更新列 —— 刻意不含 account_id (见 insertUsageRecords 注释)。 */
+  private static readonly UPSERT_UPDATE_SET =
+    `created_at=excluded.created_at, model=excluded.model, provider=excluded.provider,
+     input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
+     reasoning_tokens=excluded.reasoning_tokens, cache_read_tokens=excluded.cache_read_tokens,
+     cache_write_5m_tokens=excluded.cache_write_5m_tokens,
+     cache_write_1h_tokens=excluded.cache_write_1h_tokens,
+     cost_raw=excluded.cost_raw, cost_usd=excluded.cost_usd, key_id=excluded.key_id,
+     session_id=excluded.session_id, plan=excluded.plan, synced_at=excluded.synced_at,
+     local_date=excluded.local_date`
+
+  /**
+   * 批量写入去重 (单条多值 upsert, 桌面 db.insert_usage_records parity);
+   * 返回新增行数。
+   *
+   * 归属语义 = **保留首次归属**: DO UPDATE 列表中不得出现
+   * `account_id = excluded.account_id` —— 桌面用转移语义, Android / HarmonyOS
+   * 本次统一为保留首次归属 (增量同步有 1 小时重叠窗口, 转移语义会让同一批记录
+   * 在两个账号之间来回抖动).
+   *
+   * 原先整批逐条 executeSql: 50 条记录 = 50 次 RDB 往返 + 1 次预检 SELECT;
+   * 现在按分片拼多值 VALUES 一次执行, 计数语义不变 (批内重复 usg_id 只计首次)。
+   */
   async insertUsageRecords(records: UsageRecordEntity[], accountId: number): Promise<number> {
     if (records.length === 0) {
       return 0
     }
     const store = this.store()
-    const ids: string[] = records.map((r) => r.usgId)
-    const existingAccount: Map<string, number> = new Map()
-    const rs = await store.querySql(
-      `SELECT usg_id, account_id FROM usage_records WHERE usg_id IN (${UsageDao.placeholders(ids.length)})`,
-      ids,
-    )
-    const reader = new RowReader(rs)
-    while (reader.next()) {
-      existingAccount.set(reader.getStr('usg_id'), reader.getLong('account_id'))
+    // 批内去重: 只统计/写入唯一的 usg_id (与旧逐条实现的计数语义一致)
+    const uniqueIds: string[] = []
+    const seen: Map<string, boolean> = new Map()
+    for (const r of records) {
+      if (!seen.has(r.usgId)) {
+        seen.set(r.usgId, true)
+        uniqueIds.push(r.usgId)
+      }
     }
-    reader.close()
-
+    // 预检已存在行: 仅用于计数 (归属账号由冲突分支保留, 不参与写入)
+    const existing: Map<string, boolean> = new Map()
+    for (let i = 0; i < uniqueIds.length; i += 400) {
+      const idChunk: string[] = uniqueIds.slice(i, i + 400)
+      const rs = await store.querySql(
+        `SELECT usg_id FROM usage_records WHERE usg_id IN (${UsageDao.placeholders(idChunk.length)})`,
+        idChunk,
+      )
+      const reader = new RowReader(rs)
+      while (reader.next()) {
+        existing.set(reader.getStr('usg_id'), true)
+      }
+      reader.close()
+    }
     let inserted = 0
+    for (const id of uniqueIds) {
+      if (!existing.has(id)) {
+        inserted++
+      }
+    }
+
     store.beginTransaction()
     try {
-      for (const r of records) {
-        if (existingAccount.has(r.usgId)) {
-          await store.executeSql(
-            `UPDATE usage_records SET created_at=?, model=?, provider=?, input_tokens=?, output_tokens=?,
-               reasoning_tokens=?, cache_read_tokens=?, cache_write_5m_tokens=?, cache_write_1h_tokens=?,
-               cost_raw=?, cost_usd=?, key_id=?, session_id=?, plan=?, synced_at=?
-             WHERE usg_id=?`,
-            [r.createdAt, r.model, r.provider, r.inputTokens, r.outputTokens, r.reasoningTokens,
-              r.cacheReadTokens, r.cacheWrite5mTokens, r.cacheWrite1hTokens, r.costRaw, r.costUsd,
-              r.keyId, r.sessionId, r.plan, r.syncedAt, r.usgId],
-          )
-        } else {
-          await store.executeSql(
-            `INSERT INTO usage_records (usg_id, created_at, model, provider, input_tokens, output_tokens,
-               reasoning_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
-               cost_raw, cost_usd, key_id, session_id, plan, synced_at, account_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [r.usgId, r.createdAt, r.model, r.provider, r.inputTokens, r.outputTokens, r.reasoningTokens,
-              r.cacheReadTokens, r.cacheWrite5mTokens, r.cacheWrite1hTokens, r.costRaw, r.costUsd,
-              r.keyId, r.sessionId, r.plan, r.syncedAt, existingAccount.get(r.usgId) !== undefined
-                ? existingAccount.get(r.usgId) : accountId],
-          )
-          inserted++
+      for (let start = 0; start < records.length; start += UsageDao.UPSERT_CHUNK_ROWS) {
+        const chunk: UsageRecordEntity[] = records.slice(start, start + UsageDao.UPSERT_CHUNK_ROWS)
+        const values: string[] = []
+        const args: Array<relationalStore.ValueType> = []
+        for (const r of chunk) {
+          values.push(UsageDao.UPSERT_ROW_VALUES)
+          args.push(r.usgId, r.createdAt, r.model, r.provider, r.inputTokens, r.outputTokens,
+            r.reasoningTokens, r.cacheReadTokens, r.cacheWrite5mTokens, r.cacheWrite1hTokens,
+            r.costRaw, r.costUsd, r.keyId, r.sessionId, r.plan, r.syncedAt, accountId,
+            r.createdAt)
         }
+        await store.executeSql(
+          `INSERT INTO usage_records (${UsageDao.UPSERT_COLUMNS})
+           VALUES ${values.join(',')}
+           ON CONFLICT(usg_id) DO UPDATE SET ${UsageDao.UPSERT_UPDATE_SET}`,
+          args,
+        )
       }
       store.commit()
     } catch (e) {
@@ -105,9 +152,12 @@ export class UsageDao {
     return inserted
   }
 
+  /** 裁剪窗口外的记录 —— 日历日口径走 idx_usage_account_localdate (desktop parity)。 */
   async pruneOldRecords(intervalArg: string, accountId: number): Promise<void> {
+    // 日历日口径最多多保留窗口边界当天一天的记录, 只多不少, 不会丢数据;
+    // 原先 datetime(created_at) 包裹索引列, 每次同步都退化为按账号全表扫.
     await this.store().executeSql(
-      `DELETE FROM usage_records WHERE account_id = ? AND datetime(created_at) < datetime('now', ?)`,
+      `DELETE FROM usage_records WHERE account_id = ? AND local_date < date('now', 'localtime', ?)`,
       [accountId, intervalArg],
     )
   }
@@ -120,22 +170,35 @@ export class UsageDao {
   // Aggregations
   // ------------------------------------------------------------------
 
+  /**
+   * 周期过滤条件 —— db._PERIOD_CLAUSES / _period_where 的 ArkTS 移植。
+   *
+   * local_date 为写入时物化的本地日 "YYYY-MM-DD" (AppDb 迁移 v2), 可直接走
+   * idx_usage_account_localdate; 原先用 datetime(created_at)/substr(datetime(...))
+   * 包裹索引列, 每次周期查询都退化为按账号全表扫描 (dashboard 一次刷新 6 条).
+   */
   private static periodClause(period: string, cycleStart: string | null = null): [string | null, Array<string>] {
     switch (period) {
       case '5h':
-        return [`datetime(created_at) >= datetime('now', '-5 hours')`, []]
+        // 滚动 5 小时窗口: datetime() 包裹索引列无法走索引, 先用 local_date 把行集
+        // 收敛到昨/今两天 (索引范围扫), 再叠加 datetime() 保留精确的滚动口径
+        return [`(local_date >= date('now', 'localtime', '-1 day')
+                  AND datetime(created_at) >= datetime('now', '-5 hours'))`, []]
       case 'today':
-        return [`substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')`, []]
+        return [`local_date = date('now', 'localtime')`, []]
       case 'month':
         // 「本月」= 当前月度重置周期起点 (desktop db._period_where parity);
         // 无周期记录 (配额从未拉到) 时回退滚动 30 天, 与 "30d" 口径一致
         if (cycleStart !== null && cycleStart.length > 0) {
-          return [`datetime(created_at) >= datetime(?)`, [cycleStart]]
+          // 先以起点的本地日做索引收敛, 再用 datetime() 保留秒级精确口径
+          return [`(local_date >= date(?, 'localtime') AND datetime(created_at) >= datetime(?))`,
+            [cycleStart, cycleStart]]
         }
-        return [`datetime(created_at) >= datetime('now', ?)`, [`-${MonthlyCycle.PERIOD_DAYS} days`]]
+        return [`local_date >= date('now', 'localtime', ?)`, [`-${MonthlyCycle.PERIOD_DAYS} days`]]
       case 'all':
         return [null, []]
       default: {
+        // "7d"/"30d" 等: 日历日口径 (与 dailyStats/todayTrend 一致), 走索引
         const m = /^(\d+)d$/.exec(period)
         let days = 30
         if (m !== null) {
@@ -144,7 +207,7 @@ export class UsageDao {
             days = Math.min(365, Math.max(1, n))
           }
         }
-        return [`datetime(created_at) >= datetime('now', ?)`, [`-${days} days`]]
+        return [`local_date >= date('now', 'localtime', ?)`, [`-${days} days`]]
       }
     }
   }
@@ -217,7 +280,7 @@ export class UsageDao {
   async dailyStats(days: number, accountId: number): Promise<DailyStat[]> {
     const clamped = Math.min(365, Math.max(1, days))
     const rs = await this.store().querySql(
-      `SELECT substr(datetime(created_at, 'localtime'), 1, 10) AS date,
+      `SELECT local_date AS date,
               COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS total_input_tokens,
               COALESCE(SUM(input_tokens), 0) AS uncached_input_tokens,
               COALESCE(SUM(reasoning_tokens), 0) AS total_reasoning_tokens,
@@ -227,8 +290,8 @@ export class UsageDao {
               COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
               COALESCE(COUNT(*), 0) AS request_count
        FROM usage_records
-       WHERE account_id = ? AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
-       GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
+       WHERE account_id = ? AND local_date >= date('now', 'localtime', ?)
+       GROUP BY local_date
        ORDER BY date ASC`,
       [accountId.toString(), `-${clamped} days`],
     )
@@ -294,7 +357,7 @@ export class UsageDao {
               COALESCE(SUM(output_tokens), 0) AS output,
               COALESCE(SUM(reasoning_tokens), 0) AS reasoning
        FROM usage_records
-       WHERE account_id = ? AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
+       WHERE account_id = ? AND local_date = date('now', 'localtime')
        GROUP BY hour`,
       [accountId.toString()],
     )
@@ -380,7 +443,8 @@ export class UsageDao {
     const whereParts: string[] = ['account_id = ?']
     const params: Array<string> = [accountId.toString()]
     if (days !== null) {
-      whereParts.push(`datetime(created_at) >= datetime('now', ?)`)
+      // 日历日口径 + local_date 索引 (desktop _period_where / prune parity)
+      whereParts.push(`local_date >= date('now', 'localtime', ?)`)
       params.push(`-${Math.min(365, Math.max(1, days))} days`)
     }
     const where = `WHERE ${whereParts.join(' AND ')}`
@@ -448,7 +512,8 @@ export class UsageDao {
       params.push(model)
     }
     if (days !== null) {
-      whereParts.push(`datetime(created_at) >= datetime('now', ?)`)
+      // 日历日口径 + local_date 索引 (desktop _period_where / prune parity)
+      whereParts.push(`local_date >= date('now', 'localtime', ?)`)
       params.push(`-${Math.min(365, Math.max(1, days))} days`)
     }
     const where = `WHERE ${whereParts.join(' AND ')}`

@@ -167,7 +167,6 @@ export interface DashboardData {
   quota: QuotaResult | null
   totals: Totals
   today: Totals
-  daily: DailyStat[]
   trend: DailyStat[]
   todayTrend: HourStat[]
   models: ModelStat[]

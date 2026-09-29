@@ -180,7 +180,12 @@ export struct SettingsPage {
                     .backgroundColor(Theme.surfaceSoft())
                     .fontColor(Theme.accent())
                     .onClick(() => {
-                      router.pushUrl({ url: 'pages/LoginPage', params: { mode: 'relogin' } })
+                      // 必须带上被点击行的账号 id: 登录页据此把凭证写到该账号,
+                      // 否则会落到当前活跃账号 (router 参数以字符串传递)
+                      router.pushUrl({
+                        url: 'pages/LoginPage',
+                        params: { mode: 'relogin', accountId: a.id.toString() },
+                      })
                     })
                 }
                 Button(a.id === this.activeId ? '✓' : I18n.t('settings_switch'))

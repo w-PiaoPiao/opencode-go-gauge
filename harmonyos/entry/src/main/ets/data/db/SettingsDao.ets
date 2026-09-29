@@ -69,11 +69,20 @@ export class SettingsDao {
       }
     }
     const def = defaultSettings()
+    // window_days: 缺键回退默认值 (60 天), 仅显式 null 表示"所有" ——
+    // 此前缺键与显式 null 都回退成 null, 老 payload (如种子行 '{}') 会让
+    // 同步范围/裁剪窗口变成"全部", 与设置页显示的下拉默认值不一致
+    // (Android SettingsDao: 缺键 -> defaults().windowDays; null/"all" -> null)
+    let windowDays: number | null = def.windowDays
+    if (daysRaw === null) {
+      windowDays = null
+    } else if (typeof daysRaw === 'number') {
+      windowDays = Math.min(3650, Math.max(1, Math.trunc(daysRaw)))
+    }
     return {
       syncIntervalSec: typeof intervalRaw === 'number'
         ? Math.min(3600, Math.max(30, Math.trunc(intervalRaw))) : def.syncIntervalSec,
-      windowDays: typeof daysRaw === 'number'
-        ? Math.min(3650, Math.max(1, Math.trunc(daysRaw))) : null,
+      windowDays: windowDays,
       autoSync: typeof autoRaw === 'boolean' ? autoRaw : def.autoSync,
       activeAccountId: typeof accRaw === 'number' ? Math.trunc(accRaw) : null,
       keyNames: keyNames,

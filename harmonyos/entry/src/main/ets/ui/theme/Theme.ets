@@ -3,7 +3,10 @@ import { AppPrefs } from '../../common/store/AppPrefs'
 
 export class Theme {
   static isDark(): boolean {
-    return AppPrefs.isDarkMode()
+    // 优先取 AppStorage 广播值 (AppPrefs.init 与外观变更时写入, 供 @StorageLink 同步),
+    // 未发布时回退持久化偏好
+    const published = AppStorage.get<boolean>('gg_dark')
+    return published === undefined ? AppPrefs.isDarkMode() : published
   }
 
   static bg(): string {

@@ -9,9 +9,10 @@ import { relationalStore } from '@kit.ArkData'
 import { UsageDao } from './UsageDao'
 import { SyncDao } from './SyncDao'
 import { SettingsDao } from './SettingsDao'
+import { RowReader } from './RowReader'
 
 /** 当前 schema 版本; 每次结构变更 +1 并在 migrate() 里补对应分支。 */
-const SCHEMA_VERSION: number = 1
+const SCHEMA_VERSION: number = 2
 
 export class AppDb {
   private static _store: relationalStore.RdbStore | null = null
@@ -100,7 +101,51 @@ export class AppDb {
     if (current < 1) {
       // v0 为无版本号的初始形态; 结构与 v1 一致 (createSchema 已建齐), 只需登记版本
     }
+    if (current < 2) {
+      await AppDb.migrateToV2(store)
+    }
     await store.executeSql(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+  }
+
+  /** PRAGMA table_info 列存在性判断 (老库补列前必查, 否则重复 ALTER 直接报错)。 */
+  private static async hasColumn(
+    store: relationalStore.RdbStore, table: string, column: string,
+  ): Promise<boolean> {
+    // 表名/列名为文件内常量, 无注入面; PRAGMA 不支持绑定参数
+    const rs = await store.querySql(`PRAGMA table_info(${table})`)
+    const reader = new RowReader(rs)
+    let found = false
+    // table_info 列序: cid, name, type, notnull, dflt_value, pk —— name 恒为下标 1
+    while (reader.next()) {
+      if (reader.getStrAt(1) === column) {
+        found = true
+        break
+      }
+    }
+    reader.close()
+    return found
+  }
+
+  /**
+   * v1 -> v2 本地日列 + 索引 (对齐桌面 db.py 迁移 6 / Android MIGRATION_3_4)。
+   *
+   * 周期过滤原先写作 datetime(created_at) / substr(datetime(created_at,'localtime'),1,10),
+   * 函数包裹索引列使 SQLite 无法范围扫描, 每次查询退化为按账号全表扫 (dashboard 一次
+   * 刷新 6 条); 而 localtime 是非确定性函数, SQLite 拒绝把它建进索引。故物化
+   * local_date 列, 写入时由 date(created_at,'localtime') 派生。
+   * (HarmonyOS 侧无 usage_charts 表, 因此没有 idx_charts_account_localdate。)
+   */
+  private static async migrateToV2(store: relationalStore.RdbStore): Promise<void> {
+    if (!(await AppDb.hasColumn(store, 'usage_records', 'local_date'))) {
+      await store.executeSql('ALTER TABLE usage_records ADD COLUMN local_date TEXT')
+    }
+    // 存量回填 (仅未回填行; 幂等)
+    await store.executeSql(
+      `UPDATE usage_records SET local_date = date(created_at, 'localtime') WHERE local_date IS NULL`,
+    )
+    await store.executeSql(
+      'CREATE INDEX IF NOT EXISTS idx_usage_account_localdate ON usage_records(account_id, local_date)',
+    )
   }
 
   private static async createSchema(store: relationalStore.RdbStore): Promise<void> {
@@ -122,11 +167,14 @@ export class AppDb {
          session_id TEXT,
          plan TEXT,
          synced_at TEXT NOT NULL,
-         account_id INTEGER NOT NULL DEFAULT 1
+         account_id INTEGER NOT NULL DEFAULT 1,
+         local_date TEXT
        )`,
       `CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at DESC)`,
       `CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)`,
       `CREATE INDEX IF NOT EXISTS idx_usage_account_time ON usage_records(account_id, created_at DESC)`,
+      // idx_usage_account_localdate 依赖 local_date 列: 老库该列由 migrateToV2 补齐,
+      // 因此索引 DDL 只放在迁移分支里 (此处建表 vs 迁移的执行顺序不能倒)
       `CREATE TABLE IF NOT EXISTS accounts (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
          name TEXT NOT NULL DEFAULT 'Default',

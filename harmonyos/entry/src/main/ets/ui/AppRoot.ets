@@ -18,10 +18,26 @@ export struct AppRoot {
   @State private accountName: string = ''
   @State private syncing: boolean = false
   @State private syncMsg: string = ''
+  /** Index 的数据刷新世代 (配额拉取/定时同步完成后 +1): 转发给子页面触发重载。 */
+  @Prop @Watch('onExternalRefresh') externalRefresh: number = 0
+  /**
+   * 外观版本号 (AppStorage 广播, 由 AppPrefs 在主题/语言/货币变更时 +1)。
+   *
+   * 主题色板与文案是 build 期由 Theme/I18n 现算的静态值, ArkUI 增量更新不会因
+   * AppStorage 变化重建这些元素 —— 这里用奇偶分支强制重建整棵外壳子树, 让顶栏与
+   * 已渲染页面立即采用新主题/新文案 (此前必须切一次 tab 才统一)。
+   */
+  @StorageLink('gg_appearance') appearance: number = 0
   /** 登出回调: 由 Index 传入, 用于把根页面切回欢迎/登录门。 */
   onLogout: () => void = () => {}
 
   aboutToAppear(): void {
+    this.refreshAccount()
+  }
+
+  /** 外部刷新世代变化 (配额到位/定时同步完成): 重载当前页数据。 */
+  onExternalRefresh(): void {
+    this.refreshToken++
     this.refreshAccount()
   }
 
@@ -54,6 +70,16 @@ export struct AppRoot {
   }
 
   build() {
+    // 两个分支内容相同: 外观版本号奇偶切换 = 整棵外壳子树重建 (见 appearance 注释)
+    if (this.appearance % 2 === 0) {
+      this.shell()
+    } else {
+      this.shell()
+    }
+  }
+
+  @Builder
+  shell() {
     Row() {
       if (this.wide) {
         this.sideNav()
