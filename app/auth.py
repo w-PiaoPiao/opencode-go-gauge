@@ -582,6 +582,11 @@ def login_entry_lost(win, provider: str) -> bool:
     该域的其它路径 (官网首页/控制台), 说明服务端按残留会话把我们重定向走了,
     用户根本没有登录的机会. opencode 的 OAuth 流程会合法地跨多域多路径,
     不做判定 (返回 False).
+
+    豁免: 带 ``code=`` 查询参数的 provider 域 URL 是 GitHub 等 OAuth 的成功
+    回调 —— 服务端正要据此种会话, 此刻判偏离会把刚建立的会话清掉, 直接
+    打断登录. (失败回调带 error= 不带 code=, 不豁免 —— 清会话拉回登录页
+    正是期望行为.)
     """
     if provider != PROVIDER_COMMANDCODE:
         return False
@@ -595,7 +600,12 @@ def login_entry_lost(win, provider: str) -> bool:
     host = provider_host(provider)
     if not url.startswith("https://" + host):
         return False
-    return not urlparse(url).path.startswith("/signin")
+    parsed = urlparse(url)
+    if parsed.path.startswith("/signin"):
+        return False
+    if any(key == "code" for key, _ in parse_qsl(parsed.query)):
+        return False
+    return True
 
 
 def reset_login_session(win, provider: str) -> bool:
@@ -1415,7 +1425,11 @@ class LoginWatcher:
                 if self._capture_session(url, targets):
                     return
                 self._check_entry_drift()
-            elif self.provider == PROVIDER_OPENCODE and _GITHUB_HOST_RE.match(url):
+            elif _GITHUB_HOST_RE.match(url):
+                # 两个 provider 的登录页都有 "Continue with GitHub": GitHub 侧
+                # 2FA 后丢 return_to 卡死在无关页面的问题与续跑手段完全一致
+                # (授权 URL 重构只依赖 github.com 通用形态, redirect_uri 原样
+                # 保留, 授权后自然回各自 provider 域), 不区分 provider
                 self._watch_github(url)
             self._stop.wait(COOKIE_POLL_SEC)
         if not self.done and self.on_cancelled:
@@ -1529,7 +1543,11 @@ class LoginWatcher:
         self._stuck_since = None
         _log(f"[login] github signed-in but OAuth stalled -> resume #{self._reloads}: {target[:180]}")
         try:
-            self.win.load_url(target)
+            if sys.platform == "win32":
+                # pywebview 的 load_url 是无超时 Control.Invoke: 监听线程走有界导航
+                _win_load_url(self.win, target, COOKIE_PURGE_TIMEOUT)
+            else:
+                self.win.load_url(target)
         except Exception as exc:  # noqa: BLE001 窗口可能正忙, 下轮再试
             _log(f"[login] resume load_url ERROR: {exc}")
 
