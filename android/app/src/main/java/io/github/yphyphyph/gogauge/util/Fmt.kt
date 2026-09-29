@@ -1,10 +1,12 @@
 package io.github.yphyphyph.gogauge.util
 
 import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Formatting helpers — 1:1 ports of app.js (desktop frontend).
@@ -12,15 +14,19 @@ import java.time.format.DateTimeFormatter
  */
 object Fmt {
 
-    private val intFmt = DecimalFormat("#,##0")
+    // 显式 en-US: 默认 locale 在小数点用逗号的地区 (fr/de/ru 等) 会把金额与 token
+    // 简写渲染成 "¥1,50" / "1,23M", 与桌面端 en-US 口径不一致, 定宽数字列也会错位.
+    private val intFmt = DecimalFormat("#,##0").apply {
+        decimalFormatSymbols = DecimalFormatSymbols(Locale.US)
+    }
 
     /** 1.2B / 3.4M / 5.6k / 123 — port of fmtTokens. */
     fun tokens(n: Number): String {
         val v = n.toDouble()
         return when {
-            v >= 1e9 -> String.format("%.2fB", v / 1e9)
-            v >= 1e6 -> String.format("%.2fM", v / 1e6)
-            v >= 1e3 -> String.format("%.1fk", v / 1e3)
+            v >= 1e9 -> String.format(Locale.US, "%.2fB", v / 1e9)
+            v >= 1e6 -> String.format(Locale.US, "%.2fM", v / 1e6)
+            v >= 1e3 -> String.format(Locale.US, "%.1fk", v / 1e3)
             else -> java.lang.Long.toString(Math.round(v))
         }
     }
@@ -33,10 +39,10 @@ object Fmt {
         val v = usd
         if (currency == "CNY") {
             val c = v * usdCny
-            return "¥" + if (c >= 1) String.format("%.2f", c) else String.format("%.4f", c)
+            return "¥" + if (c >= 1) String.format(Locale.US, "%.2f", c) else String.format(Locale.US, "%.4f", c)
         }
-        if (v >= 1) return "$" + String.format("%.2f", v)
-        if (v > 0) return "$" + String.format("%.4f", v)
+        if (v >= 1) return "$" + String.format(Locale.US, "%.2f", v)
+        if (v > 0) return "$" + String.format(Locale.US, "%.4f", v)
         return "$0"
     }
 
@@ -59,7 +65,7 @@ object Fmt {
         if (iso.isNullOrBlank()) return "—"
         return try {
             val dt = ZonedDateTime.parse(iso).withZoneSameInstant(ZoneId.systemDefault())
-            dt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+            dt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.US))
         } catch (e: Exception) {
             "—"
         }
@@ -70,7 +76,7 @@ object Fmt {
         if (iso.isNullOrBlank()) return "—"
         return try {
             val dt = ZonedDateTime.parse(iso).withZoneSameInstant(ZoneId.systemDefault())
-            dt.format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+            dt.format(DateTimeFormatter.ofPattern("MM-dd HH:mm", Locale.US))
         } catch (e: Exception) {
             "—"
         }

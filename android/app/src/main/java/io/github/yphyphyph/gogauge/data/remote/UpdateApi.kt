@@ -1,5 +1,6 @@
 package io.github.yphyphyph.gogauge.data.remote
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -130,6 +131,22 @@ class UpdateApi(
     private fun parseAtom(text: String): Triple<String, String, String> {
         val factory = DocumentBuilderFactory.newInstance()
         factory.isNamespaceAware = true
+        // XXE / billion-laughs 防护: XML 来自 releases.atom, 在代理/MITM 或上游被污染时,
+        // 实体展开能在解析 2MiB 响应时耗尽内存 → OOM 崩溃. 个别解析器不支持这些 feature,
+        // 失败时降级为原行为 (不影响正常解析).
+        runCatching {
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }
+        runCatching {
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+        }
+        runCatching {
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+        }
+        // 用字符串形式的属性名: Android 的 javax.xml.XMLConstants 不含
+        // ACCESS_EXTERNAL_DTD / ACCESS_EXTERNAL_SCHEMA 常量 (JAXP 1.5 才引入)
+        runCatching { factory.setAttribute("http://javax.xml.XMLConstants/property/accessExternalDTD", "") }
+        runCatching { factory.setAttribute("http://javax.xml.XMLConstants/property/accessExternalSchema", "") }
         val doc = factory.newDocumentBuilder().parse(ByteArrayInputStream(text.toByteArray()))
         val entries = doc.getElementsByTagNameNS(ATOM_NS, "entry")
         if (entries.length == 0) {
@@ -181,6 +198,8 @@ class UpdateApi(
                 notes = (rel.body ?: "").trim().take(600)
                 break
             }
+        } catch (e: CancellationException) {
+            throw e // 协程取消必须穿透: 否则取消后仍会继续跑第二条网络路径并当成真实失败上报
         } catch (e: Exception) {
             // 首次失败仅记录, 交由 Atom 兜底 (desktop parity)
             errors.add(e.message ?: e.toString())
@@ -192,6 +211,8 @@ class UpdateApi(
                 tag = atom.first
                 releaseUrl = atom.second
                 notes = atom.third.take(600)
+            } catch (e: CancellationException) {
+                throw e // 同上: 取消不是"检查更新失败"
             } catch (e: Exception) {
                 errors.add(e.message ?: e.toString())
             }
