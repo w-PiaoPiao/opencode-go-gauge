@@ -89,6 +89,9 @@ BOOT_SETTLE_SEC = 1.2
 COOKIE_POLL_SEC = 1.0
 # 清残留会话的等待上限: 正常在毫秒级返回, 超时只说明主线程被占, 不阻塞登录
 COOKIE_PURGE_TIMEOUT = 5.0
+# 登录入口偏离自愈 (watcher 持续判定) 的限流: 相邻 reset 间隔与总次数上限
+_ENTRY_RESET_INTERVAL_SEC = 10.0
+_ENTRY_RESET_MAX = 6
 # 读取残留会话基线的上限: 窗口未就绪时 pywebview 的 get_cookies 会一直挂,
 # 超时即放弃采集 (退回数据库旧凭证指纹比对)
 COOKIE_READ_TIMEOUT = 2.0
@@ -277,6 +280,15 @@ def _normalize_authorize_target(target: str) -> Optional[str]:
 
 def _github_logged_user(win) -> str:
     """读取 GitHub 页面的登录用户名 (meta user-login); 未登录/读取失败返回 ''."""
+    if sys.platform == "win32":
+        # pywebview 的 evaluate_js 用无超时信号量, 页面加载中调用会永久挂起
+        # 监听线程 —— 走自带超时的 ExecuteScriptAsync 封装
+        result = _win_run_js(
+            win,
+            "(document.querySelector('meta[name=user-login]')||{}).content||''",
+            COOKIE_READ_TIMEOUT,
+        )
+        return str(result or "").strip()
     try:
         result = win.evaluate_js(
             "(document.querySelector('meta[name=user-login]')||{}).content||''"
@@ -337,6 +349,31 @@ def _win_webview_pair(win, allow_fallback: bool = False):
         if control is not None:
             return core, control
     return None, None
+
+
+def _win_load_url(win, url: str, timeout: float = COOKIE_PURGE_TIMEOUT) -> bool:
+    """Windows: 带超时的页面导航 (pywebview 的 load_url 是无超时 Control.Invoke).
+
+    监听/自愈线程用它导航 —— 无超时版一旦 UI 线程被占住 (模态框/同步加载)
+    会把调用线程永久挂起, 登录监听随之卡死.
+    """
+    core, control = _win_webview_pair(win)
+    if core is None or control is None:
+        return False
+    done: dict[str, object] = {}
+
+    def navigate() -> None:
+        try:
+            core.Navigate(url)
+            done["ok"] = True
+        except Exception as exc:  # noqa: BLE001 WebView2 未就绪/已销毁
+            done["error"] = repr(exc)
+
+    if not _win_invoke_bounded(control, navigate, timeout):
+        return False
+    if done.get("error"):
+        _log(f"[login] navigate ERROR: {done['error']}")
+    return done.get("ok") is True
 
 
 def _win_ui_delegate(fn):
@@ -566,14 +603,28 @@ def reset_login_session(win, provider: str) -> bool:
 
     返回是否做过干预. 调用方负责确认"登录尚未成功"再调用 —— 否则会把刚建立
     的会话清掉.
+
+    Windows 的关键顺序: 先把窗口导航到 about:blank **停掉旧页面的 JS**, 再清
+    cookie —— 复用窗口里上一个会话的页面 (官网/控制台) 还在运行, 其定时请求
+    会拿到服务端续发的 Set-Cookie, "清了又出现"就是这么来的; 直接清 cookie
+    时它与旧页面 JS 竞速, 真机上常输. about:blank 提交后旧页面即终止, 清理
+    结果才稳定.
     """
     if not login_entry_lost(win, provider):
         return False
     host = provider_host(provider)
     _log(f"[login] fell off the sign-in entry on {host} -> reset session and retry")
-    clear_provider_cookies(provider, win)
     if sys.platform == "win32":
+        # 1) 驶离被带走的页面 (终止其 JS), 2) 清 cookie, 3) 清页面存储,
+        # 4) 有界导航回登录入口 —— 每步都带超时, 供监听线程安全调用
+        _win_load_url(win, "about:blank", COOKIE_PURGE_TIMEOUT)
+        clear_provider_cookies(provider, win)
         _win_clear_page_storage(win, COOKIE_PURGE_TIMEOUT)
+        if not _win_load_url(win, build_login_url(provider), COOKIE_PURGE_TIMEOUT):
+            _log("[login] reload sign-in entry failed (navigate unavailable)")
+            return True
+        return True
+    clear_provider_cookies(provider, win)
     try:
         win.load_url(build_login_url(provider))
     except Exception as exc:  # noqa: BLE001 窗口可能已被关闭
@@ -1278,6 +1329,9 @@ class LoginWatcher:
         self._reloads = 0  # 已自动续跑次数
         self._github_cls: Optional[str] = None  # 上次记录的 GitHub 页面分类 (去重日志)
         self._last_nav = ""
+        # 登录入口偏离自愈状态 (commandcode 单页入口)
+        self._entry_resets = 0
+        self._last_entry_reset: Optional[float] = None  # None = 还没 reset 过
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -1360,11 +1414,38 @@ class LoginWatcher:
             if url.startswith("https://" + target_host):
                 if self._capture_session(url, targets):
                     return
+                self._check_entry_drift()
             elif self.provider == PROVIDER_OPENCODE and _GITHUB_HOST_RE.match(url):
                 self._watch_github(url)
             self._stop.wait(COOKIE_POLL_SEC)
         if not self.done and self.on_cancelled:
             self.on_cancelled()
+
+    def _check_entry_drift(self) -> None:
+        """登录窗口被残留会话带离登录入口时, 随轮询持续拉回 (commandcode).
+
+        _arm_login_window 的自愈只在页面加载完成时检查一两次, 覆盖不到
+        "客户端路由慢跳" —— 登录页加载完时还在 /signin, 之后页面 JS 才检测
+        到残留会话并跳去官网, 此后没有任何东西把窗口拉回来, 监听器只能在
+        原地永远等新凭证 (真机表现为"打开官网后卡住"). 这里每轮轮询判定,
+        偏离即重置会话并拉回; 限流防与 arm 侧自愈 / 连续偏离打环.
+        """
+        if self.done:
+            return
+        if not login_entry_lost(self.win, self.provider):
+            return
+        now = time.monotonic()
+        if (
+            self._last_entry_reset is not None
+            and now - self._last_entry_reset < _ENTRY_RESET_INTERVAL_SEC
+        ):
+            return  # 限流窗口内: 刚 reset 过, 等导航落地
+        if self._entry_resets >= _ENTRY_RESET_MAX:
+            return  # 反复被带走说明清不干净, 停止拉回避免无限循环
+        self._entry_resets += 1
+        self._last_entry_reset = now
+        _log(f"[login] entry drift detected -> reset #{self._entry_resets}")
+        reset_login_session(self.win, self.provider)
 
     def _capture_session(self, url: str, targets: tuple[str, ...]) -> bool:
         """窗口已在 provider 域: 读 cookie 并尝试捕获本次登录的新会话.
