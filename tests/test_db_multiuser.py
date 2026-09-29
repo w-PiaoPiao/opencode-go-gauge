@@ -286,6 +286,16 @@ def test_settings_roundtrip_preserves_extras(tmp_db):
     assert db.get_settings()["chart_animation"] is True
 
 
+def test_settings_window_days_all(tmp_db):
+    # 回归: 前端选 "全部" 发 window_days=null, 外层 "None=未提供" 守卫曾把它拦下,
+    # 导致范围永远停在旧值 (UI 上按钮不移动)
+    assert db.save_settings({"window_days": 90})["window_days"] == 90
+    assert db.save_settings({"window_days": None})["window_days"] is None
+    assert db.get_settings()["window_days"] is None
+    # 数字范围与越界钳制不受影响
+    assert db.save_settings({"window_days": 99999})["window_days"] == 3650
+
+
 # ---------------------------------------------------------------------------
 # 「本月」= 当前月度重置周期 (最近激活的 $10 付费期间) 筛选
 # ---------------------------------------------------------------------------
