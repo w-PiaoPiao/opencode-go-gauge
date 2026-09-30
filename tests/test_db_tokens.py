@@ -78,6 +78,30 @@ def test_dedup_matches_legacy_row_after_backfill(tmp_db):
     assert aid2 == aid
 
 
+def test_dedup_repairs_token_wiped_by_migration(tmp_db):
+    """指纹命中但凭证已被迁移清空时, 同 token 重登必须把凭证补写回去.
+
+    回归: 迁移 4/7 只置空 token 而留着 token_fp, add_account 靠
+    (provider, token_fp) 去重并提前返回, 凭证于是永远写不回库 —— 接口返回成功
+    (前端弹"已切换账号"), 但 count_logged_in_accounts() 恒为 0, /api/state 的
+    logged_in 一直 false, 欢迎页的登录轮询不触发, 界面永久卡在欢迎页.
+    """
+    aid = db.add_account("tok-cc", "", switch=True, provider=db.PROVIDER_COMMANDCODE)
+    # 迁移现场: 只清 token 一列, 指纹留下
+    db.get_db().execute("UPDATE accounts SET token = '' WHERE id = ?", (aid,))
+    db.get_db().commit()
+    assert db.count_logged_in_accounts() == 0
+
+    before = db.count_accounts()  # 新库自带播种的 Default 行, 基数不是 0
+    aid2 = db.add_account("tok-cc", "", switch=True, provider=db.PROVIDER_COMMANDCODE)
+    assert aid2 == aid           # 仍命中同一行, 不新建同名账号
+    assert db.count_accounts() == before
+    assert db.count_logged_in_accounts() == 1
+
+    db.set_active_account(aid)
+    assert db.get_token() == "tok-cc"
+
+
 def test_get_token_decodes(tmp_db):
     aid = db.add_account("tok-a")
     db.set_active_account(aid)
@@ -167,6 +191,50 @@ def test_legacy_dpapi_v1_token_still_purged(tmp_db, monkeypatch):
     row = db.get_db().execute(
         "SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
     assert row["token"] == ""
+
+
+def test_dedup_rewrites_undecryptable_token(tmp_db, monkeypatch):
+    """指纹命中但密文解不回来时 (换 Windows 用户 / DPAPI 凭据损坏) 也要重写凭证.
+
+    注意 count_logged_in_accounts 只看 token 列非空, 这种行会被算作"已登录":
+    界面不显示欢迎页, 但配额/同步全拉不到 —— 靠同 token 重登自愈.
+    """
+    state = {"broken": False, "protect_calls": 0}
+
+    def fake_protect(data: bytes) -> bytes:
+        # 每次加密产出不同密文, 使"凭证被重写"可观测 (真 DPAPI 也有随机盐)
+        state["protect_calls"] += 1
+        return b"blob%d-" % state["protect_calls"] + data
+
+    def fake_unprotect(blob: bytes):
+        if state["broken"]:
+            return None
+        return blob[blob.index(b"-") + 1:]
+
+    monkeypatch.setattr(db, "_frozen", lambda: True)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(db, "_dpapi_protect", fake_protect)
+    monkeypatch.setattr(db, "_dpapi_unprotect", fake_unprotect)
+
+    def read_back(aid: int) -> str:
+        row = db.get_db().execute(
+            "SELECT token FROM accounts WHERE id = ?", (aid,)).fetchone()
+        return db._storage_decode(aid, row["token"] or "")
+
+    aid = db.add_account("tok-secret", switch=True)
+    assert read_back(aid) == "tok-secret"
+
+    state["broken"] = True
+    assert read_back(aid) == ""                  # 密文再也解不回来
+    assert db.count_logged_in_accounts() == 1    # 但仍被计为已登录
+
+    calls_before = state["protect_calls"]
+    aid2 = db.add_account("tok-secret", "", switch=True)
+    assert aid2 == aid
+    assert state["protect_calls"] > calls_before  # 凭证被重新加密写回
+
+    state["broken"] = False                      # 环境恢复后按新密文可解
+    assert read_back(aid) == "tok-secret"
 
 
 # ---------------------------------------------------------------------------
