@@ -57,9 +57,10 @@
 - **账户总览面板**：设置中可开关，聚合展示各账户配额三窗口、今日用量与跨账号合计 KPI、7 日费用趋势对比
 - **内置 WebView 登录**：独立登录窗口打开 opencode.ai 控制台登录页，自动回填会话凭证与工作区，无需手动复制
 - **自动同步**：增量同步（1/5/15/30 分钟可选）+ 同步范围设置（30/60/90/180 天 / 所有）
+- **版本更新**：设置页检查 GitHub Releases；有新版可应用内下载（Windows 取 `.exe`，macOS 取 `.zip` 并定位到 Finder），失败时兜底打开发布页
 - **双主题**：亮色 / 深色一键切换；中英双语界面
 - **系统托盘 / 菜单栏**：Windows 关闭窗口最小化到托盘，macOS 关闭窗口最小化到菜单栏；应用图标使用品牌 Logo
-- **macOS 增强**：菜单栏今日用量快捷面板（30s 刷新）、半自动更新、开机自启 —— 详见 [docs/macos.md](docs/macos.md)
+- **macOS 增强**：菜单栏今日用量快捷面板（30s 刷新）、开机自启（LaunchAgent）—— 详见 [docs/macos.md](docs/macos.md)
 - **本地优先**：所有数据保存在本机 SQLite，登录凭据仅用于同步官方接口
 
 ## 🖥 快速开始
@@ -72,7 +73,7 @@
 2. 完成登录后自动进入面板并同步用量数据
 3. 数据保存在 exe 同目录 `data\` 文件夹
 
-> 需要 Windows 10/11（自带 WebView2 Runtime）。关闭窗口即退出应用。
+> 需要 Windows 10/11（自带 WebView2 Runtime）。关闭窗口最小化到系统托盘，退出请用托盘菜单「退出」。
 
 > ⚠️ **从 v2.1.0 及更早版本升级**：opencode.ai 已改用新的控制台接口，登录态随之失效。旧凭证会被自动清除，应用会回到欢迎页，重新登录一次即可（本地历史数据保留）。
 
@@ -104,7 +105,7 @@ python entry.py
 build.bat
 ```
 
-输出 `dist\GoGauge.exe`（约 38 MB，--noconsole 无黑窗，含 logo 图标）。
+输出 `dist\GoGauge.exe`（约 17 MB，--noconsole 无黑窗，含 logo 图标）。
 
 **macOS**
 
@@ -119,15 +120,16 @@ build.bat
 
 ## 📊 数据说明
 
-- **数据来源**：OpenCode Go = opencode.ai 控制台接口（`/console/api`）—— `go/status` 配额 + `request-logs` 请求明细 + `service-accounts` Key 名称；Command Code GOAT = api.commandcode.ai internal API（credits / usage）
+- **数据来源**：OpenCode Go = opencode.ai 控制台接口（`/console/api`）—— `go/status` 配额 + `request-logs` 请求明细 + `service-accounts` Key 名称；Command Code GOAT = api.commandcode.ai internal API —— `billing/credits` / `billing/subscriptions` 配额 + `usage` / `usage/summary` 明细 + `usage/charts` 整周期聚合
 - **总 TOKEN** = 输入（含缓存命中）+ 输出 + 推理
 - **缓存命中率** = 命中 /（命中 + 未命中）
-- **费用**：USD 原始值，人民币按 open.er-api.com 实时汇率换算（24h 缓存）
-- **明细范围**：官方接口仅保留最近 30 天请求明细（配额窗口不受影响）
+- **费用**：USD 原始值，人民币按 open.er-api.com 实时汇率换算（6 小时缓存，过期后后台刷新）
+- **明细范围**：OpenCode 官方接口仅保留最近 30 天请求明细（配额窗口不受影响）；Command Code 的 `usage` 接口仅保留最近 24 小时 / 100 条，更早的数据由 `usage/charts` 周期聚合补齐
 
 ## 🔒 隐私
 
-- 登录 cookie 仅保存在本机，绝不写入日志、绝不上传
+- 登录 cookie / token 仅保存在本机（Windows 打包版经 DPAPI 加密、macOS 打包版存入系统钥匙串），绝不上传
+- 登录诊断日志（系统临时目录 `gousage_login.log`）只记录页面分类与截断后的导航 URL，不含 cookie 值；主流程日志（数据目录 `gousage_main.log`）仅记录启动/同步节点
 - 用量数据全部本地存储，应用不含任何遥测
 
 ## 🛠 技术栈

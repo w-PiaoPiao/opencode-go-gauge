@@ -57,9 +57,10 @@
 - **Accounts overview panel**: toggle in settings, aggregates each account's quota windows and today's usage with cross-account summary KPIs and a 7-day cost trend comparison
 - **Built-in WebView login**: independent login window opens the opencode.ai console sign-in page, auto-captures session & workspace — no manual copy-paste
 - **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
+- **Version updates**: the settings page checks GitHub Releases; a new version can be downloaded in-app (`.exe` on Windows, `.zip` on macOS, revealed in Finder), falling back to the release page
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)
 - **System tray / menu bar**: closing the window minimizes to the system tray (Windows) or the menu bar (macOS); brand logo icons
-- **macOS extras**: menu-bar quick panel for today's usage (30s refresh), semi-automatic updates, launch-at-login — see [docs/macos.md](docs/macos.md)
+- **macOS extras**: menu-bar quick panel for today's usage (30s refresh), launch-at-login (LaunchAgent) — see [docs/macos.md](docs/macos.md)
 - **Local-first**: all data stays in local SQLite; credentials are only used to sync official APIs
 
 ## 🖥 Quick Start
@@ -72,7 +73,7 @@ Download `GoGauge-vX.X.X-windows.exe` (single file, no install) from [Releases](
 2. After login, the dashboard loads and usage data syncs automatically
 3. Data is stored in the `data\` folder next to the exe
 
-> Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window quits the app.
+> Requires Windows 10/11 (WebView2 Runtime built-in). Closing the window minimizes to the system tray; use the tray menu's "Quit" to exit.
 
 > ⚠️ **Upgrading from v2.1.0 or earlier**: opencode.ai switched to its new console API, so the stored session is void. The stale credential is cleared automatically, the app returns to the welcome page — just log in once (local history is kept).
 
@@ -104,7 +105,7 @@ python entry.py
 build.bat
 ```
 
-Output: `dist\GoGauge.exe` (~38 MB, --noconsole, logo icon included).
+Output: `dist\GoGauge.exe` (~17 MB, --noconsole, logo icon included).
 
 **macOS**
 
@@ -119,15 +120,16 @@ Output: `dist/GoGauge.app` (no console window; `.icns` icon and menu-bar tray su
 
 ## 📊 Data Notes
 
-- **Source**: OpenCode Go = opencode.ai console API (`/console/api`) — `go/status` quota + `request-logs` usage detail + `service-accounts` key names; Command Code GOAT = api.commandcode.ai internal API (credits / usage)
+- **Source**: OpenCode Go = opencode.ai console API (`/console/api`) — `go/status` quota + `request-logs` usage detail + `service-accounts` key names; Command Code GOAT = api.commandcode.ai internal API — `billing/credits` / `billing/subscriptions` quota + `usage` / `usage/summary` detail + `usage/charts` per-cycle aggregation
 - **Total tokens** = input (incl. cache hits) + output + reasoning
 - **Cache hit rate** = hits / (hits + misses)
-- **Cost**: raw USD; CNY converted via open.er-api.com live FX rate (24h cache)
-- **Detail range**: the official API only retains the last 30 days of request detail (quota windows are unaffected)
+- **Cost**: raw USD; CNY converted via open.er-api.com live FX rate (6-hour cache, refreshed in the background after expiry)
+- **Detail range**: the OpenCode official API only retains the last 30 days of request detail (quota windows are unaffected); Command Code's `usage` API keeps only the last 24 hours / 100 entries, with older data filled in from the `usage/charts` per-cycle aggregation
 
 ## 🔒 Privacy
 
-- Login cookie stays on your machine only — never logged, never uploaded
+- Login cookie / token stays on your machine only (DPAPI-encrypted on packaged Windows builds, stored in the system keychain on packaged macOS builds) — never uploaded
+- Login diagnostics (system temp `gousage_login.log`) record only page classes and truncated navigation URLs, never cookie values; the main log (data-dir `gousage_main.log`) records startup/sync milestones only
 - Usage data is stored entirely locally; the app contains no telemetry
 
 ## 🛠 Tech Stack

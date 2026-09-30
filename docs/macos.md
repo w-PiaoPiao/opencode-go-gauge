@@ -23,7 +23,7 @@ macOS 平台的功能差异、构建、分发与常见问题。英文摘要见�
 
 - 依赖锁定：优先使用 `requirements-macos.lock.txt`
 - 产物为 **Apple Silicon (arm64)** 原生；Intel Mac 请使用 Releases 中带 `-x86_64` 后缀的包
-- 自动构建：推送 `v*-macos` tag 触发 GitHub Actions 双架构矩阵（macos-14 arm64 / macos-13 x86_64），构建产物自动附到同名 release
+- 自动构建：推送 `v*-macos` tag 触发 GitHub Actions 双架构矩阵（macos-14 arm64 / macos-15-intel x86_64），构建产物自动附到同名 release
 
 ## 📦 分发与更新
 
