@@ -914,11 +914,19 @@ def add_account(
         provider = PROVIDER_OPENCODE
     fp = _token_fp(token)
     existing = conn.execute(
-        "SELECT id FROM accounts WHERE provider = ? AND token_fp = ? ORDER BY id LIMIT 1",
+        "SELECT id, token FROM accounts WHERE provider = ? AND token_fp = ? ORDER BY id LIMIT 1",
         (provider, fp),
     ).fetchone() if token else None
     if existing is not None:
         aid = int(existing["id"])
+        # 迁移 4/7 只置空 token 而留着 token_fp, 于是"指纹还在、凭证已空"的行会命中
+        # 去重. 若在此直接返回, 用户拿同一个 token 永远登不回来: 接口返回成功,
+        # logged_in 却恒为 false, 界面卡在欢迎页. 凭证读不回原值就补写.
+        if _storage_decode(aid, existing["token"] or "") != token:
+            conn.execute(
+                "UPDATE accounts SET token = ?, token_fp = ?, updated_at = ? WHERE id = ?",
+                (_storage_encode(aid, token), fp, _now_iso(), aid),
+            )
         if hint and provider == PROVIDER_OPENCODE:
             conn.execute(
                 "UPDATE accounts SET workspace_id = ?, updated_at = ? WHERE id = ?",
