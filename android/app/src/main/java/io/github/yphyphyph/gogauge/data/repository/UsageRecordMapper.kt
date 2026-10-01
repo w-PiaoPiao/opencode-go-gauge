@@ -1,7 +1,7 @@
 package io.github.yphyphyph.gogauge.data.repository
 
 import io.github.yphyphyph.gogauge.data.model.UsageRecord
-import java.time.Instant
+import io.github.yphyphyph.gogauge.util.parseIsoInstant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -11,12 +11,15 @@ import java.time.format.DateTimeFormatter
  * 与 SQLite 的 date(created_at, 'localtime') 等价 (同一系统时区), 但落库成实体列,
  * 使日界过滤能走 idx_usage_account_localdate. 解析失败返回 null, 查询侧仍可用
  * COALESCE 回退 (这类行极少, 不影响索引整体收益).
+ *
+ * 解析必须走 [parseIsoInstant]: Instant.parse 在 Android 13 及以下拒绝 "+00:00"
+ * 偏移, 直接用会让所有行 local_date 为 NULL, 日期范围聚合全部归零 (实测 API 33).
  */
 internal fun localDateOf(createdAt: String): String? = try {
-    Instant.parse(createdAt.replace("Z", "+00:00"))
-        .atZone(ZoneId.systemDefault())
-        .toLocalDate()
-        .format(DateTimeFormatter.ISO_LOCAL_DATE)
+    parseIsoInstant(createdAt)
+        ?.atZone(ZoneId.systemDefault())
+        ?.toLocalDate()
+        ?.format(DateTimeFormatter.ISO_LOCAL_DATE)
 } catch (e: Exception) {
     null
 }

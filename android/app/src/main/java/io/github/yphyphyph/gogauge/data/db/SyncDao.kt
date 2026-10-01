@@ -29,13 +29,24 @@ abstract class SyncDao {
 
     // ------------------------------------------------------------------
     // 账号行 (desktop db.py accounts 表访问)
+    //
+    // token 以 Keystore 加密形态落库 (见 TokenCipher): 所有对外方法给出/接收明文,
+    // 加解密在此层完成. SQL 层的 TRIM(token) != '' 判定对密文同样成立 (密文非空)。
     // ------------------------------------------------------------------
 
+    /** 原始行 (token 为存储形态) — 仅本类包装方法使用。 */
     @Query("SELECT * FROM accounts ORDER BY id ASC")
-    abstract suspend fun listAccountRows(): List<AccountEntity>
+    abstract suspend fun listAccountRowsRaw(): List<AccountEntity>
 
     @Query("SELECT * FROM accounts WHERE id = :id")
-    abstract suspend fun accountRowById(id: Int): AccountEntity?
+    abstract suspend fun accountRowByIdRaw(id: Int): AccountEntity?
+
+    /** 账号行 (token 已解密)。 */
+    suspend fun listAccountRows(): List<AccountEntity> =
+        listAccountRowsRaw().map { it.copy(token = TokenCipher.decrypt(it.token)) }
+
+    suspend fun accountRowById(id: Int): AccountEntity? =
+        accountRowByIdRaw(id)?.let { it.copy(token = TokenCipher.decrypt(it.token)) }
 
     @Query("SELECT MIN(id) FROM accounts WHERE TRIM(token) != ''")
     abstract suspend fun minLoggedInId(): Int?
@@ -54,19 +65,32 @@ abstract class SyncDao {
     abstract suspend fun nextAccountId(): Int
 
     @Insert
-    abstract suspend fun insertAccountRow(row: AccountEntity)
+    abstract suspend fun insertAccountRowRaw(row: AccountEntity)
+
+    /** 写入前加密 token; 空串 (未登录占位) 原样落库。 */
+    suspend fun insertAccountRow(row: AccountEntity) =
+        insertAccountRowRaw(row.copy(token = TokenCipher.encrypt(row.token)))
 
     @Query(
         "UPDATE accounts SET token = :token, workspace_id = :workspaceId," +
             " resolved_workspace_id = NULL, provider = :provider, updated_at = :updatedAt WHERE id = :id"
     )
-    abstract suspend fun updateCredential(
+    abstract suspend fun updateCredentialRaw(
         id: Int,
         token: String,
         workspaceId: String,
         provider: String,
         updatedAt: String,
     )
+
+    /** 更新凭证 (token 加密后落库)。 */
+    suspend fun updateCredential(
+        id: Int,
+        token: String,
+        workspaceId: String,
+        provider: String,
+        updatedAt: String,
+    ) = updateCredentialRaw(id, TokenCipher.encrypt(token.trim()), workspaceId, provider, updatedAt)
 
     @Query(
         "UPDATE accounts SET workspace_id = :workspaceId, updated_at = :updatedAt WHERE id = :id"
@@ -136,7 +160,15 @@ abstract class SyncDao {
      * 决策逻辑抽到 [ActiveAccountPolicy] (纯函数, JVM 单测覆盖);
      * 此处负责快照读取与结果回写.
      */
-    @Transaction
+    /**
+     * 当前活跃账号 id; 无任何账号时返回 0.
+     * 决策逻辑抽到 [ActiveAccountPolicy] (纯函数, JVM 单测覆盖);
+     * 此处负责快照读取与结果回写.
+     *
+     * 注意这里**不能**加 @Transaction: 写回走 [persistPayload] (PayloadLock) ——
+     * 事务持写连接后再取 Mutex, 会与 SettingsDao "先取锁再写库" 的路径反向锁序
+     * 互等。快照不原子可接受: resolve 是收敛的, 下次调用会再修正。
+     */
     open suspend fun getActiveAccountId(): Int {
         val rows = listAccountRows()
         val stored = readStoredActiveId()
@@ -188,26 +220,36 @@ abstract class SyncDao {
     /**
      * 添加新账号; 若已有同一 provider 的相同 token 则视为同一用户, 更新工作区提示后返回其 id
      * (desktop db.add_account: 按 (provider, token) 去重; GOAT 账号命名 GOAT N)。
+     *
+     * 账号行写入在事务内, 活跃位回写在事务外经 PayloadLock 完成 (锁序约定见
+     * [getActiveAccountId]); 账号行写入中途失败时的活跃位偏差由下次 resolve 自愈。
      */
-    @Transaction
-    open suspend fun addAccount(
+    suspend fun addAccount(
         token: String,
         workspaceHint: String = "",
         switch: Boolean = true,
         provider: String = PROVIDER_OPENCODE,
     ): Int {
-        val trimmed = token.trim()
-        val hint = workspaceHint.trim()
+        val id = addAccountData(token.trim(), workspaceHint.trim(), provider)
+        if (switch) writeStoredActiveId(id)
+        return id
+    }
+
+    @Transaction
+    open suspend fun addAccountData(
+        token: String,
+        hint: String,
+        provider: String,
+    ): Int {
         val now = Instant.now().toString()
-        if (trimmed.isNotEmpty()) {
+        if (token.isNotEmpty()) {
             val existing = listAccountRows()
-                .firstOrNull { it.provider == provider && it.token.trim() == trimmed }
+                .firstOrNull { it.provider == provider && it.token.trim() == token }
             if (existing != null) {
                 // workspace 提示仅对 opencode 有意义 (desktop parity)
                 if (hint.isNotEmpty() && provider == PROVIDER_OPENCODE) {
                     updateWorkspaceHint(existing.id, hint, now)
                 }
-                if (switch) writeStoredActiveId(existing.id)
                 return existing.id
             }
         }
@@ -217,14 +259,13 @@ abstract class SyncDao {
                 id = newId,
                 name = accountDisplayName(provider, hint, newId),
                 workspaceId = hint.ifEmpty { "Default" },
-                token = trimmed,
+                token = token,
                 provider = provider,
                 createdAt = now,
                 updatedAt = now,
             ),
         )
         ensureStateRow(newId)
-        if (switch) writeStoredActiveId(newId)
         return newId
     }
 
@@ -236,33 +277,58 @@ abstract class SyncDao {
     }
 
     /**
-     * 删除账号及其本地全部数据 (级联), 返回剩余账号数
-     * (desktop db.delete_account: records+state+行一起删; 被删的是活跃位则回退最小 id, 无剩余则清键).
+     * 删除账号及其本地全部数据 (级联), 返回剩余账号数 (desktop db.delete_account:
+     * records+charts+state+行一起删; 被删的是活跃位则回退最小 id, 并清理该账号
+     * 残留的周期/月度重置键)。
+     *
+     * 账号 id 是 MAX(id)+1 分配, 删末位后再加账号会复用 id —— 周期键必须清掉,
+     * 否则新账号「本月」会读到已删账号的计费周期。
+     *
+     * 数据删除在事务内; payload 处理 (活跃位回退 + 周期键清理) 在事务外经
+     * PayloadLock 完成 —— 锁序约定见 [getActiveAccountId]。
      */
+    suspend fun deleteAccount(accountId: Int): Int {
+        val remaining = deleteAccountData(accountId)
+        val nextId = minAnyId()
+        persistPayload { data ->
+            data.remove("period_start:$accountId")
+            data.remove("period_end:$accountId")
+            data.remove("monthly_reset:$accountId")
+            val active = (data["active_account_id"] as? JsonPrimitive)?.content?.toIntOrNull()
+            if (active == accountId) {
+                if (nextId != null) {
+                    data["active_account_id"] = JsonPrimitive(nextId)
+                } else {
+                    data.remove("active_account_id")
+                }
+            }
+        }
+        return remaining
+    }
+
     @Transaction
-    open suspend fun deleteAccount(accountId: Int): Int {
+    open suspend fun deleteAccountData(accountId: Int): Int {
         deleteRecordsForAccount(accountId)
         // charts 聚合也必须清: 否则 chartsReady() 仍非空, 重新添加同 id 账号后
         // 仪表盘会继续用上一个计费周期的陈旧聚合值
         deleteChartsForAccount(accountId)
         deleteSyncStateForAccount(accountId)
         deleteAccountRow(accountId)
-        val remaining = countAccountsRaw()
-        if (readStoredActiveId() == accountId) {
-            val nxt = minAnyId()
-            if (nxt != null) writeStoredActiveId(nxt) else removeStoredActiveId()
-        }
-        return remaining
+        return countAccountsRaw()
     }
 
     /**
      * 退出登录当前活跃账号: 清除其凭证与本地缓存数据 (保留账号行便于重新登录)
      * (desktop db.clear_account).
      */
-    @Transaction
-    open suspend fun clearAccount() {
-        val aid = requireActiveId()
+    suspend fun clearAccount() {
+        val aid = requireActiveId()  // 事务外: 依赖 PayloadLock 写回活跃位
         if (aid == 0) return
+        clearAccountData(aid)
+    }
+
+    @Transaction
+    open suspend fun clearAccountData(aid: Int) {
         val now = Instant.now().toString()
         deleteRecordsForAccount(aid)
         deleteChartsForAccount(aid)  // 同 deleteAccount: 防止登出后残留聚合值
@@ -272,10 +338,14 @@ abstract class SyncDao {
     }
 
     /** 重新登录语义: 更新活跃账号凭证与 provider, 并重置其增量游标 (desktop db.save_token). */
-    @Transaction
-    open suspend fun saveToken(token: String, workspaceId: String, provider: String = PROVIDER_OPENCODE) {
-        val aid = requireActiveId()
+    suspend fun saveToken(token: String, workspaceId: String, provider: String = PROVIDER_OPENCODE) {
+        val aid = requireActiveId()  // 事务外: 依赖 PayloadLock 写回活跃位
         if (aid == 0) return
+        saveTokenData(aid, token, workspaceId, provider)
+    }
+
+    @Transaction
+    open suspend fun saveTokenData(aid: Int, token: String, workspaceId: String, provider: String) {
         updateCredential(aid, token.trim(), workspaceId.trim().ifEmpty { "Default" }, provider, Instant.now().toString())
         ensureStateRow(aid)
         resetCursorForAccount(aid)

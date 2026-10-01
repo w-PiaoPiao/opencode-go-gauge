@@ -19,6 +19,8 @@ android {
         targetSdk = 36
         versionCode = 8
         versionName = "2.2.0"
+        // instrumented 测试 (Keystore 加密往返等, 见 app/src/androidTest)
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // Debug keystore lives in the workspace (~/.android not writable in this env)

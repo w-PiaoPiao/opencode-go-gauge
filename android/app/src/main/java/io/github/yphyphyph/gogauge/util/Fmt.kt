@@ -1,26 +1,27 @@
 package io.github.yphyphyph.gogauge.util
 
 import java.text.DecimalFormat
-import java.time.Instant
+import java.text.DecimalFormatSymbols
 import java.time.ZoneId
-import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Formatting helpers — 1:1 ports of app.js (desktop frontend).
- * Locale-independent numeric formatting (desktop used en-US grouping).
+ * 数字格式固定 en-US (逗号分组/句点小数), 不随系统 Locale 变化 —— 桌面版即用
+ * en-US, 且应用内语言切换不应改变数字形态 (德语系统下 1,20M / ¥1.234,56 属缺陷).
  */
 object Fmt {
 
-    private val intFmt = DecimalFormat("#,##0")
+    private val intFmt = DecimalFormat("#,##0", DecimalFormatSymbols(Locale.US))
 
     /** 1.2B / 3.4M / 5.6k / 123 — port of fmtTokens. */
     fun tokens(n: Number): String {
         val v = n.toDouble()
         return when {
-            v >= 1e9 -> String.format("%.2fB", v / 1e9)
-            v >= 1e6 -> String.format("%.2fM", v / 1e6)
-            v >= 1e3 -> String.format("%.1fk", v / 1e3)
+            v >= 1e9 -> String.format(Locale.US, "%.2fB", v / 1e9)
+            v >= 1e6 -> String.format(Locale.US, "%.2fM", v / 1e6)
+            v >= 1e3 -> String.format(Locale.US, "%.1fk", v / 1e3)
             else -> java.lang.Long.toString(Math.round(v))
         }
     }
@@ -33,10 +34,11 @@ object Fmt {
         val v = usd
         if (currency == "CNY") {
             val c = v * usdCny
-            return "¥" + if (c >= 1) String.format("%.2f", c) else String.format("%.4f", c)
+            return "¥" + if (c >= 1) String.format(Locale.US, "%.2f", c)
+            else String.format(Locale.US, "%.4f", c)
         }
-        if (v >= 1) return "$" + String.format("%.2f", v)
-        if (v > 0) return "$" + String.format("%.4f", v)
+        if (v >= 1) return "$" + String.format(Locale.US, "%.2f", v)
+        if (v > 0) return "$" + String.format(Locale.US, "%.4f", v)
         return "$0"
     }
 
@@ -56,31 +58,24 @@ object Fmt {
 
     /** Full datetime — port of fmtDateTime. */
     fun dateTime(iso: String?): String {
-        if (iso.isNullOrBlank()) return "—"
-        return try {
-            val dt = ZonedDateTime.parse(iso).withZoneSameInstant(ZoneId.systemDefault())
-            dt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-        } catch (e: Exception) {
-            "—"
-        }
+        // parseIsoInstant: 兼容旧版 Android 不认 "+00:00" 偏移的 ISO_INSTANT
+        val instant = parseIsoInstant(iso) ?: return "—"
+        return instant.atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
     }
 
     /** Short datetime MM-dd HH:mm — port of fmtDateTimeShort. */
     fun dateTimeShort(iso: String?): String {
-        if (iso.isNullOrBlank()) return "—"
-        return try {
-            val dt = ZonedDateTime.parse(iso).withZoneSameInstant(ZoneId.systemDefault())
-            dt.format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))
-        } catch (e: Exception) {
-            "—"
-        }
+        val instant = parseIsoInstant(iso) ?: return "—"
+        return instant.atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))
     }
 
     /** Relative time — port of fmtRelative. */
     fun relative(iso: String?, justNow: String, minAgo: String, hrAgo: String, dayAgo: String, never: String): String {
         if (iso.isNullOrBlank()) return never
         return try {
-            val t = Instant.parse(iso).toEpochMilli()
+            val t = parseIsoInstant(iso)?.toEpochMilli() ?: return never
             val diff = (System.currentTimeMillis() - t) / 1000.0
             when {
                 diff < 60 -> justNow

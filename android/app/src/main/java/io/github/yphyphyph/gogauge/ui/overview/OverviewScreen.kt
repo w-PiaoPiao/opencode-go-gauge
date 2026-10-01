@@ -22,6 +22,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
@@ -104,7 +105,23 @@ fun OverviewScreen(vm: MainViewModel = viewModel()) {
                 }
 
                 val data = vm.overview
-                if (data == null) {
+                val ovErr = vm.overviewError
+                if (data == null && ovErr != null) {
+                    // 首次加载失败: 显示原因与重试入口 (此前 overview 恒 null -> 永久转圈)
+                    Box(
+                        Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                ovErr,
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 13.sp,
+                            )
+                            TextButton(onClick = { vm.loadOverview() }) { Text(s.retry) }
+                        }
+                    }
+                } else if (data == null) {
                     Box(
                         Modifier.fillMaxWidth().padding(vertical = 40.dp),
                         contentAlignment = Alignment.Center,

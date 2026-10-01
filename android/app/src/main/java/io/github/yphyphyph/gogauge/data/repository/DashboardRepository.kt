@@ -28,6 +28,7 @@ import io.github.yphyphyph.gogauge.data.db.SyncDao
 import io.github.yphyphyph.gogauge.data.db.UsageChartEntity
 import io.github.yphyphyph.gogauge.data.db.UsageDao
 import io.github.yphyphyph.gogauge.data.model.AppSettings
+import io.github.yphyphyph.gogauge.util.parseIsoInstant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
@@ -108,17 +109,20 @@ class DashboardRepository(
         /** key 名称缓存刷新周期 — desktop KEY_NAMES_REFRESH_SEC. */
         private const val KEY_NAMES_REFRESH_SEC = 24 * 3600.0
 
-        // ---- opencode 同步引擎参数 (desktop server.py 常量 parity) ----
+        // ---- 同步引擎参数 (desktop server.py 常量 parity) ----
         /** /request-logs 单页条数上限. */
         private const val OPENCODE_PAGE_LIMIT = 100
         /** 增量同步最多翻页数 (10*100=1000 条). */
-        private const val OPENCODE_INCREMENTAL_PAGES = 10
+        private const val SYNC_INCREMENTAL_PAGES = 10
         /** 全量同步翻页上限, 防失控 (服务端仅保留 30 天明细). */
-        private const val OPENCODE_MAX_FULL_PAGES = 1000
+        private const val SYNC_MAX_FULL_PAGES = 1000
         /** 单页失败重试次数 (深页偶尔慢/连接被重置). */
         private const val OPENCODE_PAGE_RETRIES = 2
         /** 增量同步回溯 1 小时, 防边界漏记. */
         private const val INCREMENTAL_OVERLAP_MS = 3600_000L
+
+        /** 一次性维护标记: 旧版 local_date=NULL 回填已完成 (见 backfillLegacyLocalDatesIfNeeded)。 */
+        private const val FLAG_LOCAL_DATE_BACKFILL = "maintenance_local_date_backfill_v1"
     }
 
     private class ExchangeCache {
@@ -286,7 +290,9 @@ class DashboardRepository(
                 "quota refreshed acc=$accountId success=" + (target.data?.success) + " err=" + (target.data?.error),
             )
         } finally {
-            quotaRefreshing.remove(accountId)
+            // 与 add/in 同锁: quotaRefreshing 是普通 HashSet, remove 在锁外
+            // 与锁内的读写构成不安全的并发访问
+            quotaMutex.withLock { quotaRefreshing.remove(accountId) }
         }
     }
 
@@ -294,11 +300,14 @@ class DashboardRepository(
      * Quota resetAt (Instant ISO) -> UTC "yyyy-MM-dd HH:mm:ss" —
      * desktop record_monthly_reset 存储格式 parity; 解析失败返回 null (不落库).
      */
-    private fun formatResetUtc(resetAt: String): String? = try {
-        java.time.LocalDateTime.ofInstant(java.time.Instant.parse(resetAt), java.time.ZoneOffset.UTC)
-            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-    } catch (e: Exception) {
-        null
+    private fun formatResetUtc(resetAt: String): String? {
+        val instant = parseIsoInstant(resetAt) ?: return null
+        return try {
+            java.time.LocalDateTime.ofInstant(instant, java.time.ZoneOffset.UTC)
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private suspend fun usdCny(): Double {
@@ -400,12 +409,14 @@ class DashboardRepository(
         val list = coroutineScope {
             loggedIn.map { acc ->
                 val aid = acc.id
-                val slot = synchronized(quotaCache) { quotaCache[aid] }
-                // 与首页同口径: commandcode 且已有聚合数据时走 usage_charts
-                // (明细接口仅 24h/100 条, 直接查明细会让总览显示 0 或偏小;
-                //  desktop db.totals/daily_stats 内部自动路由, 此处手工对齐)
-                val chartsFirst = acc.provider == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null
                 async {
+                    val slot = synchronized(quotaCache) { quotaCache[aid] }
+                    // chartsReady 查询必须在 async 内: 放在外面会让 N 个 commandcode
+                    // 账号各串行执行一次 SELECT 后才启动各自的并发查询
+                    // 与首页同口径: commandcode 且已有聚合数据时走 usage_charts
+                    // (明细接口仅 24h/100 条, 直接查明细会让总览显示 0 或偏小;
+                    //  desktop db.totals/daily_stats 内部自动路由, 此处手工对齐)
+                    val chartsFirst = acc.provider == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null
                     val todayDeferred = async { if (chartsFirst) chartDao.totals("today", aid) else usageDao.totals("today", aid) }
                     val trendDeferred = async { if (chartsFirst) chartDao.todayTrend(aid) else usageDao.todayTrend(aid) }
                     val dailyDeferred = async { if (chartsFirst) chartDao.dailyStats(7, aid) else usageDao.dailyStats(7, aid) }
@@ -432,6 +443,26 @@ class DashboardRepository(
     // Sync engine (server.py v2.0.0 sync_usage parity — 多账号轮询)
     // ------------------------------------------------------------------
 
+    /**
+     * 一次性数据修复: 回填旧版 Android (API ≤33) 日期解析失败导致的 local_date=NULL 行。
+     *
+     * 修代码只让**新数据**正确; 存量行必须回填后才能出现在日期范围统计里 ——
+     * 否则旧设备用户升级后统计仍是空的。幂等 (维护标记只在成功后写入, 失败下次再试)。
+     */
+    suspend fun backfillLegacyLocalDatesIfNeeded() {
+        try {
+            if (db.settingsDao().getMaintenanceFlag(FLAG_LOCAL_DATE_BACKFILL)) return
+            val n = usageDao.backfillNullLocalDates()
+            db.settingsDao().setMaintenanceFlag(FLAG_LOCAL_DATE_BACKFILL)
+            if (n > 0) android.util.Log.i("GoGauge", "local_date backfill: $n rows fixed")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 回填失败不阻塞同步; 标记未写, 下次同步重试
+            android.util.Log.w("GoGauge", "local_date backfill failed", e)
+        }
+    }
+
     suspend fun syncUsage(mode: String): SyncResult {
         // incremental 轮询所有已登录账号; full 仅作用于活跃账号 (desktop parity)
         val targets: List<Pair<Int, String>> = if (mode == "full") {
@@ -445,6 +476,8 @@ class DashboardRepository(
         if (targets.isEmpty()) {
             return SyncResult(ok = false, error = "未登录", retryable = false)
         }
+        // 旧版存量数据的一次性回填 (幂等, 成功后只读一个标记就返回)
+        backfillLegacyLocalDatesIfNeeded()
         // check-then-set 原子化: WorkManager / 前台定时器 / 下拉刷新 / 登录后 fullSync
         // 可能并发进入, 无锁会双同步并互踩进度状态 (desktop 对应有 _sync_lock)
         syncMutex.withLock {
@@ -455,9 +488,13 @@ class DashboardRepository(
             _progress.value = SyncProgress(running = true, mode = mode, phase = "usage")
         }
 
-        val windowDays = db.settingsDao().getSettings().windowDays
-
         try {
+            // 注意: 这段读取必须在 try 内 —— 它位于置位 running 之后, 一旦此处抛异常
+            // 或协程在此挂起点被取消 (Activity 销毁 / WorkManager 停止), finally 之外
+            // 的异常会让 running 永久为 true, 之后所有同步都返回"已有同步任务进行中",
+            // 全局下拉刷新永久转圈, 只能杀进程恢复
+            val windowDays = db.settingsDao().getSettings().windowDays
+
             var totalInserted = 0
             var pages = 0
             val errors = mutableListOf<String>()
@@ -552,13 +589,14 @@ class DashboardRepository(
             // 新接口 /console/api/request-logs 为游标分页 (按时间倒序), 无法并发跳页,
             // 改为顺序翻页: 每页 100 条, 直到游标耗尽 / 触达同步范围边界 / 连续空页
             var totalInserted = 0
-            val maxPages = if (mode == "full") OPENCODE_MAX_FULL_PAGES else OPENCODE_INCREMENTAL_PAGES
+            val maxPages = if (mode == "full") SYNC_MAX_FULL_PAGES else SYNC_INCREMENTAL_PAGES
             var page = 0
             var cursor: String? = null
             var emptyPages = 0
             var failedPages = 0
             var pageRetries = 0
             var windowBoundaryReached = false
+            var exhausted = false // 游标耗尽 (真正到底), 用于区分"页数上限截断"
 
             // 增量同步: 只取最新记录之后的一段时间 (重叠 1 小时防边界漏记),
             // 命中不到旧数据就不会去翻历史页, 既快又少请求
@@ -611,12 +649,10 @@ class DashboardRepository(
                     if (mode == "full" && windowDays != null) {
                         val earliest = records.minOfOrNull { it.createdAt } ?: ""
                         if (earliest.isNotEmpty()) {
-                            try {
-                                val et = Instant.parse(earliest)
+                            val et = parseIsoInstant(earliest)
+                            if (et != null) {
                                 val boundary = Instant.now().minus(windowDays.toLong(), ChronoUnit.DAYS)
                                 if (et.isBefore(boundary)) windowBoundaryReached = true
-                            } catch (e: Exception) {
-                                // ignore unparseable dates (desktop parity)
                             }
                         }
                     }
@@ -633,11 +669,19 @@ class DashboardRepository(
                 }
 
                 cursor = usagePage.nextCursor
-                if (cursor == null) break  // 已到最早一条
+                if (cursor == null) {
+                    exhausted = true
+                    break // 已到最早一条
+                }
                 if (windowBoundaryReached) break
                 // 增量模式: 连续两页没有新数据 -> 停止
                 if (mode == "incremental" && emptyPages >= 2) break
             }
+
+            // 页数上限截断: 循环因 maxPages 退出且游标未耗尽 —— 更早的记录没拉到.
+            // 必须显式标记 partial: 静默写 "ok" 会更新增量游标 (newest_record_at),
+            // 缺口永远不会被增量补上, 只有手动全量才能恢复
+            val truncated = page >= maxPages && !exhausted && !windowBoundaryReached
 
             // prune records outside the window (independent of this run's inserts)
             if (windowDays != null) {
@@ -658,6 +702,9 @@ class DashboardRepository(
                     }
                     keyNamesFetchedAt[accountId] = nowSec
                 } catch (e: Exception) {
+                    // 失败也记时间戳: 否则每轮增量同步都重试一次完整网络请求
+                    // (24h 节流针对"变化极少"的缓存, 失败重试同样不需要分钟级频率)
+                    keyNamesFetchedAt[accountId] = nowSec
                     android.util.Log.w("GoGauge", "fetchKeyNames failed", e)
                 }
             }
@@ -666,6 +713,11 @@ class DashboardRepository(
                 val msg = "完成, 但翻页中断 (数据不完整, 可再次全量同步补全)"
                 syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
                 return SyncResult(ok = true, partial = true, failedPages = failedPages, inserted = totalInserted, pages = page)
+            }
+            if (truncated) {
+                val msg = "完成, 但达到单轮翻页上限 (更早记录未拉全, 可再次全量同步补全)"
+                syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
+                return SyncResult(ok = true, partial = true, inserted = totalInserted, pages = page)
             }
             syncDao.updateSyncStateAndTotals(accountId, "ok", null, totalInserted)
             return SyncResult(ok = true, inserted = totalInserted, pages = page)
@@ -680,16 +732,13 @@ class DashboardRepository(
     /** ISO / "yyyy-MM-dd HH:mm:ss" 时间串 -> 毫秒 (解析失败返回 0; 增量 since 用). */
     private fun isoToMillis(text: String?): Long {
         if (text.isNullOrBlank()) return 0
+        parseIsoInstant(text)?.let { return it.toEpochMilli() }
         return try {
-            Instant.parse(text).toEpochMilli()
-        } catch (e: Exception) {
-            try {
-                java.time.LocalDateTime
-                    .parse(text, java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-                    .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-            } catch (e2: Exception) {
-                0L
-            }
+            java.time.LocalDateTime
+                .parse(text, java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+        } catch (e2: Exception) {
+            0L
         }
     }
 
@@ -714,9 +763,12 @@ class DashboardRepository(
         var emptyBatches = 0
         var failed = false
         var windowBoundaryReached = false
+        var exhausted = false // 游标耗尽/空批, 用于区分"页数上限截断"
 
         try {
-            val maxPages = if (mode == "full") 2000 else 5
+            // 与 opencode 共用上限 (desktop _max_pages_for: 两 provider 一个口径,
+            // 此前 CC 写死 2000/5 与桌面 1000/10 漂移)
+            val maxPages = if (mode == "full") SYNC_MAX_FULL_PAGES else SYNC_INCREMENTAL_PAGES
             while (pages < maxPages) {
                 setProgress { it.copy(page = pages) }
                 val (records, nextCursor) = try {
@@ -737,17 +789,18 @@ class DashboardRepository(
                     failed = true
                     break
                 }
-                if (records.isEmpty()) break // 没有更多数据
+                if (records.isEmpty()) {
+                    exhausted = true
+                    break // 没有更多数据
+                }
 
                 if (mode == "full" && windowDays != null) {
                     val earliest = records.minOfOrNull { it.createdAt } ?: ""
                     if (earliest.isNotEmpty()) {
-                        try {
-                            val et = Instant.parse(earliest)
+                        val et = parseIsoInstant(earliest)
+                        if (et != null) {
                             val boundary = Instant.now().minus(windowDays.toLong(), ChronoUnit.DAYS)
                             if (et.isBefore(boundary)) windowBoundaryReached = true
-                        } catch (e: Exception) {
-                            // ignore unparseable dates (desktop parity)
                         }
                     }
                 }
@@ -763,16 +816,26 @@ class DashboardRepository(
                 setProgress { it.copy(inserted = totalInserted) }
 
                 if (windowBoundaryReached) break
-                if (nextCursor == null) break // 游标翻页: 无 next_cursor 即到底
+                if (nextCursor == null) {
+                    exhausted = true
+                    break // 游标翻页: 无 next_cursor 即到底
+                }
                 // 增量模式: 连续两批 0 新增 (全是旧数据) → 停止
                 if (mode == "incremental" && inserted == 0) {
                     emptyBatches++
-                    if (emptyBatches >= 2) break
+                    if (emptyBatches >= 2) {
+                        exhausted = true // 增量抓到重叠区: 正常终止
+                        break
+                    }
                 } else {
                     emptyBatches = 0
                 }
                 cursor = nextCursor
             }
+
+            // 页数上限截断: 游标未耗尽就停在上限 —— 更早记录未拉全, 静默写 "ok" 会
+            // 前移增量游标使缺口永不再补 (与 opencode 分支同一处理)
+            val truncated = pages >= maxPages && !exhausted && !windowBoundaryReached && !failed
 
             // 按同步范围裁剪窗口外记录
             if (windowDays != null) {
@@ -814,9 +877,12 @@ class DashboardRepository(
                 chartsOk = false
             }
 
-            if (failed || !chartsOk) {
-                val msg = if (failed) "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
-                else "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
+            if (failed || !chartsOk || truncated) {
+                val msg = when {
+                    failed -> "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
+                    truncated -> "完成, 但达到单轮翻页上限 (更早记录未拉全, 可再次全量同步补全)"
+                    else -> "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
+                }
                 syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
                 return SyncResult(ok = true, partial = true, inserted = totalInserted, pages = pages)
             }

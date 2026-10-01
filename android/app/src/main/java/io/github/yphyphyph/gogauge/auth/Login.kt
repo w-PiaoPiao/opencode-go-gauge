@@ -53,7 +53,10 @@ object Login {
         if (cookie.startsWith("cookie:", ignoreCase = true)) cookie = cookie.substring(7).trim()
         val parts = cookie.split(";").map { it.trim() }.filter { it.isNotEmpty() }
         for (name in listOf(SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME)) {
-            parts.firstOrNull { it.startsWith("$name=") }?.let { return it }
+            // 值必须非空: "name=" 的空 cookie 被当作有效凭证落库后, 会以"登录成功"
+            // 假象进入请求全 401 的状态 (desktop _pick_session_cookie 有 value.strip() 校验)
+            parts.firstOrNull { it.startsWith("$name=") && it.substringAfter('=').isNotBlank() }
+                ?.let { return it }
         }
         return null
     }
@@ -65,7 +68,8 @@ object Login {
         if (cookie.startsWith("cookie:", ignoreCase = true)) cookie = cookie.substring(7).trim()
         for (part in cookie.split(";")) {
             val p = part.trim()
-            if (p.startsWith(CC_AUTH_COOKIE_NAME + "=")) return p
+            // 同 extractAuthCookie: 空值 cookie 不是有效凭证
+            if (p.startsWith(CC_AUTH_COOKIE_NAME + "=") && p.substringAfter('=').isNotBlank()) return p
         }
         return null
     }
@@ -202,11 +206,13 @@ object Login {
         }
     }
 
-    /** query 参数解码 (Python parse_qsl 语义: `+` = 空格)。 */
-    private fun urlDecode(s: String): String = URLDecoder.decode(s, "UTF-8")
+    /** query 参数解码 (Python parse_qsl 语义: `+` = 空格); 非法转义保留原值 (unquote 不抛)。 */
+    private fun urlDecode(s: String): String =
+        runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
 
     /** Python unquote 语义: `+` 保持字面, 只解百分号编码 (非法编码保留原值)。 */
-    private fun unquoteAsIs(s: String): String = URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
+    private fun unquoteAsIs(s: String): String =
+        runCatching { URLDecoder.decode(s.replace("+", "%2B"), "UTF-8") }.getOrDefault(s)
 
     /** Python urlencode 语义 (quote_plus: 空格 -> `+`)。 */
     private fun urlEncode(s: String): String = URLEncoder.encode(s, "UTF-8")

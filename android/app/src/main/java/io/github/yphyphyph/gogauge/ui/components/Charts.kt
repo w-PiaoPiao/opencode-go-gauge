@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -218,6 +219,8 @@ fun ModelPieChart(
                 Row(
                     modifier = Modifier
                         .clickable { onToggleModel(m.model) }
+                        // 触控目标 ≥44dp: 原实现 ~25dp, 图例密集时容易点错相邻模型
+                        .defaultMinSize(minHeight = 44.dp)
                         .padding(horizontal = 7.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

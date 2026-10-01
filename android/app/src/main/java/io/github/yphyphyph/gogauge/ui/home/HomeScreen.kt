@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -39,8 +40,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -176,16 +179,26 @@ private fun AccountSwitcher(vm: MainViewModel, s: Strings, onManageUsers: () -> 
     val active = vm.accounts.firstOrNull { it.id == vm.activeAccountId && it.hasToken }
         ?: return
     // 未登录态由欢迎页接管; 单账号时隐藏计数徽标避免噪音
+    // 长账号名 (改名上限 50 字符) 必须限宽省略: 头部 Row 是 SpaceBetween,
+    // 不设上限时胶囊会吃光剩余宽度, 把刷新按钮挤到 0 宽 (不可见不可点)
+    val chipMaxWidth = (LocalConfiguration.current.screenWidthDp * 0.42f).dp
     Surface(
         shape = RoundedCornerShape(999.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-        modifier = Modifier.clickable { showSheet = true },
+        modifier = Modifier.widthIn(max = chipMaxWidth).clickable { showSheet = true },
     ) {
         Row(
             Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(active.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Text(
+                active.name,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
             if (vm.loggedInCount > 1) {
                 Spacer(Modifier.width(4.dp))
                 Text(

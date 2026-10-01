@@ -27,6 +27,3 @@ internal fun readBoundedBody(resp: Response, maxBytes: Int): String =
         }
         buf.toString("UTF-8")
     } ?: ""
-
-/** 与 OpenCodeApi.MAX_BODY_BYTES 同值: 用量/仪表盘类响应的统一上限 (4 MiB). */
-internal const val DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024

@@ -4,6 +4,7 @@ import io.github.yphyphyph.gogauge.data.model.QuotaResult
 import io.github.yphyphyph.gogauge.data.model.QuotaWindow
 import io.github.yphyphyph.gogauge.data.model.UsageChartBucket
 import io.github.yphyphyph.gogauge.data.model.UsageRecord
+import io.github.yphyphyph.gogauge.util.parseIsoInstant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -250,21 +251,32 @@ class CommandCodeApi(private val client: OkHttpClient = OpenCodeApi.defaultClien
                 periodEnd = str(subData, "currentPeriodEnd")
             }
             val remainingCredits = doubleOr(num(credits, "monthlyCredits"))
+            // 月池回退链 (desktop commandcode_api.py parity): 计划额度表 ->
+            // 订阅体 amountTotal/monthlyCredits -> credits.monthlyCredits(剩余额度)。
+            // 此前缺订阅体这一档: planId 不在表内 (新计划/改名计划) 时月池取"剩余额度",
+            // used 恒为 0, 月度窗口永远显示 0%。
+            var monthlyCap = remainingCredits
+            if (active) {
+                val amountTotal = doubleOr(num(subData, "amountTotal"))
+                val subMonthly = doubleOr(num(subData, "monthlyCredits"))
+                monthlyCap = when {
+                    amountTotal > 0 -> amountTotal
+                    subMonthly > 0 -> subMonthly
+                    else -> remainingCredits
+                }
+            }
             val planTotal = plan?.let { PLAN_ALLOWANCE[it.lowercase().replace("_", "-")] }
-                ?: remainingCredits.takeIf { it > 0 }
+                ?: monthlyCap.takeIf { it > 0 }
             if (planTotal != null && planTotal > 0) {
                 val usedVal = (planTotal - remainingCredits).coerceAtLeast(0.0)
                 val usedPct = (usedVal / planTotal * 100.0).coerceIn(0.0, 100.0)
                 var resetAtIso = ""
                 var resetIn = 0
-                if (periodEnd != null) {
-                    try {
-                        val endMs = Instant.parse(periodEnd.replace("Z", "+00:00")).toEpochMilli()
-                        resetAtIso = fmtIso(endMs)
-                        resetIn = ((endMs - nowMs) / 1000).toInt().coerceAtLeast(0)
-                    } catch (e: Exception) {
-                        // 周期非法: 月度窗口无重置时间
-                    }
+                val endMs = parseIsoInstant(periodEnd)
+                if (endMs != null) {
+                    val ms = endMs.toEpochMilli()
+                    resetAtIso = fmtIso(ms)
+                    resetIn = ((ms - nowMs) / 1000).toInt().coerceAtLeast(0)
                 }
                 windows += QuotaWindow(
                     label = "Monthly",
@@ -349,16 +361,13 @@ class CommandCodeApi(private val client: OkHttpClient = OpenCodeApi.defaultClien
             return records to nextCursor
         }
 
-        /** 校验并原样保留 ISO 时间串 (desktop _normalize_created_at parity)。 */
-        fun normalizeCreatedAt(value: String): String? {
-            if (value.isEmpty()) return null
-            return try {
-                Instant.parse(value.replace("Z", "+00:00"))
-                value
-            } catch (e: Exception) {
-                null
-            }
-        }
+        /**
+         * 校验并原样保留 ISO 时间串 (desktop _normalize_created_at parity)。
+         * 解析经 [parseIsoInstant] 宽容处理: Android 13 及以下 Instant.parse 拒绝
+         * "+00:00" 偏移 (见 util/IsoTime.kt), 原先直接 parse 会把明细全部丢弃。
+         */
+        fun normalizeCreatedAt(value: String): String? =
+            if (parseIsoInstant(value) != null) value else null
 
         /** 解析 /internal/usage/charts 响应为聚合行列表 (desktop parse_charts_response parity)。 */
         fun parseCharts(text: String): List<UsageChartBucket> {

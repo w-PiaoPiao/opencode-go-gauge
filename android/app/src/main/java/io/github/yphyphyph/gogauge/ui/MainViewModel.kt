@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Shared ViewModel for all pages — ports the frontend state machine of app.js v2.0.0
@@ -104,6 +106,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var overview by mutableStateOf<AccountsOverviewData?>(null)
         private set
 
+    /** 总览加载失败信息; 首次加载失败时 UI 显示错误+重试, 而不是永久转圈. */
+    var overviewError by mutableStateOf<String?>(null)
+        private set
+
     // ---- home page ----
     var homeRange by mutableStateOf("today")
         private set
@@ -171,6 +177,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var ovRetryJob: Job? = null
     private var overviewVisible = false
 
+    // 请求序号守卫 (只在 Main 线程读写): 切页/刷新/配额到达会并发发起同一份状态
+    // 的加载, 后落地者无条件覆盖会让 UI 显示与口径不符的数据 (Pill 高亮 A 显示 B)
+    private var dashSeq = 0
+    private var recordsSeq = 0
+    private var sessionsSeq = 0
+
+    // settings 写库串行化: 快速连续切换开关时防止在途写库互相覆盖
+    private val settingsMutex = Mutex()
+
     init {
         scope.launch {
             repo.progress.collectLatest { progress = it }
@@ -207,6 +222,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             datadir = getApplication<Application>().filesDir.absolutePath
             if (loggedIn) {
                 showLogin = false
+                // 旧版 Android 存量数据回填 (local_date=NULL; 幂等, 先修再读让历史立即计入统计)
+                repo.backfillLegacyLocalDatesIfNeeded()
                 loadDashboard()
                 // first run with empty db → auto full sync (desktop parity);
                 // read the persisted sync state from the DB, not the still-async dashboard
@@ -330,6 +347,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         sessions = null
         recordsPage = 1
         sessionsPage = 1
+        // 残留筛选/错误必须一起清: 新账号模型集不同, 旧筛选会让列表显示"暂无记录"
+        recordsFilter = null
+        recordsError = null
+        sessionsError = null
         models = emptyList()
         excludedModels = emptySet()  // 新账号模型集不同: 旧的排除项一并清掉 (desktop parity)
     }
@@ -343,12 +364,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *   数据按 (range, exclude) 双元组与目标比对, 任一不符才重载.
      */
     fun loadDashboard(range: String = homeRange, exclude: Set<String> = emptySet()) {
+        val seq = ++dashSeq
         scope.launch {
             try {
                 // Desktop parity: every dashboard load kicks a background quota refresh
                 // (30s cache + re-entry guard inside ensureQuota).
                 repo.ensureQuotaAsync(scope)
-                dashboard = repo.loadDashboard(range, exclude)
+                val data = repo.loadDashboard(range, exclude)
+                if (seq != dashSeq) return@launch // 丢弃过期响应, 防口径串写
+                dashboard = data
                 dashboardVersion++
             } catch (e: CancellationException) {
                 throw e // viewModelScope 取消时正常退出, 不当加载失败记录
@@ -399,6 +423,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun loadOverview(quiet: Boolean = false) {
         val seq = ++ovSeq
+        if (!quiet) overviewError = null
         scope.launch {
             try {
                 val loggedIn = repo.accounts().filter { it.hasToken }
@@ -408,6 +433,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val data = repo.accountsOverview()
                 if (seq != ovSeq) return@launch  // 丢弃过期响应 (快速切换页面时旧请求)
                 overview = data
+                overviewError = null
                 val missing = data.accounts.any { it.quota == null }
                 ovRetryJob?.cancel()
                 if (missing && overviewVisible) {
@@ -420,6 +446,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 android.util.Log.e("GoGauge", "loadOverview failed", e)
+                // 失败必须写状态: 否则 overview 恒为 null, UI 永久停在 spinner,
+                // 唯一的出路是手动点刷新
+                if (seq == ovSeq) overviewError = e.message ?: "加载失败"
             }
         }
     }
@@ -442,6 +471,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // 保持当前页面的口径 (range + 排除集): 无条件用默认值会把统计页刷新
             // 换成首页周期的全量数据
             loadDashboard(currentDashRange(), currentExcluded())
+            reloadPagedData() // 同步落地: 记录/会话列表跟着更新
+        }
+    }
+
+    /**
+     * 记录/会话列表重查 (下拉刷新与同步落地后调用)。
+     *
+     * 只在该页数据已被加载过 (records/sessions != null) 时执行, 避免为从未
+     * 打开过的页面做无谓查询; 用户正停留在记录页时, 下拉刷新转圈结束后列表
+     * 即是最新数据 (此前 refreshNow 只重载 dashboard, 记录页列表纹丝不动).
+     */
+    private fun reloadPagedData() {
+        if (records != null) {
+            recordsPage = 1
+            loadRecords()
+        }
+        if (sessions != null) {
+            sessionsPage = 1
+            loadSessions()
         }
     }
 
@@ -463,10 +511,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 会把数据换成首页周期
         if (repo.progress.value.running) {
             loadDashboard(currentDashRange(), currentExcluded())
+            reloadPagedData()
             return
         }
         // Instant paint from the local DB — do not block the spinner on network calls.
         loadDashboard(currentDashRange(), currentExcluded())
+        reloadPagedData()
         startSync("incremental")
     }
 
@@ -479,10 +529,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------
 
     fun loadRecords() {
+        val seq = ++recordsSeq
         scope.launch {
             try {
                 val page = repo.recordsPage(recordsPage, 10, recordsFilter, null)
+                if (seq != recordsSeq) return@launch // 快速翻页: 丢弃过期响应, 防错页
                 records = page
+                recordsError = null
                 // Model list is only needed for the filter dropdown; cache it after first load.
                 if (models.isEmpty()) models = repo.listModels()
             } catch (e: CancellationException) {
@@ -492,7 +545,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // OpenCodeApiException (纯 DB 路径永远不会抛它) 等于没接住,
                 // 异常会逃出 viewModelScope 直接崩溃
                 android.util.Log.e("GoGauge", "loadRecords failed", e)
-                recordsError = e.message ?: "加载失败"
+                if (seq == recordsSeq) recordsError = e.message ?: "加载失败"
             }
         }
     }
@@ -516,15 +569,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun loadSessions() {
+        val seq = ++sessionsSeq
         scope.launch {
             try {
-                sessions = repo.sessionsPage(sessionsPage, 10, null)
+                val page = repo.sessionsPage(sessionsPage, 10, null)
+                if (seq != sessionsSeq) return@launch // 快速翻页: 丢弃过期响应
+                sessions = page
+                sessionsError = null
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 // 同 loadRecords: 该路径只读 Room, 需接住 SQLiteException
                 android.util.Log.e("GoGauge", "loadSessions failed", e)
-                sessionsError = e.message ?: "加载失败"
+                if (seq == sessionsSeq) sessionsError = e.message ?: "加载失败"
             }
         }
     }
@@ -572,8 +629,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun saveSettings(patch: AppSettings) {
+        // 乐观更新: 开关立即响应; 连续快速切换两个开关时, 后一次修改基于已含前
+        // 一次改动的 settings 构造, 不会被在途写库的旧值覆盖 (此前会静默回滚)
+        settings = patch
         scope.launch {
-            settings = repo.saveSettings(patch)
+            settingsMutex.withLock {
+                try {
+                    repo.saveSettings(settings) // 写库时取"当前最新"而非闭包参数
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.e("GoGauge", "saveSettings failed", e)
+                    settings = repo.settings() // 写库失败: 回滚为库中实际值
+                }
+            }
             restartAutoSync()
         }
     }

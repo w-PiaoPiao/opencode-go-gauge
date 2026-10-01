@@ -35,21 +35,11 @@ abstract class ChartDao {
     @Query("DELETE FROM usage_charts WHERE account_id = :accountId")
     abstract suspend fun deleteForAccount(accountId: Int)
 
-    /**
-     * 裁剪窗口外的聚合桶 (与 usage_records.pruneOldRecords 同口径).
-     * charts 是计费周期快照, 保留窗口由调用方按同步范围传入.
-     */
-    @Query("DELETE FROM usage_charts WHERE account_id = :accountId AND datetime(time_bucket) < datetime('now', :intervalArg)")
-    abstract suspend fun pruneOldCharts(accountId: Int, intervalArg: String): Int
-
     @Query("SELECT 1 FROM usage_charts WHERE account_id = :accountId LIMIT 1")
     abstract suspend fun chartsReady(accountId: Int): Int?
 
     @Query("SELECT COALESCE(SUM(requests), 0) AS reqs FROM usage_charts WHERE account_id = :accountId")
     abstract suspend fun chartsRequests(accountId: Int): Int
-
-    @Query("SELECT MAX(synced_at) AS at FROM usage_charts WHERE account_id = :accountId")
-    abstract suspend fun chartsLastSynced(accountId: Int): String?
 
     // ------------------------------------------------------------------
     // 周期条件 (与 UsageDao.periodClause 口径一致: UTC 存储 + localtime 日界)

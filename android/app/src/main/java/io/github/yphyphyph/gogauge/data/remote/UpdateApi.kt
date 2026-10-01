@@ -150,6 +150,13 @@ class UpdateApi(
     private fun parseAtom(text: String): Triple<String, String, String> {
         val factory = DocumentBuilderFactory.newInstance()
         factory.isNamespaceAware = true
+        // XXE 硬化: 禁用 DTD 与外部实体 (与桌面 ElementTree 默认不解析外部实体等价;
+        // 上游响应被篡改时防止实体注入读取本地文件/SSRF)
+        runCatching { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+        runCatching { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) }
+        runCatching { factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
+        runCatching { factory.isXIncludeAware = false }
+        runCatching { factory.isExpandEntityReferences = false }
         val doc = factory.newDocumentBuilder().parse(ByteArrayInputStream(text.toByteArray()))
         val entries = doc.getElementsByTagNameNS(ATOM_NS, "entry")
         if (entries.length == 0) {

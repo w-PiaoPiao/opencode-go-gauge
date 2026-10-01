@@ -9,6 +9,7 @@ import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +28,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -57,10 +59,17 @@ private const val GITHUB_STUCK_GRACE_MS = 3_000L     // 确认 GitHub 已登录�
 private const val GITHUB_MAX_RELOADS = 3             // OAuth 续跑次数上限
 
 /** 清空 WebView Cookie — 残留会话会把登录页带离入口 (desktop clear_provider_cookies 的全清口径). */
-private fun clearLoginCookies() {
-    CookieManager.getInstance().removeAllCookies(null)
-    CookieManager.getInstance().flush()
+private fun clearLoginCookies(onDone: (() -> Unit)? = null) {
+    val cm = CookieManager.getInstance()
+    cm.removeAllCookies {
+        cm.flush()
+        onDone?.invoke()
+    }
 }
+
+/** 日志用 URL 脱敏: 去掉 query/fragment (OAuth code/state 不进 logcat)。 */
+private fun redactUrl(url: String?): String =
+    url?.substringBefore('?')?.substringBefore('#').orEmpty()
 
 /** 读 GitHub 页面已登录用户名 (meta user-login); 未登录/读取失败返回 "". */
 private suspend fun readGithubUser(wv: WebView): String = suspendCancellableCoroutine { cont ->
@@ -98,6 +107,12 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
     // WebView 无 isDestroyed() API: onRelease 释放时置位, 供异步回调判断
     val wvReleased = remember { AtomicBoolean(false) }
     var loading by remember { mutableStateOf(true) }
+    // 主框架加载失败 (断网/DNS/5xx): 停止转圈并给出重试入口, 此前会永久转圈
+    var loadError by remember { mutableStateOf(false) }
+
+    // 系统返回键回到欢迎页/上一界面, 而不是 finish Activity 直接退出应用
+    // (登录中按返回会丢弃整个 OAuth/2FA 会话)
+    BackHandler { onCancel() }
 
     // Try to capture the auth cookie from the current page. Returns true once captured.
     fun tryCapture(wv: WebView): Boolean {
@@ -124,10 +139,9 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
         val token = if (isCC) Login.extractSessionCookie(cookie) else Login.extractAuthCookie(cookie)
         if (token != null) {
             val workspace = if (isCC) "Default" else Login.extractWorkspaceHint(url)
-            Log.i("GoGauge", "login cookie captured, provider=$provider ws=$workspace url=$url")
+            Log.i("GoGauge", "login cookie captured, provider=$provider ws=$workspace url=${redactUrl(url)}")
             // 登录完成即清空 WebView cookie: OAuth/会话 cookie 不留在本地 cookie 库
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
+            clearLoginCookies()
             vm.completeLogin(token, workspace)
             return true
         }
@@ -160,12 +174,16 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                     if (cooled && entryResets < ENTRY_RESET_MAX) {
                         entryResets++
                         lastEntryReset = now
-                        Log.i("GoGauge", "login entry drift -> reset #$entryResets (url=$url)")
-                        // 先停旧页面再清 cookie: 旧页面 JS 的定时请求会拿到服务端续发的
-                        // Set-Cookie, 直接清存在竞速 (desktop reset_login_session 顺序 parity)
+                        Log.i("GoGauge", "login entry drift -> reset #$entryResets (url=${redactUrl(url)})")
+                        // 顺序对齐 desktop reset_login_session: 先驶离旧页面终止其 JS
+                        // (stopLoading 不会终止已渲染文档的 JS), 再清 cookie, 清完才导航 ——
+                        // 旧页面 JS 的定时请求会拿到服务端续发的 Set-Cookie, 直接清存在
+                        // 竞速, 清完立刻导航还会把新 cookie 又带出来
                         wv.stopLoading()
-                        clearLoginCookies()
-                        wv.loadUrl(Login.buildLoginUrl(provider))
+                        wv.loadUrl("about:blank")
+                        clearLoginCookies {
+                            if (!wvReleased.get()) wv.loadUrl(Login.buildLoginUrl(provider))
+                        }
                         continue
                     }
                 }
@@ -191,7 +209,7 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                         } else if (readGithubUser(wv).isNotEmpty()) {
                             reloads++
                             stuckSince = null
-                            Log.i("GoGauge", "github stalled -> resume #$reloads: $target")
+                            Log.i("GoGauge", "github stalled -> resume #$reloads: ${redactUrl(target)}")
                             wv.loadUrl(target)
                         }
                     }
@@ -211,7 +229,10 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                 title = { Text(s.loginTitle, style = MaterialTheme.typography.titleMedium) },
                 navigationIcon = {
                     IconButton(onClick = onCancel) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = if (vm.lang == "en") "Back" else "返回",
+                        )
                     }
                 },
             )
@@ -225,6 +246,9 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.setSupportMultipleWindows(true)
+                        // 纵深防御: 登录流程只依赖 http(s), 关闭本地文件/内容访问
+                        settings.allowFileAccess = false
+                        settings.allowContentAccess = false
                         // Desktop UA: opencode.ai redirects mobile UAs away from auth
                         settings.userAgentString = OpenCodeApi.USER_AGENT
                         CookieManager.getInstance().setAcceptCookie(true)
@@ -232,16 +256,45 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 loading = true
-                                Log.d("GoGauge", "login page start: $url")
+                                loadError = false
+                                Log.d("GoGauge", "login page start: ${redactUrl(url)}")
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
+                                // onRelease 可能已 destroy 本实例: 回调到达时不能再触碰
+                                if (wvReleased.get()) return
                                 loading = false
-                                Log.d("GoGauge", "login page done: $url")
+                                Log.d("GoGauge", "login page done: ${redactUrl(url)}")
                                 if (view != null && !tryCapture(view)) {
                                     // Some SPA hops finish before cookies land; keep polling anyway.
-                                    Log.d("GoGauge", "no auth cookie yet at $url")
+                                    Log.d("GoGauge", "no auth cookie yet at ${redactUrl(url)}")
                                 }
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: android.webkit.WebResourceRequest?,
+                                error: android.webkit.WebResourceError?,
+                            ) {
+                                if (request?.isForMainFrame != true || wvReleased.get()) return
+                                // 断网/DNS/5xx: onPageFinished 可能不回调, 不停 loading 会永久转圈
+                                loading = false
+                                loadError = true
+                                Log.w(
+                                    "GoGauge",
+                                    "login page error ${error?.errorCode}: ${error?.description} " +
+                                        "url=${redactUrl(request.url.toString())}",
+                                )
+                            }
+
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: android.webkit.WebResourceRequest?,
+                            ): Boolean {
+                                // 只允许 http(s) 在登录窗内导航; 其它 scheme (intent:// / market:// 等)
+                                // 交还系统处理, 防止页面把窗口带进任意应用
+                                val scheme = request?.url?.scheme?.lowercase()
+                                return scheme != null && scheme != "http" && scheme != "https"
                             }
                         }
                         webChromeClient = object : WebChromeClient() {
@@ -310,6 +363,30 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,
                     )
+                }
+            }
+            // 加载失败 (断网/DNS/5xx): 给出明确文案与重试入口, 不再永久转圈
+            if (loadError && !loading) {
+                Column(
+                    Modifier
+                        .align(Alignment.Center)
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        if (vm.lang == "en") "Page failed to load. Check your network and retry."
+                        else "页面加载失败，请检查网络后重试",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    TextButton(onClick = {
+                        loadError = false
+                        wvRef.value?.reload()
+                    }) {
+                        Text(if (vm.lang == "en") "Retry" else "重试")
+                    }
                 }
             }
         }

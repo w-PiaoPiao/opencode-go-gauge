@@ -16,7 +16,7 @@
 - **应用内更新**:检查 GitHub Releases(仅认 `-android` 条目),发现新版可直接下载 APK(校验 GitHub SHA-256 摘要)并触发系统安装器;未授权"安装未知应用"时引导到系统设置
 - **自动同步**:增量 / 全量;前台按 1 / 5 / 15 / 30 分钟定时,后台 WorkManager 每 15 分钟(安卓系统最小周期)
 - **双主题**:亮色 / 深色一键切换;中英双语界面
-- **本地优先**:数据保存在应用私有目录 SQLite(`filesDir`),token 仅用于同步官方接口
+- **本地优先**:数据保存在应用私有目录 SQLite(`filesDir`),token 仅用于同步官方接口,并以 Android Keystore 不可导出密钥做 AES-256-GCM 加密落库(对齐桌面 DPAPI/Keychain;旧明文数据读取自动兼容,下次写入即加密)
 
 ## 技术栈
 
@@ -39,6 +39,10 @@ GRADLE_USER_HOME=$PWD/../../.gradle-home ../../tools/gradle-8.13/bin/gradle asse
 
 # 单元测试(解析器 / 格式化,fixtures 对齐桌面版正则)
 GRADLE_USER_HOME=$PWD/../../.gradle-home ../../tools/gradle-8.13/bin/gradle testDebugUnitTest
+
+# Instrumented 测试(Keystore token 加密 / Room DAO 集成; 需连接设备或模拟器,
+# 多设备时用 ANDROID_SERIAL=emulator-5556 限定目标)
+GRADLE_USER_HOME=$PWD/../../.gradle-home ../../tools/gradle-8.13/bin/gradle connectedDebugAndroidTest
 ```
 
 > 说明:`GRADLE_USER_HOME` 指向工作区是因为本环境 `~/.gradle` 不可写;普通开发机可省略。
@@ -83,3 +87,25 @@ app/src/main/java/io/github/yphyphyph/gogauge/
 - [x] 账户总览页(v2.1.0):开关显隐 / 今日合计 KPI / 账号卡片配额与今日用量 / 7 日趋势对比(单测 + 构建验证, 多账号实机数据待回归)
 - [x] 深色模式切换、中英语言切换
 - [x] 14 个单元测试通过(解析器双格式 / 字段顺序 / 格式化边界)
+
+## 全量审查修复与兼容性回归(2026-10)
+
+针对"Android 13 及以下统计全 0 / CC 明细全丢"等审查发现做了一轮全量修复;
+回归环境: 单元测试(JVM) + instrumented 测试(TestAPI33 模拟器, API 33 / Android 13) + 冷启动冒烟。
+
+- [x] **旧版日期解析(根因)**: `Instant.parse` 的 ISO_INSTANT 在 OpenJDK 12 之前只接受
+      字面 `Z`(JDK-8166138), Android 8.0–13 的 libcore 基于 OpenJDK ≤11 —— 新增统一
+      宽容解析入口 `util/IsoTime.kt parseIsoInstant` 并替换全部调用点;
+      API 33 实测: 修复前 `+00:00` 与 `Z` 双双解析失败, 修复后两种格式均通过
+- [x] **CC 月度周期归一化**: `savePeriodBounds` 落库前 ISO → UTC "yyyy-MM-dd HH:mm:ss"
+      归一化(桌面 `_parse_utc_naive` parity), 读取侧同步宽容; API 33 实测归一化正确
+- [x] **旧版存量数据回填**: 升级后一次性把历史行 `local_date=NULL` 补成正确本地日
+      (SQL 口径与 Kotlin `localDateOf` 一致, instrumented 测试覆盖) —— 旧设备升级后
+      历史统计立即恢复, 无需等待重新同步
+- [x] **token 加密落库**: Android Keystore AES-256-GCM(`data/db/TokenCipher.kt`),
+      Room DAO 层自动加解密, 旧明文平滑兼容; instrumented 测试覆盖往返/随机 IV/
+      损坏不崩/DAO 集成(落库密文、读取明文)
+- [x] 同步 running 标志卡死、锁顺序反转、翻页上限静默截断、账号周期键残留、
+      更新包摘要 fail-closed、登录页返回键、记录页下拉刷新、错误三态与重试、
+      设置快速连写覆盖、WebView 清理竞速与加载失败重试、点击目标 ≥44dp 等
+- [x] 83 个单元测试 + 7 个 instrumented 测试全部通过; API 33 模拟器冷启动无崩溃
