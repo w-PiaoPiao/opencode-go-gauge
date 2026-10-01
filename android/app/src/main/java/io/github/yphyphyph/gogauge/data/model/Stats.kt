@@ -64,6 +64,12 @@ data class SyncState(
     val totalRecords: Int = 0,
     val oldestRecordAt: String? = null,
     val newestRecordAt: String? = null,
+    /**
+     * GOAT (commandcode): 全周期聚合请求数 (明细接口仅 24h/100 条, 直接用
+     * totalRecords 显示会偏小) — desktop sync.chart_requests parity.
+     * 非 commandcode 或 charts 未就绪时为 null。
+     */
+    val chartRequests: Int? = null,
 )
 
 /** In-flight sync progress — mirrors server._sync_state (desktop); account = 正在同步的账号名. */
