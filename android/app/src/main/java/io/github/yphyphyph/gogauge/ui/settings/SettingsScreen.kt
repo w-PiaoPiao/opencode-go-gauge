@@ -206,6 +206,17 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 },
             )
             SetRow(
+                s.chartAnim, s.chartAnimDesc,
+                trailing = {
+                    Switch(
+                        checked = vm.settings.chartAnimation,
+                        onCheckedChange = { on ->
+                            vm.saveSettings(vm.settings.copy(chartAnimation = on))
+                        },
+                    )
+                },
+            )
+            SetRow(
                 s.currency, s.currencyDesc,
                 stacked = true,
                 trailing = {

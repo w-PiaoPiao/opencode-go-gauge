@@ -137,11 +137,50 @@ class LoginTest {
     }
 
     // ------------------------------------------------------------------
-    // commandcode 登录 URL / cookie 提取 (回归: 既有语义不受本次改动影响)
+    // commandcode / opencode 登录 URL 与 cookie (回归: 控制台改版后语义)
     // ------------------------------------------------------------------
 
     @Test
     fun `commandcode login url is the signin entry`() {
         assertEquals("https://commandcode.ai/signin", Login.buildLoginUrl("commandcode"))
+    }
+
+    @Test
+    fun `opencode login url is the console login (2026-09 改版)`() {
+        // 旧授权页 auth.opencode.ai/authorize 已下线; 入口 = /console/login?next=%2Fconsole%2F
+        assertEquals(
+            "https://opencode.ai/console/login?next=%2Fconsole%2F",
+            Login.buildLoginUrl("opencode"),
+        )
+        assertEquals(
+            "https://opencode.ai/console/login?next=%2Fconsole%2F",
+            Login.buildLoginUrl(null),
+        )
+    }
+
+    @Test
+    fun `session cookie prefers console name over legacy auth`() {
+        // 同时存在时优先新版 __Host-console_session
+        assertEquals(
+            "__Host-console_session=st_abc",
+            Login.extractAuthCookie("auth=Fe26.2**old; __Host-console_session=st_abc"),
+        )
+        // 只有旧版时兼容返回 auth
+        assertEquals("auth=Fe26.2**old", Login.extractAuthCookie("foo=1; auth=Fe26.2**old"))
+        // Cookie: 前缀与空白处理
+        assertEquals("auth=xyz", Login.extractAuthCookie("Cookie:  foo=1; auth=xyz ;bar=2"))
+        assertNull(Login.extractAuthCookie("foo=1; bar=2"))
+        assertNull(Login.extractAuthCookie(null))
+    }
+
+    @Test
+    fun `workspace hint reads console and legacy paths`() {
+        assertEquals("wrk_01KXDVHZMY578NZ300DTR7WYE8", Login.extractWorkspaceHint(
+            "https://opencode.ai/console/wrk_01KXDVHZMY578NZ300DTR7WYE8/usage"))
+        // 旧路径兼容
+        assertEquals("wrk_legacy123", Login.extractWorkspaceHint(
+            "https://opencode.ai/workspace/wrk_legacy123/go"))
+        assertEquals("Default", Login.extractWorkspaceHint("https://opencode.ai/console/"))
+        assertEquals("Default", Login.extractWorkspaceHint(null))
     }
 }

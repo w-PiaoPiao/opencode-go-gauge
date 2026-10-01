@@ -149,6 +149,7 @@ fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) 
                     s = s,
                     labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     gridLineColor = MaterialTheme.colorScheme.outline,
+                    animate = vm.settings.chartAnimation,
                 )
             }
         }

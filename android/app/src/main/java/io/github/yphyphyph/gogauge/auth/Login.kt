@@ -3,22 +3,26 @@ package io.github.yphyphyph.gogauge.auth
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.util.UUID
 
 /**
  * Login URL builder + cookie extraction — ports of auth.py (desktop).
  * 支持双 provider: opencode 与 commandcode (GOAT)。
+ *
+ * opencode 侧 2026-09 控制台改版 (v2.2.0): 旧授权页 auth.opencode.ai/authorize
+ * 已下线, 登录入口为 https://opencode.ai/console/login, 会话 cookie 为
+ * __Host-console_session (兼容旧 auth)。
  */
 object Login {
 
     const val PROVIDER_OPENCODE = "opencode"
     const val PROVIDER_COMMANDCODE = "commandcode"
 
-    // ---- opencode ----
-    const val LOGIN_BASE = "https://auth.opencode.ai/authorize"
-    const val LOGIN_CLIENT_ID = "app"
-    const val LOGIN_REDIRECT_URI = "https://opencode.ai/auth/callback"
-    const val AUTH_COOKIE_NAME = "auth"
+    // ---- opencode (控制台改版后) ----
+    const val CONSOLE_LOGIN_URL = "https://opencode.ai/console/login"
+    const val LOGIN_NEXT_PATH = "/console/"
+    /** 新版会话 cookie; 旧版 auth= 仅作历史账号兼容 (读/写都优先新版)。 */
+    const val SESSION_COOKIE_NAME = "__Host-console_session"
+    const val LEGACY_SESSION_COOKIE_NAME = "auth"
     const val OPENDCODE_DOMAIN = "https://opencode.ai"
 
     // ---- commandcode (GOAT) — auth.py CC_* constants parity ----
@@ -26,7 +30,8 @@ object Login {
     const val CC_AUTH_COOKIE_NAME = "__Secure-commandcode_prod_.session_token"
     const val CC_DOMAIN = "https://commandcode.ai"
 
-    private val WORKSPACE_URL_RE = Regex("/workspace/(wrk_[A-Za-z0-9]+)")
+    /** 登录页 URL 里的工作区提示 — 控制台改版后为 /console/wrk_xxx (旧 /workspace/ 兼容)。 */
+    private val WORKSPACE_URL_RE = Regex("/(?:console|workspace)/(wrk_[A-Za-z0-9]+)")
 
     fun normalizeProvider(provider: String?): String =
         if (provider == PROVIDER_COMMANDCODE) PROVIDER_COMMANDCODE else PROVIDER_OPENCODE
@@ -34,25 +39,21 @@ object Login {
     /** Build the login URL for the given provider (auth.build_login_url parity). */
     fun buildLoginUrl(provider: String?): String {
         if (normalizeProvider(provider) == PROVIDER_COMMANDCODE) return CC_LOGIN_BASE
-        val params = mapOf(
-            "client_id" to LOGIN_CLIENT_ID,
-            "redirect_uri" to LOGIN_REDIRECT_URI,
-            "response_type" to "code",
-            "state" to UUID.randomUUID().toString().replace("-", ""),
-        )
-        return LOGIN_BASE + "?" + params.entries.joinToString("&") { (k, v) ->
-            "$k=${URLEncoder.encode(v, "UTF-8")}"
-        }
+        // 控制台改版: 登录入口 = /console/login, next 指回控制台
+        return CONSOLE_LOGIN_URL + "?next=" + URLEncoder.encode(LOGIN_NEXT_PATH, "UTF-8")
     }
 
-    /** Extract the `auth=<value>` cookie segment — port of build_cookie_header. */
+    /**
+     * Extract the session cookie segment — port of build_cookie_header.
+     * 候选名优先级: __Host-console_session (新版) > auth (旧版兼容)。
+     */
     fun extractAuthCookie(cookieHeader: String?): String? {
         if (cookieHeader.isNullOrBlank()) return null
         var cookie = cookieHeader.trim()
         if (cookie.startsWith("cookie:", ignoreCase = true)) cookie = cookie.substring(7).trim()
-        for (part in cookie.split(";")) {
-            val p = part.trim()
-            if (p.startsWith("auth=")) return p
+        val parts = cookie.split(";").map { it.trim() }.filter { it.isNotEmpty() }
+        for (name in listOf(SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME)) {
+            parts.firstOrNull { it.startsWith("$name=") }?.let { return it }
         }
         return null
     }

@@ -1,70 +1,95 @@
 package io.github.yphyphyph.gogauge.data.remote
 
+import io.github.yphyphyph.gogauge.data.model.UsagePage
 import io.github.yphyphyph.gogauge.data.model.UsageRecord
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import java.time.Instant
 
 /**
- * server-fn usage response parser — 1:1 port of opencode_api.py (desktop).
- * Compatible with GET (no space: id:"usg_...") and POST (space: id: "usg_...") formats.
+ * request-logs 解析 — 1:1 port of opencode_api.py parse_request_logs (desktop, 控制台改版后).
+ *
+ * ``GET /console/api/request-logs`` 的 items[] 仅 category=="inference" 计入用量
+ * (api 类是控制台自身接口调用); ``cost`` 为 USD 浮点, 还原为 1e-8 单位存 cost_raw;
+ * 新接口不再区分 5m/1h 缓存写入, 统一记入缓存写入列 (合计口径不变)。
+ * 旧 /_server server-fn 响应解析已随改版下线。
  */
 object UsageParser {
 
-    private val RECORD_ANCHOR = Regex("""id:\s*"(usg_[^"]+)"""")
-    private val PLAN_RE = Regex(
-        """id:\s*"(usg_[^"]+)"[^}]*?enrichment:\${'$'}R\[\d+\]=\{plan:"([^"]+)"\}""",
-        setOf(RegexOption.DOT_MATCHES_ALL),
-    )
-    private val CREATED_RE = Regex("""timeCreated:\s*\${'$'}R\[\d+\]\s*=\s*new Date\("([^"]+)"\)""")
+    private const val CATEGORY_INFERENCE = "inference"
 
-    private fun parseNumField(body: String, name: String): Int {
-        val m = Regex("""${Regex.escape(name)}:\s*(\d+|null)""").find(body) ?: return 0
-        val v = m.groupValues[1]
-        return if (v == "null") 0 else v.toIntOrNull() ?: 0
+    private fun JsonElement?.asLong(default: Long = 0L): Long {
+        val text = (this as? JsonPrimitive)?.content ?: return default
+        if (text.isEmpty() || text == "null") return default
+        return text.toDoubleOrNull()?.toLong() ?: default
     }
 
-    /** cost 字段用 Long: costRaw 单位 1e-8 USD, Int 在单条 > $21.47 时溢出归零. */
-    private fun parseLongField(body: String, name: String): Long {
-        val m = Regex("""${Regex.escape(name)}:\s*(\d+|null)""").find(body) ?: return 0
-        val v = m.groupValues[1]
-        return if (v == "null") 0 else v.toLongOrNull() ?: 0
+    private fun JsonElement?.asDouble(default: Double = 0.0): Double {
+        val text = (this as? JsonPrimitive)?.content ?: return default
+        if (text.isEmpty() || text == "null") return default
+        return text.toDoubleOrNull() ?: default
     }
 
-    private fun parseStrField(body: String, name: String): String {
-        val m = Regex("""${Regex.escape(name)}:\s*"([^"]*)"""").find(body)
-        return m?.groupValues?.get(1) ?: ""
+    private fun JsonElement?.asText(): String {
+        val text = (this as? JsonPrimitive)?.content ?: return ""
+        return if (text == "null") "" else text
     }
 
-    /** Parse one server-fn response body into UsageRecord list. */
-    fun parseUsageResponse(text: String): List<UsageRecord> {
-        val plans = HashMap<String, String>()
-        for (m in PLAN_RE.findAll(text)) {
-            plans[m.groupValues[1]] = m.groupValues[2]
+    /** 毫秒时间戳 -> ISO ``...Z``; 非法值返回空串。 */
+    private fun isoFromMs(ms: Long): String {
+        if (ms <= 0) return ""
+        return try {
+            Instant.ofEpochMilli(ms).toString()
+        } catch (e: Exception) {
+            ""
         }
+    }
 
-        val anchors = RECORD_ANCHOR.findAll(text).toList()
+    private fun recordFromItem(item: JsonObject): UsageRecord? {
+        val usgId = item["id"].asText().trim()
+        val createdAt = isoFromMs(item["startedAt"].asLong())
+        if (usgId.isEmpty() || createdAt.isEmpty()) return null
+        val cacheWrite = item["cacheWriteTokens"].asLong().toInt()
+        return UsageRecord(
+            usgId = usgId,
+            createdAt = createdAt,
+            model = item["model"].asText().trim(),
+            provider = item["provider"].asText().trim(),
+            inputTokens = item["inputTokens"].asLong().toInt(),
+            outputTokens = item["outputTokens"].asLong().toInt(),
+            reasoningTokens = item["reasoningTokens"].asLong().toInt(),
+            cacheReadTokens = item["cacheReadTokens"].asLong().toInt(),
+            // 新接口不再区分 5m/1h 缓存写入, 统一记入 5m 列 (合计口径不变)
+            cacheWrite5mTokens = cacheWrite,
+            cacheWrite1hTokens = 0,
+            costRaw = Math.round(item["cost"].asDouble() * 100_000_000.0),
+            keyId = item["serviceAPIKeyID"].asText().trim(),
+            sessionId = item["sessionID"].asText().trim(),
+            plan = item["product"].asText().trim().ifEmpty { null },
+        )
+    }
+
+    /**
+     * Parse one ``/console/api/request-logs`` response into a page of usage records.
+     * 只保留 inference 类请求; nextCursor 供续翻, retentionDays 为服务端保留窗口。
+     */
+    fun parseRequestLogs(payload: JsonElement?): UsagePage {
+        val obj = payload as? JsonObject ?: return UsagePage()
         val records = mutableListOf<UsageRecord>()
-        for (i in anchors.indices) {
-            val m = anchors[i]
-            val end = if (i + 1 < anchors.size) anchors[i + 1].range.first else text.length
-            val body = text.substring(m.range.last + 1, end)
-            val created = CREATED_RE.find(body) ?: continue
-            val usgId = m.groupValues[1]
-            records += UsageRecord(
-                usgId = usgId,
-                createdAt = created.groupValues[1],
-                model = parseStrField(body, "model"),
-                provider = parseStrField(body, "provider"),
-                inputTokens = parseNumField(body, "inputTokens"),
-                outputTokens = parseNumField(body, "outputTokens"),
-                reasoningTokens = parseNumField(body, "reasoningTokens"),
-                cacheReadTokens = parseNumField(body, "cacheReadTokens"),
-                cacheWrite5mTokens = parseNumField(body, "cacheWrite5mTokens"),
-                cacheWrite1hTokens = parseNumField(body, "cacheWrite1hTokens"),
-                costRaw = parseLongField(body, "cost"),
-                keyId = parseStrField(body, "keyID"),
-                sessionId = parseStrField(body, "sessionID"),
-                plan = plans[usgId],
-            )
+        val items = obj["items"] as? JsonArray
+        if (items != null) {
+            for (element in items) {
+                val item = element as? JsonObject ?: continue
+                if (item["category"].asText().trim().lowercase() != CATEGORY_INFERENCE) {
+                    continue  // 控制台自身接口调用, 不计入用量
+                }
+                recordFromItem(item)?.let { records += it }
+            }
         }
-        return records
+        val cursor = obj["nextCursor"].asText().trim().ifEmpty { null }
+        val retention = (obj["retentionDays"] as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt()
+        return UsagePage(records = records, nextCursor = cursor, retentionDays = retention)
     }
 }

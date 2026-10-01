@@ -65,7 +65,14 @@ private fun Color.toArgbInt(): Int = android.graphics.Color.argb(
 
 /** Today's 24h input/output bar chart — desktop chartToday. */
 @Composable
-fun TodayBarChart(data: List<HourStat>, s: Strings, labelColor: Color, gridLineColor: Color, modifier: Modifier = Modifier) {
+fun TodayBarChart(
+    data: List<HourStat>,
+    s: Strings,
+    labelColor: Color,
+    gridLineColor: Color,
+    animate: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
     // Rebuild the dataset only when the data or labels change; recomposition (theme,
     // syncing, progress updates) then reuses the cached BarData instead of rebuilding.
     val barData = remember(data, s) {
@@ -112,7 +119,11 @@ fun TodayBarChart(data: List<HourStat>, s: Strings, labelColor: Color, gridLineC
                 }
             }
             chart.axisRight.isEnabled = false
-            if (chart.data !== barData) chart.data = barData
+            if (chart.data !== barData) {
+                chart.data = barData
+                // 图表动画开关 (默认关): 仅在新数据换代时播放, 重组/主题切换不重复动画
+                if (animate) chart.animateY(400)
+            }
             chart.invalidate()
         },
     )
@@ -136,6 +147,7 @@ fun ModelPieChart(
     labelColor: Color,
     currency: String,
     usdCny: Double,
+    animate: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val palette = remember {
@@ -177,7 +189,10 @@ fun ModelPieChart(
                 // Always (re)apply the value label color so theme switches stay in sync;
                 // the dataset itself is cached and only reassigned when it actually changes.
                 pieData.dataSet.valueTextColor = labelColor.toArgbInt()
-                if (chart.data !== pieData) chart.data = pieData
+                if (chart.data !== pieData) {
+                    chart.data = pieData
+                    if (animate) chart.animateY(400)
+                }
                 chart.legend.isEnabled = false  // 图例在 Compose 侧自绘 (删除线 + 点击)
                 chart.invalidate()
             },
@@ -278,6 +293,7 @@ fun TrendLineChart(
     gridLineColor: Color,
     currency: String,
     usdCny: Double,
+    animate: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     // Rebuild the series only when data or labels change; not on every recomposition.
@@ -339,7 +355,10 @@ fun TrendLineChart(
                 textColor = labelColor.toArgbInt()
                 setDrawGridLines(false)
             }
-            if (chart.data !== lineData) chart.data = lineData
+            if (chart.data !== lineData) {
+                chart.data = lineData
+                if (animate) chart.animateY(400)
+            }
             chart.invalidate()
         },
     )

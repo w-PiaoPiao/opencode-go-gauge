@@ -12,7 +12,7 @@
 - **使用记录**:请求级明细卡片列表 + 分页 + 模型筛选
 - **账户总览面板**(v2.1.0):设置中可开关,底部导航显示入口;今日合计 KPI(总请求 / 总 TOKEN / 总输入 / 总费用)、账号卡片(配额三窗口 + 今日用量 + 24h 迷你趋势)、7 日费用趋势对比(跨账号合计三条线);非活跃账号配额后台刷新,退出账号即清理其配额缓存
 - **Command Code GOAT 支持**:登录 commandcode.ai 账号,5 小时 / 每周 / 每月三窗口配额、请求级明细、全周期聚合统计(统计口径以 usage_charts 聚合为准),账号带 GOAT 来源徽标
-- **内置 WebView 登录**:加载官方授权页,登录后自动捕获 auth cookie 与工作区(GOAT 为 session_token);打开登录页前清残留会话(防被旧凭证带离登录入口),轮询中持续自愈(commandcode 偏离 /signin 自动拉回、GitHub 2FA 后卡无关页面自动续跑授权入口),重新登录后配额缓存随凭证失效立即重拉
+- **内置 WebView 登录**:加载官方授权页,登录后自动捕获会话 cookie 与工作区(opencode 为 `__Host-console_session` / 旧 `auth` 兼容,GOAT 为 session_token);打开登录页前清残留会话(防被旧凭证带离登录入口),轮询中持续自愈(commandcode 偏离 /signin 自动拉回、GitHub 2FA 后卡无关页面自动续跑授权入口),重新登录后配额缓存随凭证失效立即重拉
 - **自动同步**:增量 / 全量;前台按 1 / 5 / 15 / 30 分钟定时,后台 WorkManager 每 15 分钟(安卓系统最小周期)
 - **双主题**:亮色 / 深色一键切换;中英双语界面
 - **本地优先**:数据保存在应用私有目录 SQLite(`filesDir`),token 仅用于同步官方接口
@@ -44,7 +44,8 @@ GRADLE_USER_HOME=$PWD/../../.gradle-home ../../tools/gradle-8.13/bin/gradle test
 
 ## 与桌面版的关系
 
-- **解析逻辑同源**:`data/remote/QuotaParser.kt`、`UsageParser.kt` 是桌面版 `opencode_api.py` 的 1:1 移植(正则逐条对应,含字段顺序双兼容);`data/db/UsageDao.kt` 的 SQL 与 `db.py` 逐句对应。若 opencode.ai 接口格式变化,需同步修改两处。`data/remote/CommandCodeApi.kt` 对应桌面版 `commandcode_api.py`(GOAT 数据源)。
+- **解析逻辑同源**:`data/remote/QuotaParser.kt`、`UsageParser.kt` 是桌面版 `opencode_api.py` 的 1:1 移植(2026-09 控制台改版后的 `/console/api` JSON 解析:配额 `go/status`、明细 `request-logs` 游标分页、工作区 `orgs`、Key 名称 `service-accounts`);`data/db/UsageDao.kt` 的 SQL 与 `db.py` 逐句对应。若 opencode.ai 接口格式变化,需同步修改两处。`data/remote/CommandCodeApi.kt` 对应桌面版 `commandcode_api.py`(GOAT 数据源)。
+- **升级提示**:opencode.ai 改版后旧会话凭证(`auth=…`)已失效,升级后 opencode 账号会回到欢迎页引导重新登录(仅清凭证,历史记录保留);commandcode 账号不受影响。
 - **平台适配**:
   - 系统托盘/关闭最小化 → 安卓无此概念,由后台 WorkManager 同步替代
   - 同步间隔 1/5 分钟仅前台精确生效,后台最低 15 分钟(系统限制)

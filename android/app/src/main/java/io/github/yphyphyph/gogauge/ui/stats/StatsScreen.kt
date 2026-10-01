@@ -136,6 +136,7 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                     labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     currency = vm.currency,
                     usdCny = d.usdCny,
+                    animate = vm.settings.chartAnimation,
                 )
                 // 排行只列参与统计的模型 (与总卡/构成/趋势口径一致); 全部被排除时
                 // 显示空态 (desktop chartModel 的 mr-empty parity)
@@ -209,6 +210,7 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                     gridLineColor = MaterialTheme.colorScheme.outline,
                     currency = vm.currency,
                     usdCny = d.usdCny,
+                    animate = vm.settings.chartAnimation,
                 )
             }
         }

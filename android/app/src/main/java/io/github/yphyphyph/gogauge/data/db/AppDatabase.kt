@@ -20,7 +20,7 @@ import java.time.Instant
         SettingsEntity::class,
         UsageChartEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -174,6 +174,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v4 → v5 旧凭证清理 — 对齐桌面 db.py 迁移 4 (控制台改版配套).
+         *
+         * opencode.ai 2026-09 改版后旧会话 Cookie (``auth=…``) 已失效, 置空凭证让
+         * 应用回到欢迎页引导重新登录 (新格式 ``__Host-console_session=…`` 不受影响);
+         * 仅清凭证不删历史记录, 幂等 (每次启动重跑无副作用).
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("UPDATE `accounts` SET `token` = '' WHERE `token` LIKE 'auth=%'")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -181,7 +194,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "gousage.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build().also { instance = it }
             }
     }

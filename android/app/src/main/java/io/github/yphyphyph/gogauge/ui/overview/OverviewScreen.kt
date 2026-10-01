@@ -145,6 +145,7 @@ fun OverviewScreen(vm: MainViewModel = viewModel()) {
                             gridLineColor = MaterialTheme.colorScheme.outline,
                             currency = vm.currency,
                             usdCny = data.usdCny,
+                            animate = vm.settings.chartAnimation,
                         )
                     }
                 }

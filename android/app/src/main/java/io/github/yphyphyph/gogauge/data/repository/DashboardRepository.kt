@@ -33,6 +33,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -96,6 +97,29 @@ class DashboardRepository(
     private val quotaRefreshing = mutableSetOf<Int>()
     private val _quota = MutableStateFlow<QuotaResult?>(null)
     val quota: StateFlow<QuotaResult?> = _quota.asStateFlow()
+
+    /**
+     * key 显示名称上次成功拉取时刻 (秒) — {account_id: at}.
+     * 名称变化极少, 无需每轮增量同步都拉 (desktop KEY_NAMES_REFRESH_SEC parity).
+     */
+    private val keyNamesFetchedAt = java.util.concurrent.ConcurrentHashMap<Int, Double>()
+
+    companion object {
+        /** key 名称缓存刷新周期 — desktop KEY_NAMES_REFRESH_SEC. */
+        private const val KEY_NAMES_REFRESH_SEC = 24 * 3600.0
+
+        // ---- opencode 同步引擎参数 (desktop server.py 常量 parity) ----
+        /** /request-logs 单页条数上限. */
+        private const val OPENCODE_PAGE_LIMIT = 100
+        /** 增量同步最多翻页数 (10*100=1000 条). */
+        private const val OPENCODE_INCREMENTAL_PAGES = 10
+        /** 全量同步翻页上限, 防失控 (服务端仅保留 30 天明细). */
+        private const val OPENCODE_MAX_FULL_PAGES = 1000
+        /** 单页失败重试次数 (深页偶尔慢/连接被重置). */
+        private const val OPENCODE_PAGE_RETRIES = 2
+        /** 增量同步回溯 1 小时, 防边界漏记. */
+        private const val INCREMENTAL_OVERLAP_MS = 3600_000L
+    }
 
     private class ExchangeCache {
         @Volatile var at = 0.0
@@ -190,9 +214,19 @@ class DashboardRepository(
         // 失败也要吃 TTL: 失败路径写入 data = null, 若以 data != null 作为命中条件,
         // 失败的账号会永远绕过缓存 —— 总览页每 5s 重试一次, 每个账号都重新发起
         // 2 次尝试 + 退避的配额请求. 首个 slot 尚不存在时仍照常发起 (slot != null 判定).
-        if (slot != null && now - slot.at < QUOTA_CACHE_TTL) return
+        if (slot != null && now - slot.at < QUOTA_CACHE_TTL) {
+            // 缓存命中也要把旧值回填给活跃账号: switchAccount 会清空 _quota,
+            // 命中 TTL 内刚刷过的槽时不回填会让首页配额空白到 TTL 过期 (A→B→A 来回切)
+            if (slot.data != null && accountId == activeAccountId()) _quota.value = slot.data
+            return
+        }
         quotaMutex.withLock {
-            if (accountId in quotaRefreshing) return
+            if (accountId in quotaRefreshing) {
+                // 已有刷新在飞: 先把缓存中的旧值回填, 避免首页骨架屏等到刷新结束
+                val cached = synchronized(quotaCache) { quotaCache[accountId] }?.data
+                if (cached != null && accountId == activeAccountId()) _quota.value = cached
+                return
+            }
             val token = syncDao.getTokenFor(accountId)
             if (token.isEmpty()) return
             quotaRefreshing.add(accountId)
@@ -299,7 +333,13 @@ class DashboardRepository(
         // Run the independent DB/exchange queries concurrently to cut first-paint latency.
         return coroutineScope {
             val totalsDeferred = async { if (chartsFirst) chartDao.totals(range, aid, cycleStart, excluded) else usageDao.totals(range, aid, cycleStart, excluded) }
-            val todayDeferred = async { if (chartsFirst) chartDao.totals("today", aid, excludeModels = excluded) else usageDao.totals("today", aid, excludeModels = excluded) }
+            // 首页默认 range 即 today: totals(period) 与 totals("today") 是同一条聚合,
+            // 复用结果省一半查询 (desktop 95d177c parity)
+            val todayDeferred = if (range == "today") {
+                totalsDeferred
+            } else {
+                async { if (chartsFirst) chartDao.totals("today", aid, excludeModels = excluded) else usageDao.totals("today", aid, excludeModels = excluded) }
+            }
             val dailyDeferred = async { if (chartsFirst) chartDao.dailyStats(7, aid, excluded) else usageDao.dailyStats(7, aid, excluded) }
             val trendDeferred = async { if (chartsFirst) chartDao.dailyStats(30, aid, excluded) else usageDao.dailyStats(30, aid, excluded) }
             val todayTrendDeferred = async { if (chartsFirst) chartDao.todayTrend(aid) else usageDao.todayTrend(aid) }
@@ -342,10 +382,14 @@ class DashboardRepository(
             loggedIn.map { acc ->
                 val aid = acc.id
                 val slot = synchronized(quotaCache) { quotaCache[aid] }
+                // 与首页同口径: commandcode 且已有聚合数据时走 usage_charts
+                // (明细接口仅 24h/100 条, 直接查明细会让总览显示 0 或偏小;
+                //  desktop db.totals/daily_stats 内部自动路由, 此处手工对齐)
+                val chartsFirst = acc.provider == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null
                 async {
-                    val todayDeferred = async { usageDao.totals("today", aid) }
-                    val trendDeferred = async { usageDao.todayTrend(aid) }
-                    val dailyDeferred = async { usageDao.dailyStats(7, aid) }
+                    val todayDeferred = async { if (chartsFirst) chartDao.totals("today", aid) else usageDao.totals("today", aid) }
+                    val trendDeferred = async { if (chartsFirst) chartDao.todayTrend(aid) else usageDao.todayTrend(aid) }
+                    val dailyDeferred = async { if (chartsFirst) chartDao.dailyStats(7, aid) else usageDao.dailyStats(7, aid) }
                     val syncDeferred = async { syncDao.getSyncStateFor(aid) }
                     val syncState = syncDeferred.await()
                     AccountOverview(
@@ -486,36 +530,67 @@ class DashboardRepository(
                 return SyncResult(ok = false, error = e.message)
             }
 
+            // 新接口 /console/api/request-logs 为游标分页 (按时间倒序), 无法并发跳页,
+            // 改为顺序翻页: 每页 100 条, 直到游标耗尽 / 触达同步范围边界 / 连续空页
             var totalInserted = 0
-            val maxPages = if (mode == "full") 2000 else 5
+            val maxPages = if (mode == "full") OPENCODE_MAX_FULL_PAGES else OPENCODE_INCREMENTAL_PAGES
             var page = 0
-            var emptyBatches = 0
+            var cursor: String? = null
+            var emptyPages = 0
             var failedPages = 0
+            var pageRetries = 0
             var windowBoundaryReached = false
 
+            // 增量同步: 只取最新记录之后的一段时间 (重叠 1 小时防边界漏记),
+            // 命中不到旧数据就不会去翻历史页, 既快又少请求
+            var sinceMs: Long? = null
+            if (mode != "full") {
+                val stamp = isoToMillis(syncDao.getSyncStateFor(accountId).newestRecordAt)
+                if (stamp > 0) {
+                    val overlapStart = stamp - INCREMENTAL_OVERLAP_MS
+                    if (overlapStart > 0) sinceMs = overlapStart
+                }
+            }
+
             while (page < maxPages) {
-                val batchPages = (page until minOf(page + 5, maxPages)).toList()
                 setProgress { it.copy(page = page) }
-
-                val results = fetchBatch(token, workspaceId, batchPages)
-
-                var batchInserted = 0
-                var batchFullPages = 0
-                var batchFailed = 0
-                // 整批一次事务: 原先每页一次 insertUsageRecords (各自 SELECT 去重 +
-                // upsert + 事务), 5 页批次 = 5 次事务. 汇总后单次写入, 去重也只查一次.
-                val batchRecords = ArrayList<io.github.yphyphyph.gogauge.data.db.UsageRecordEntity>()
-                val nowIso = Instant.now().toString()
-                for (p in batchPages.sorted()) {
-                    val result = results[p]
-                    if (result == null) {
-                        batchFailed++
+                val usagePage = try {
+                    api.fetchUsagePage(
+                        token, workspaceId, cursor = cursor,
+                        limit = OPENCODE_PAGE_LIMIT, sinceMs = sinceMs,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: AuthException) {
+                    val msg = "[$name] ${e.message}"
+                    syncDao.updateSyncStateAndTotals(accountId, "error", msg, totalInserted)
+                    setProgress { it.copy(phase = "error", message = msg) }
+                    return SyncResult(ok = false, error = e.message, retryable = false)
+                } catch (e: Exception) {
+                    // 首页即失败 -> 整体报错; 翻页中途失败 -> 同一游标重试, 仍失败保留已入库数据
+                    if (page == 0) {
+                        val msg = "[$name] ${e.message}"
+                        syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
+                        setProgress { it.copy(phase = "error", message = msg) }
+                        return SyncResult(ok = false, error = e.message)
+                    }
+                    if (pageRetries < OPENCODE_PAGE_RETRIES) {
+                        pageRetries++
+                        delay(1500L * pageRetries)
                         continue
                     }
-                    if (result.isEmpty()) continue // empty page: end of data
-                    // sync range: stop when the page's earliest record predates the window boundary
+                    failedPages++
+                    break
+                }
+
+                page++
+                pageRetries = 0
+                val records = usagePage.records
+
+                if (records.isNotEmpty()) {
+                    // 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 -> 该页保留后停止
                     if (mode == "full" && windowDays != null) {
-                        val earliest = result.minOfOrNull { it.createdAt } ?: ""
+                        val earliest = records.minOfOrNull { it.createdAt } ?: ""
                         if (earliest.isNotEmpty()) {
                             try {
                                 val et = Instant.parse(earliest)
@@ -526,39 +601,23 @@ class DashboardRepository(
                             }
                         }
                     }
-                    result.mapTo(batchRecords) { it.toEntity(nowIso).copy(accountId = accountId) }
-                    if (result.size >= 50) batchFullPages++
-                }
-                if (batchRecords.isNotEmpty()) {
-                    val inserted = usageDao.insertUsageRecords(batchRecords, accountId)
+                    val nowIso = Instant.now().toString()
+                    val inserted = usageDao.insertUsageRecords(
+                        records.map { it.toEntity(nowIso).copy(accountId = accountId) },
+                        accountId,
+                    )
                     totalInserted += inserted
-                    batchInserted += inserted
                     setProgress { it.copy(inserted = totalInserted) }
-                }
-
-                page += 5
-
-                if (windowBoundaryReached) break
-                if (batchFailed > 0) {
-                    failedPages += batchFailed
-                    if (mode == "incremental") {
-                        val msg = "网络请求失败 (IncompleteRead/超时)"
-                        syncDao.updateSyncStateAndTotals(
-                            accountId, "error", "[$name] 第 ${page - 4} 页拉取失败: $msg", totalInserted,
-                        )
-                        setProgress { it.copy(phase = "error", message = "[$name] 第 ${page - 4} 页拉取失败: $msg") }
-                        return SyncResult(ok = false, error = msg, inserted = totalInserted)
-                    }
-                }
-                // this batch had no full pages → reached the end
-                if (batchFullPages == 0) break
-                // incremental: two consecutive all-old batches → stop
-                if (mode == "incremental" && batchInserted == 0) {
-                    emptyBatches++
-                    if (emptyBatches >= 2) break
+                    emptyPages = if (inserted == 0) emptyPages + 1 else 0
                 } else {
-                    emptyBatches = 0
+                    emptyPages++
                 }
+
+                cursor = usagePage.nextCursor
+                if (cursor == null) break  // 已到最早一条
+                if (windowBoundaryReached) break
+                // 增量模式: 连续两页没有新数据 -> 停止
+                if (mode == "incremental" && emptyPages >= 2) break
             }
 
             // prune records outside the window (independent of this run's inserts)
@@ -567,20 +626,25 @@ class DashboardRepository(
             }
 
             // 顺带刷新该账号的 key 显示名称缓存 — 多账号合并写入 (key_id 全局唯一),
-            // 单账号失败不影响已有缓存 (desktop server.py v2.0.0 parity)
-            try {
-                val names = api.fetchKeyNames(token, workspaceId)
-                if (names.isNotEmpty()) {
-                    val merged = HashMap(db.settingsDao().getKeyNames())
-                    merged.putAll(names)
-                    db.settingsDao().saveKeyNames(merged)
+            // 单账号失败不影响已有缓存. 24h 节流 (desktop KEY_NAMES_REFRESH_SEC parity):
+            // 名称变化极少, 原先每轮增量同步都重拉页面 + 整包读改写 settings
+            val nowSec = System.currentTimeMillis() / 1000.0
+            if (nowSec - (keyNamesFetchedAt[accountId] ?: 0.0) > KEY_NAMES_REFRESH_SEC) {
+                try {
+                    val names = api.fetchKeyNames(token, workspaceId)
+                    if (names.isNotEmpty()) {
+                        val merged = HashMap(db.settingsDao().getKeyNames())
+                        merged.putAll(names)
+                        db.settingsDao().saveKeyNames(merged)
+                    }
+                    keyNamesFetchedAt[accountId] = nowSec
+                } catch (e: Exception) {
+                    android.util.Log.w("GoGauge", "fetchKeyNames failed", e)
                 }
-            } catch (e: Exception) {
-                android.util.Log.w("GoGauge", "fetchKeyNames failed", e)
             }
 
             if (failedPages > 0) {
-                val msg = "完成, 但 $failedPages 页拉取失败 (数据不完整, 可再次全量同步补全)"
+                val msg = "完成, 但翻页中断 (数据不完整, 可再次全量同步补全)"
                 syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
                 return SyncResult(ok = true, partial = true, failedPages = failedPages, inserted = totalInserted, pages = page)
             }
@@ -591,6 +655,22 @@ class DashboardRepository(
         } catch (e: Exception) {
             syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0)
             return SyncResult(ok = false, error = e.message)
+        }
+    }
+
+    /** ISO / "yyyy-MM-dd HH:mm:ss" 时间串 -> 毫秒 (解析失败返回 0; 增量 since 用). */
+    private fun isoToMillis(text: String?): Long {
+        if (text.isNullOrBlank()) return 0
+        return try {
+            Instant.parse(text).toEpochMilli()
+        } catch (e: Exception) {
+            try {
+                java.time.LocalDateTime
+                    .parse(text, java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                    .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+            } catch (e2: Exception) {
+                0L
+            }
         }
     }
 
@@ -731,25 +811,6 @@ class DashboardRepository(
         }
     }
 
-    /** Concurrently fetch up to 5 pages; null = failed page. */
-    private suspend fun fetchBatch(
-        token: String,
-        workspaceId: String,
-        pages: List<Int>,
-    ): Map<Int, List<UsageRecord>?> = coroutineScope {
-        pages.map { p ->
-            async {
-                try {
-                    p to api.fetchUsagePage(token, workspaceId, p)
-                } catch (e: CancellationException) {
-                    throw e // 协程取消穿透, 不把该页标记为失败
-                } catch (e: Exception) {
-                    p to null
-                }
-            }
-        }.awaitAll().toMap()
-    }
-
     fun syncAllAsync(scope: CoroutineScope, mode: String) {
         scope.launch {
             ensureQuota()
@@ -781,7 +842,10 @@ class DashboardRepository(
         // (desktop server.py /api/usage/sessions parity)
         val names = db.settingsDao().getKeyNames()
         val enriched = records.map { st ->
-            val keyGroup = !st.keyId.isNullOrEmpty() && st.sessionId.startsWith("key_")
+            // 无 session 的行分组键为 key_id (key_/sk_ 前缀 — sk_ 为新控制台的 key 形态),
+            // 前端据此显示"未归属"
+            val keyGroup = !st.keyId.isNullOrEmpty() &&
+                (st.sessionId.startsWith("key_") || st.sessionId.startsWith("sk_"))
             val n = st.keyId?.let(names::get)
             st.copy(
                 sessionId = if (keyGroup) "" else st.sessionId,
