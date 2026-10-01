@@ -21,11 +21,18 @@ data class UpdateInfo(
     val latest: String,
     val releaseUrl: String,
     val notes: String,
+    /** 本平台 APK 资产名 (desktop updater _fetch_latest_asset parity); Atom 兜底无资产时为 null. */
+    val assetName: String? = null,
+    /** APK 下载直链 (browser_download_url). */
+    val downloadUrl: String? = null,
+    /** GitHub API 的 assets[].digest, 形如 "sha256:<hex>" (无摘要时为空/缺省). */
+    val digest: String? = null,
 )
 
 /**
  * Check GitHub Releases for a newer version — port of updater.py (desktop).
- * Lightweight prompt only; download happens via the system browser.
+ * 检查 + 解析本平台 APK 资产 (下载直链与 SHA-256 摘要); 实际下载/安装见
+ * [UpdateDownloader] (desktop /api/update/download + open parity).
  *
  * 流程: 优先请求 GitHub API 最新 release -> 解析 tag -> 与本地版本比较;
  * API 受未认证限流(403)/502/超时影响时, 自动降级到 Releases Atom 流(不受 API 限流),
@@ -61,11 +68,24 @@ class UpdateApi(
     private val json = Json { ignoreUnknownKeys = true }
 
     @Serializable
+    private data class AssetResponse(
+        @SerialName("name") val name: String = "",
+        @SerialName("browser_download_url") val downloadUrl: String = "",
+        @SerialName("digest") val digest: String? = null,
+    )
+
+    @Serializable
     private data class ReleaseResponse(
         @SerialName("tag_name") val tagName: String = "",
         @SerialName("html_url") val htmlUrl: String = RELEASE_PAGE_URL,
         @SerialName("body") val body: String? = null,
+        @SerialName("assets") val assets: List<AssetResponse> = emptyList(),
     )
+
+    /** 从资产列表挑本平台 APK (名字以 -android.apk 结尾优先, 退而求其次任意 .apk). */
+    private fun pickAsset(assets: List<AssetResponse>): AssetResponse? =
+        assets.firstOrNull { it.name.lowercase().endsWith("-android.apk") && it.downloadUrl.isNotBlank() }
+            ?: assets.firstOrNull { it.name.lowercase().endsWith(".apk") && it.downloadUrl.isNotBlank() }
 
     /** 四元组比较 (字母后缀按 a=1,b=2... 计入第四位, 无后缀=0) — desktop _parse_version parity. */
     private fun parseVersion(text: String): List<Int>? {
@@ -168,6 +188,9 @@ class UpdateApi(
         var tag = ""
         var releaseUrl = RELEASE_PAGE_URL
         var notes = ""
+        var assetName: String? = null
+        var downloadUrl: String? = null
+        var digest: String? = null
 
         try {
             // API 按创建时间倒序返回, 首个本平台 (-android) 条目即最新 (desktop parity)
@@ -179,6 +202,11 @@ class UpdateApi(
                 tag = rel.tagName
                 releaseUrl = rel.htmlUrl
                 notes = (rel.body ?: "").trim().take(600)
+                pickAsset(rel.assets)?.let {
+                    assetName = it.name
+                    downloadUrl = it.downloadUrl
+                    digest = it.digest
+                }
                 break
             }
         } catch (e: Exception) {
@@ -214,6 +242,9 @@ class UpdateApi(
             latest = tag,
             releaseUrl = releaseUrl,
             notes = notes,
+            assetName = assetName,
+            downloadUrl = downloadUrl,
+            digest = digest,
         )
     }
 }

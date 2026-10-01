@@ -16,21 +16,28 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.yphyphyph.gogauge.auth.Login
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 
 /**
  * Welcome page shown when not logged in — port of the desktop login overlay.
- * 两个登录入口 (desktop welcome parity): OpenCode 主按钮 + Command Code GOAT 次按钮。
+ * 两个登录入口 (desktop welcome parity): OpenCode 主按钮 + Command Code GOAT 次按钮
+ * (GOAT 点击后弹登录方式对话框: 内置窗口 / 系统浏览器 / 粘贴 Cookie)。
  */
 @Composable
 fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Unit) {
     val s = vm.s
+    var goatDialog by remember { mutableStateOf(false) }
     Column(
         Modifier
             .fillMaxSize()
@@ -76,10 +83,10 @@ fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Uni
             Text(s.loginBtn, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.height(8.dp))
-        // Command Code GOAT 登录入口 (desktop welcome 的 btn-login-goat parity; 此前
-        // 仅设置页的"添加 GOAT 账号"可达, 未登录时的欢迎页缺此入口)
+        // Command Code GOAT 登录入口 (desktop welcome 的 btn-login-goat parity;
+        // 点击弹登录方式对话框: 内置窗口 / 系统浏览器 / 粘贴 Cookie)
         OutlinedButton(
-            onClick = onLoginGoat,
+            onClick = { goatDialog = true },
             modifier = Modifier.fillMaxWidth().height(50.dp),
         ) {
             Text(s.loginGoatBtn, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -92,5 +99,25 @@ fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Uni
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(40.dp))
+    }
+
+    if (goatDialog) {
+        LoginMethodDialog(
+            provider = Login.PROVIDER_COMMANDCODE,
+            s = s,
+            busy = vm.pasteLoginStatus == s.cookieChecking,
+            status = vm.pasteLoginStatus.takeIf { it.isNotEmpty() && it != s.cookieChecking } ?: "",
+            onDismiss = {
+                goatDialog = false
+                vm.cancelLogin()
+            },
+            onBuiltIn = {
+                goatDialog = false
+                onLoginGoat()
+            },
+            onPaste = { token ->
+                vm.pasteLogin(token, Login.PROVIDER_COMMANDCODE) { ok -> if (ok) goatDialog = false }
+            },
+        )
     }
 }

@@ -173,9 +173,24 @@ class DashboardRepository(
         return remaining
     }
 
+    /**
+     * 校验凭证可用性 (拉一次配额) — desktop /api/accounts/add-token 的"先校验再落库" parity.
+     * 网络异常视为不可用 (不把未验证的凭证写进库; 与桌面 catch 后回 400 同语义).
+     */
+    suspend fun validateToken(token: String, provider: String): Boolean {
+        return try {
+            val result = if (provider == PROVIDER_COMMANDCODE) ccApi.fetchQuota(token)
+            else api.fetchQuota(token, "Default")
+            result.success
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     /** 登录成功按模式落库: add=新建账号(同 provider+token 去重)并切换; relogin=更新活跃账号凭证。 */
-    suspend fun loginSuccess(token: String, workspaceHint: String, mode: String, provider: String = PROVIDER_OPENCODE) {
-        val aid = if (mode == "add") {
+    suspend fun loginSuccess(token: String, workspaceHint: String, mode: String, provider: String = PROVIDER_OPENCODE) {        val aid = if (mode == "add") {
             syncDao.addAccount(token, workspaceHint, switch = true, provider = provider)
         } else {
             val current = activeAccountId()
@@ -344,7 +359,11 @@ class DashboardRepository(
             val trendDeferred = async { if (chartsFirst) chartDao.dailyStats(30, aid, excluded) else usageDao.dailyStats(30, aid, excluded) }
             val todayTrendDeferred = async { if (chartsFirst) chartDao.todayTrend(aid) else usageDao.todayTrend(aid) }
             val modelsDeferred = async { if (chartsFirst) chartDao.modelStats(range, aid, cycleStart) else usageDao.modelStats(range, aid, cycleStart) }
-            val syncDeferred = async { syncDao.getSyncStateFor(aid) }
+            val syncDeferred = async {
+                // GOAT 账号附全周期聚合请求数 (明细接口仅 24h/100 条, desktop parity)
+                val st = syncDao.getSyncStateFor(aid)
+                if (chartsFirst) st.copy(chartRequests = chartDao.chartsRequests(aid)) else st
+            }
             val usdCnyDeferred = async { usdCny() }
             DashboardData(
                 loggedIn = token.isNotEmpty(),
@@ -866,7 +885,14 @@ class DashboardRepository(
     }
 
     /** Persisted sync progress/state (desktop get_sync_state parity). */
-    suspend fun syncState(): SyncState = syncDao.getSyncState()
+    suspend fun syncState(): SyncState {
+        val st = syncDao.getSyncState()
+        val aid = activeAccountId()
+        // GOAT 账号附全周期聚合请求数 (desktop sync.chart_requests parity)
+        return if (syncDao.getAccountProvider(aid) == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null) {
+            st.copy(chartRequests = chartDao.chartsRequests(aid))
+        } else st
+    }
 
     suspend fun settings(): AppSettings = db.settingsDao().getSettings()
 

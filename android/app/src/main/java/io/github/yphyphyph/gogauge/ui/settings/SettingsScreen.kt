@@ -42,6 +42,8 @@ import io.github.yphyphyph.gogauge.data.model.AppSettings
 import io.github.yphyphyph.gogauge.BuildConfig
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.Strings
+import io.github.yphyphyph.gogauge.ui.UpdateDownloadState
+import io.github.yphyphyph.gogauge.ui.auth.LoginMethodDialog
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
@@ -59,6 +61,7 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
     var confirmDialog by remember { mutableStateOf<ConfirmAction?>(null) }
     var renameTarget by remember { mutableStateOf<AccountInfo?>(null) }
     var addProviderOpen by remember { mutableStateOf(false) }
+    var addMethodProvider by remember { mutableStateOf<String?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
@@ -247,8 +250,13 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
             SetRow(
                 s.syncInfo,
                 vm.dashboard?.sync?.let { sync ->
-                    sync.lastSyncAt?.let { "${s.lastSync} ${Fmt.dateTime(it)} (${sync.lastSyncStatus}) · ${s.totalN} ${Fmt.int(sync.totalRecords)} ${s.items}" }
-                        ?: s.never
+                    sync.lastSyncAt?.let {
+                        // GOAT: 明细仅 24h/100 条, 显示全周期聚合请求数 (desktop ccSyncCounts parity)
+                        val countText = sync.chartRequests?.let { m ->
+                            s.ccSyncCounts.replace("{m}", Fmt.int(m)).replace("{n}", Fmt.int(sync.totalRecords))
+                        } ?: "${s.totalN} ${Fmt.int(sync.totalRecords)} ${s.items}"
+                        "${s.lastSync} ${Fmt.dateTime(it)} (${sync.lastSyncStatus}) · $countText"
+                    } ?: s.never
                 } ?: s.never,
             )
         }
@@ -264,6 +272,35 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                     TextButton(onClick = vm::checkUpdate) { Text(s.checkUpdateBtn, fontSize = 13.sp) }
                 },
             )
+            // 应用内下载更新 (desktop /api/update/download + open parity):
+            // 检查到新版且 release 带本平台 APK 时显示下载/安装入口
+            if (vm.updateDownloadable) {
+                when (val dl = vm.updateDownload) {
+                    is UpdateDownloadState.Downloading ->
+                        SetRow(s.downloading, "${dl.percent}%")
+                    is UpdateDownloadState.Ready ->
+                        SetRow(
+                            s.installUpdate, dl.name,
+                            trailing = {
+                                TextButton(onClick = vm::installUpdate) { Text(s.installUpdate, fontSize = 13.sp) }
+                            },
+                        )
+                    is UpdateDownloadState.Error ->
+                        SetRow(
+                            s.downloadUpdate, dl.message,
+                            trailing = {
+                                TextButton(onClick = vm::downloadUpdate) { Text(s.downloadUpdate, fontSize = 13.sp) }
+                            },
+                        )
+                    UpdateDownloadState.Idle ->
+                        SetRow(
+                            s.downloadUpdate, vm.updateStatus,
+                            trailing = {
+                                TextButton(onClick = vm::downloadUpdate) { Text(s.downloadUpdate, fontSize = 13.sp) }
+                            },
+                        )
+                }
+            }
         }
 
         // ---- about ----
@@ -336,17 +373,38 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 Column {
                     TextButton(onClick = {
                         addProviderOpen = false
-                        vm.startLogin("add", "opencode")
+                        addMethodProvider = "opencode"
                     }) { Text("OpenCode Go") }
                     TextButton(onClick = {
                         addProviderOpen = false
-                        vm.startLogin("add", "commandcode")
+                        addMethodProvider = "commandcode"
                     }) { Text("Command Code GOAT") }
                 }
             },
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { addProviderOpen = false }) { Text(s.cancel) }
+            },
+        )
+    }
+
+    // ---- 登录方式选择 (desktop showLoginDialog parity: 内置窗口 / 系统浏览器 / 粘贴 Cookie) ----
+    addMethodProvider?.let { prov ->
+        LoginMethodDialog(
+            provider = prov,
+            s = s,
+            busy = vm.pasteLoginStatus == s.cookieChecking,
+            status = vm.pasteLoginStatus.takeIf { it.isNotEmpty() && it != s.cookieChecking } ?: "",
+            onDismiss = {
+                addMethodProvider = null
+                vm.cancelLogin()
+            },
+            onBuiltIn = {
+                addMethodProvider = null
+                vm.startLogin("add", prov)
+            },
+            onPaste = { token ->
+                vm.pasteLogin(token, prov) { ok -> if (ok) addMethodProvider = null }
             },
         )
     }

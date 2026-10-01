@@ -33,30 +33,19 @@ import io.github.yphyphyph.gogauge.ui.theme.GoGaugeTheme
 @Composable
 fun AppRoot() {
     val vm: MainViewModel = viewModel()
-    var loginOpen by remember { mutableStateOf(false) }
-
-    // Once login succeeds the VM flips showLogin=false; close the login overlay so
-    // the app automatically transitions into the main shell.
-    LaunchedEffect(vm.showLogin) {
-        if (!vm.showLogin) loginOpen = false
-    }
 
     GoGaugeTheme(darkTheme = vm.darkMode) {
         when {
-            vm.showLogin && !loginOpen -> WelcomeScreen(
+            // 显式登录请求优先于欢迎页: 设置页发起的"添加账号"直接进登录页,
+            // 不再绕经欢迎页, 也不会被欢迎页按钮覆盖 pendingLoginMode/Provider
+            vm.loginRequested -> LoginScreen(vm, onCancel = { vm.cancelLogin() })
+            vm.showLogin -> WelcomeScreen(
                 vm,
-                // 显式设定登录意图 (desktop btn-login/btn-login-goat parity):
-                // opencode=relogin 到活跃/默认账号; GOAT=add 新账号并切换
-                onLogin = {
-                    vm.startLogin("relogin", "opencode")
-                    loginOpen = true
-                },
-                onLoginGoat = {
-                    vm.startLogin("add", "commandcode")
-                    loginOpen = true
-                },
+                // desktop btn-login parity: 主按钮直接开始登录 (relogin 到活跃/默认账号)
+                onLogin = { vm.startLogin("relogin", "opencode") },
+                // desktop btn-login-goat parity: 登录方式对话框选"内置窗口"后进入 GOAT 登录
+                onLoginGoat = { vm.startLogin("add", "commandcode") },
             )
-            loginOpen -> LoginScreen(vm, onCancel = { loginOpen = false })
             else -> MainShell(vm)
         }
     }

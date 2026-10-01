@@ -18,6 +18,8 @@ import io.github.yphyphyph.gogauge.data.model.SyncProgress
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
 import io.github.yphyphyph.gogauge.data.repository.DashboardRepository
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApiException
+import io.github.yphyphyph.gogauge.data.remote.UpdateDownloader
+import io.github.yphyphyph.gogauge.data.remote.UpdateInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -47,7 +49,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val s: Strings get() = if (lang == "en") EnStrings else ZhStrings
 
     // ---- app state ----
+    /** 当前处于未登录态 (欢迎页语义; 由 checkState 维护). */
     var showLogin by mutableStateOf(false)
+        private set
+
+    /**
+     * 用户已发起登录流程 (登录页打开中) — 与 [showLogin] 分离:
+     * showLogin 表示"当前未登录", loginRequested 表示"正在登录".
+     * 设置页发起的添加账号直接进登录页, 不再绕经欢迎页, 也不依赖欢迎页按钮
+     * 覆盖 pendingLoginMode/Provider (desktop 独立登录窗语义 parity).
+     */
+    var loginRequested by mutableStateOf(false)
         private set
 
     /** 登录流程意图: "add"=添加新用户 / "relogin"=重登当前用户 (desktop open_login(mode) parity). */
@@ -56,6 +68,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 登录流程来源: "opencode" / "commandcode" (desktop open_login(provider) parity). */
     var pendingLoginProvider by mutableStateOf("opencode")
+        private set
+
+    /** 粘贴 Cookie 登录的状态反馈 (""=空闲; 供登录方式对话框显示校验中/失败). */
+    var pasteLoginStatus by mutableStateOf("")
         private set
     var loggedIn by mutableStateOf(false)
         private set
@@ -134,6 +150,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var updateStatus by mutableStateOf("")
         private set
 
+    // ---- 更新包下载 (desktop /api/update/download + open parity) ----
+    /** 最近一次检查结果 (含下载直链与 SHA-256 摘要; 见 [updateDownloadable]). */
+    private var lastUpdateInfo by mutableStateOf<UpdateInfo?>(null)
+
+    /** 是否展示"下载更新"入口: 有可用更新且 release 带本平台 APK 资产. */
+    val updateDownloadable: Boolean
+        get() = lastUpdateInfo?.hasUpdate == true && !lastUpdateInfo?.downloadUrl.isNullOrBlank()
+
+    /** 更新包状态 (idle / downloading / ready / error). */
+    var updateDownload by mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle)
+        private set
+
     private var autoSyncJob: Job? = null
     private var quotaRefreshJob: Job? = null
     private var runningAutoSyncKey: String? = null
@@ -195,7 +223,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun startLogin(mode: String, provider: String = "opencode") {
         pendingLoginMode = if (mode in listOf("add", "relogin")) mode else "relogin"
         pendingLoginProvider = provider
-        showLogin = true
+        pasteLoginStatus = ""
+        loginRequested = true
+    }
+
+    /** 取消登录 (登录页返回): 回到欢迎页 (未登录) 或主界面 (已登录添加账号场景)。 */
+    fun cancelLogin() {
+        loginRequested = false
+        pasteLoginStatus = ""
+    }
+
+    /**
+     * 粘贴 Cookie 直接登录 — desktop /api/accounts/add-token parity:
+     * 先拉一次配额校验凭证可用, 通过才落库并进入应用 (错误经 [pasteLoginStatus] 反馈)。
+     */
+    fun pasteLogin(token: String, provider: String, onDone: (Boolean) -> Unit = {}) {
+        val trimmed = token.trim()
+        if (trimmed.isEmpty()) {
+            pasteLoginStatus = s.cookieEmpty
+            onDone(false)
+            return
+        }
+        pasteLoginStatus = s.cookieChecking
+        scope.launch {
+            if (!repo.validateToken(trimmed, provider)) {
+                pasteLoginStatus = s.cookieInvalid
+                onDone(false)
+                return@launch
+            }
+            repo.loginSuccess(trimmed, "", "add", provider)
+            pasteLoginStatus = ""
+            loginRequested = false
+            showLogin = false
+            onDone(true)
+            checkState()
+        }
     }
 
     /**
@@ -206,6 +268,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         scope.launch {
             repo.loginSuccess(token, workspaceHint, pendingLoginMode, pendingLoginProvider)
             loggedIn = true
+            loginRequested = false
             showLogin = false
             // checkState 内部已判断"首次登录 (无同步记录) 自动全量同步",
             // 这里不再额外 startSync("full"): 之前会触发两次全量同步 (第二次虽被
@@ -533,16 +596,57 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun checkUpdate() {
         scope.launch {
             updateStatus = s.checkingUpdate
+            updateDownload = UpdateDownloadState.Idle
             try {
                 val info = repo.checkUpdate(
                     getApplication<Application>().packageManager
                         .getPackageInfo(getApplication<Application>().packageName, 0).versionName ?: "0.1.0"
                 )
+                lastUpdateInfo = info
                 updateStatus = if (info.hasUpdate) "${s.updateFound} ${info.latest}" else s.updateNone
             } catch (e: Exception) {
                 // 展示真实原因 (desktop: 把具体错误带给前端展示)
                 updateStatus = e.message?.trim()?.takeIf { it.isNotEmpty() } ?: s.updateFailed
             }
+        }
+    }
+
+    /** 下载更新包到应用私有目录 (校验 GitHub SHA-256 摘要后置为可安装). */
+    fun downloadUpdate() {
+        val info = lastUpdateInfo ?: return
+        val url = info.downloadUrl
+        if (!info.hasUpdate || url.isNullOrBlank()) return
+        val app = getApplication<Application>()
+        scope.launch {
+            updateDownload = UpdateDownloadState.Downloading(0)
+            try {
+                val file = UpdateDownloader.download(
+                    app, url, info.assetName ?: "GoGauge-update.apk", info.digest,
+                ) { p -> updateDownload = UpdateDownloadState.Downloading(p) }
+                updateDownload = UpdateDownloadState.Ready(file.absolutePath, file.name)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val raw = e.message.orEmpty()
+                val msg = if ("SHA-256" in raw) s.updateSignatureFail else raw.ifBlank { s.updateFailed }
+                updateDownload = UpdateDownloadState.Error(msg)
+            }
+        }
+    }
+
+    /** 触发系统安装器; 未授权"安装未知应用"时跳转系统授权页. */
+    fun installUpdate() {
+        val ready = updateDownload as? UpdateDownloadState.Ready ?: return
+        val app = getApplication<Application>()
+        if (!UpdateDownloader.canInstall(app)) {
+            updateStatus = s.grantInstall
+            UpdateDownloader.openInstallSettings(app)
+            return
+        }
+        try {
+            UpdateDownloader.install(app, java.io.File(ready.path))
+        } catch (e: Exception) {
+            updateDownload = UpdateDownloadState.Error(e.message ?: s.updateFailed)
         }
     }
 
@@ -564,4 +668,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+}
+
+/** 更新包下载状态 — desktop /api/update/download/status 的本地等价. */
+sealed interface UpdateDownloadState {
+    data object Idle : UpdateDownloadState
+    data class Downloading(val percent: Int) : UpdateDownloadState
+    data class Ready(val path: String, val name: String) : UpdateDownloadState
+    data class Error(val message: String) : UpdateDownloadState
 }
