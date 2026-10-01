@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -46,6 +47,8 @@ import com.github.mikephil.charting.data.PieDataSet
 import com.github.mikephil.charting.data.PieEntry
 import com.github.mikephil.charting.formatter.IndexAxisValueFormatter
 import com.github.mikephil.charting.formatter.ValueFormatter
+import com.github.mikephil.charting.highlight.Highlight
+import com.github.mikephil.charting.listener.OnChartValueSelectedListener
 import io.github.yphyphyph.gogauge.data.model.DailyStat
 import io.github.yphyphyph.gogauge.data.model.HourStat
 import io.github.yphyphyph.gogauge.data.model.ModelStat
@@ -132,9 +135,11 @@ fun TodayBarChart(
 /**
  * Model usage doughnut — desktop chartModel (v2.2.0 图例排除交互 parity).
  *
- * 图例常驻全量 top 模型: 点击某项 = 全局排除/恢复该模型 (总卡/Token 构成/排行/趋势
- * 一起变); 被排除项扇区隐藏、图例项画删除线, 再点即加回. MPAndroidChart 的内置
- * 图例不支持删除线与点击回调, 故禁用内置图例、在 Compose 侧自绘 (Chart.js 原生体验).
+ * 图例常驻全量 top 模型: 点击图例项或扇区 = 全局排除/恢复该模型 (总卡/Token 构成/
+ * 排行/趋势一起变); 被排除项扇区隐藏、图例项画删除线, 再点即加回. 数值统一在图例
+ * 展示 (窄屏 + 小扇区时扇区数值标签必然互相重叠, MPAndroidChart 无法按扇区控制),
+ * 扇区只用颜色区分. MPAndroidChart 内置图例不支持删除线与点击回调, 故禁用并在
+ * Compose 侧自绘 (Chart.js 原生体验).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -155,21 +160,20 @@ fun ModelPieChart(
             GgChart.Input, GgChart.Output, GgChart.Reasoning, GgChart.Cache, GgChart.Cost, GgChart.Extra,
         ).map { it.toArgbInt() }
     }
+    val fmt: (Double) -> String = if (dim == "cost") { v -> Fmt.money(v, currency, usdCny) } else { v -> Fmt.tokens(v) }
     // 全量 top6 定序: 颜色与图例都按全量排序的索引分配 —— 排除某项不改变其余项颜色
     val top = remember(models, dim) { models.sortedByDescending { getVal(it, dim) }.take(6) }
-    // Rebuild slices only when models/dim/formatting/exclusions change; 扇区只画参与
-    // 统计的模型, 占比随排除自动归一.
-    val pieData = remember(top, dim, currency, usdCny, excludedModels) {
-        val fmt: (Double) -> String = if (dim == "cost") { v -> Fmt.money(v, currency, usdCny) } else { v -> Fmt.tokens(v) }
+    // Rebuild slices only when models/dim/exclusions change; 扇区只画参与统计的模型,
+    // 占比随排除自动归一.
+    val pieData = remember(top, dim, excludedModels) {
         val visible = top.withIndex().filter { it.value.model !in excludedModels }
         val entries = visible.map { PieEntry(getVal(it.value, dim).toFloat(), it.value.model) }
         val ds = PieDataSet(entries, "").apply {
             colors = visible.map { palette[it.index % palette.size] }
             sliceSpace = 2f
-            valueTextSize = 11f
-            valueFormatter = object : ValueFormatter() {
-                override fun getFormattedValue(value: Float) = fmt(value.toDouble())
-            }
+            // 扇区数值标签在窄屏 + 小扇区上必然互相重叠 (MPAndroidChart 无法按扇区
+            // 控制是否绘制): 数值统一放到下方自绘图例展示
+            setDrawValues(false)
         }
         PieData(ds)
     }
@@ -186,9 +190,16 @@ fun ModelPieChart(
                 }
             },
             update = { chart ->
-                // Always (re)apply the value label color so theme switches stay in sync;
-                // the dataset itself is cached and only reassigned when it actually changes.
-                pieData.dataSet.valueTextColor = labelColor.toArgbInt()
+                // 扇区点击 = 排除/恢复该模型 (与图例点击同一路径; 手机上点扇区更直觉)
+                chart.setOnChartValueSelectedListener(object : OnChartValueSelectedListener {
+                    override fun onValueSelected(e: Entry?, h: Highlight?) {
+                        val label = (e as? PieEntry)?.label ?: return
+                        chart.highlightValues(null)
+                        onToggleModel(label)
+                    }
+
+                    override fun onNothingSelected() {}
+                })
                 if (chart.data !== pieData) {
                     chart.data = pieData
                     if (animate) chart.animateY(400)
@@ -197,7 +208,7 @@ fun ModelPieChart(
                 chart.invalidate()
             },
         )
-        // 图例: 常驻全量 top, 点击切换排除; 被排除项删除线 + 降透明度
+        // 图例: 常驻全量 top, 点击切换排除; 被排除项删除线 + 降透明度; 数值随名称展示
         FlowRow(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),
             horizontalArrangement = Arrangement.Center,
@@ -220,8 +231,16 @@ fun ModelPieChart(
                         m.model,
                         fontSize = 11.sp,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         textDecoration = if (excluded) TextDecoration.LineThrough else null,
                         color = if (excluded) labelColor.copy(alpha = 0.55f) else labelColor,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        fmt(getVal(m, dim)),
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        color = labelColor.copy(alpha = if (excluded) 0.45f else 0.75f),
                     )
                 }
             }
@@ -240,6 +259,14 @@ private fun getVal(m: ModelStat, dim: String): Double = when (dim) {
     "output" -> m.totalOutputTokens.toDouble()
     "cost" -> m.totalCostUsd
     else -> m.totalInputTokens.toDouble()
+}
+
+/** "2026-09-01" -> "9/1" (手机窄屏省宽度); 解析失败回退原串后 5 位. */
+private fun shortDate(iso: String): String = try {
+    val d = java.time.LocalDate.parse(iso)
+    "${d.monthValue}/${d.dayOfMonth}"
+} catch (e: Exception) {
+    iso.takeLast(5)
 }
 
 /**
@@ -284,7 +311,14 @@ fun Sparkline(
     }
 }
 
-/** Usage trend 3-line dual-axis — desktop chartTrend (cost left, requests right, tokens hidden axis). */
+/**
+ * Usage trend 3-line — desktop chartTrend (cost left, requests right, tokens hidden axis).
+ *
+ * MPAndroidChart 只有左右两轴, 无法像桌面 (Chart.js 的 y2 = display:false 隐藏轴) 给
+ * 总 TOKEN 独立比例: 直接挂左轴时 1e9 量级的 token 会把费用轴刻度顶到 ¥2686751200
+ * 这类荒谬值 (费用线同时被压成平线). 这里按费用轴量程归一化 token 线 (峰值对齐,
+ * 视觉走向与桌面一致), 费用/请求双轴刻度保持真实可读.
+ */
 @Composable
 fun TrendLineChart(
     trend: List<DailyStat>,
@@ -314,7 +348,17 @@ fun TrendLineChart(
             enableDashedLine(8f, 6f, 0f)
             axisDependency = com.github.mikephil.charting.components.YAxis.AxisDependency.RIGHT
         }
-        val tokDs = LineDataSet(trend.mapIndexed { i, d -> mk(i, (d.totalInputTokens + d.totalOutputTokens + d.totalReasoningTokens).toDouble()) }, s.totalTokens).apply {
+        val tokenValues = trend.map {
+            (it.totalInputTokens + it.totalOutputTokens + it.totalReasoningTokens).toDouble()
+        }
+        val costMax = trend.maxOfOrNull { it.totalCostUsd } ?: 0.0
+        val tokenMax = tokenValues.maxOrNull() ?: 0.0
+        val tokenScale = when {
+            tokenMax <= 0.0 -> 0.0
+            costMax > 0.0 -> costMax / tokenMax  // 归一化到费用轴量程 (峰值对齐)
+            else -> 1.0  // 费用全 0: 轴上只有 token 一条线, 原样画
+        }
+        val tokDs = LineDataSet(trend.mapIndexed { i, _ -> mk(i, tokenValues[i] * tokenScale) }, s.totalTokens).apply {
             color = GgChart.Reasoning.toArgbInt()
             lineWidth = 2f
             setDrawCircles(false)
@@ -323,7 +367,8 @@ fun TrendLineChart(
         }
         LineData(costDs, reqDs, tokDs)
     }
-    val dateLabels = remember(trend) { trend.map { it.date.substring(5) } }
+    // 手机窄屏: "09-01" 8 个标签必粘连 -> 短格式 "9/1" + 减少标签数
+    val dateLabels = remember(trend) { trend.map { shortDate(it.date) } }
     AndroidView(
         modifier = modifier.fillMaxWidth().height(260.dp),
         factory = { ctx ->
@@ -338,7 +383,8 @@ fun TrendLineChart(
                 setDrawGridLines(false)
                 textSize = 10f
                 textColor = labelColor.toArgbInt()
-                labelCount = 8
+                setLabelCount(5, false)
+                granularity = 1f
                 valueFormatter = IndexAxisValueFormatter(dateLabels)
             }
             chart.axisLeft.apply {
