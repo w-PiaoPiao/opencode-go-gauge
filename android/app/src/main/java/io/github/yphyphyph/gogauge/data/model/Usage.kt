@@ -24,6 +24,16 @@ data class UsageRecord(
 }
 
 /**
+ * request-logs 的一页结果 (游标分页) — mirrors opencode_api.UsagePage (desktop).
+ * nextCursor 供续翻 (null = 已到最早一条); retentionDays 为服务端保留窗口 (30 天)。
+ */
+data class UsagePage(
+    val records: List<UsageRecord> = emptyList(),
+    val nextCursor: String? = null,
+    val retentionDays: Int? = null,
+)
+
+/**
  * One aggregated chart bucket — mirrors commandcode_api.UsageChartBucket (desktop).
  * 对应 /internal/usage/charts 的 (模型 × 5min 时间桶) 全周期聚合; tokens_in 已含缓存读。
  */

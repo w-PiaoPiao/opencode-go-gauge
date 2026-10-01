@@ -1,10 +1,16 @@
 package io.github.yphyphyph.gogauge.data.remote
 
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
+import io.github.yphyphyph.gogauge.data.model.UsagePage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
@@ -13,37 +19,43 @@ import java.util.concurrent.TimeUnit
 /** OpenCode API errors. */
 open class OpenCodeApiException(message: String) : Exception(message)
 
-/** Auth failure (401/403) — token invalid or expired. */
+/** Auth failure (401) — token invalid or expired. */
 class AuthException(message: String) : OpenCodeApiException(message)
 
 /**
- * 瞬时 HTTP 故障 (5xx) — 内部标记为可重试, 让 fetch 的重试循环接住.
- * 不对外抛出: 重试耗尽后统一转成 OpenCodeApiException("网络错误: ...").
+ * 瞬时 HTTP 故障 — 内部标记为可重试, 让 fetch 的重试循环接住.
+ * 不对外抛出: 重试耗尽后统一转成 OpenCodeApiException.
  */
 internal class RetryableHttpException(message: String) : Exception(message)
 
 /**
- * OpenCode Go API client — 1:1 port of opencode_api.py (desktop).
- * Two capabilities:
- *  1. quota: fetch opencode.ai dashboard HTML, regex-parse 5h/weekly/monthly usage
- *  2. usage: call opencode.ai/_server server-fn endpoint, parse each request's token/cost detail
+ * OpenCode Console API 客户端 (2026-09 控制台改版后) — 1:1 port of opencode_api.py (desktop).
+ *
+ * - 会话 Cookie: ``__Host-console_session`` (旧 ``auth`` 兼容历史 token)
+ * - 配额: GET /console/api/go/status      (旧 dashboard HTML 解析已下线)
+ * - 明细: GET /console/api/request-logs   (游标分页; 服务端仅保留 30 天)
+ * - 工作区: GET /console/api/orgs;  Key 名称: GET /console/api/service-accounts
+ *
+ * 所有 /console/api 请求除 Cookie 外还需 ``x-org-id: <wrk_xxx>`` 头 (org 即工作区).
  */
 class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
 
     companion object {
-        const val DASHBOARD_BASE = "https://opencode.ai/workspace"
-        const val WORKSPACE_SERVER_ID =
-            "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f"
-        const val DEFAULT_USAGE_SERVER_ID =
-            "bfd684bfc2e4eed05cd0b518f5e4eafd3f3376e3938abb9e536e7c03df831e5c"
+        const val CONSOLE_ORIGIN = "https://opencode.ai"
+        const val CONSOLE_LOGIN_URL = "https://opencode.ai/console/login"
+        const val API_BASE = "https://opencode.ai/console/api"
+        const val SESSION_COOKIE = "__Host-console_session"
+        const val LEGACY_SESSION_COOKIE = "auth"
+        /** request-logs 单页条数 (接口上限 100). */
+        const val USAGE_PAGE_SIZE = 100
+
         const val USER_AGENT =
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0"
+
         // Mobile-tuned network budget. opencode.ai is frequently slow to answer, and with
         // the desktop's 30s / 3-retry budget a single hung request can stall the refresh
         // spinner for ~90s. Cap each attempt so failures surface in seconds; the retry
-        // loop still absorbs transient blips on modest mobile links. (Desktop parity:
-        // opencode_api.py uses 30s / 3 retries — fine there because the desktop syncs on
-        // a background thread and never blocks the UI.)
+        // loop still absorbs transient blips on modest mobile links.
         const val CONNECT_TIMEOUT_SEC = 10L
         const val READ_TIMEOUT_SEC = 15L
         const val WRITE_TIMEOUT_SEC = 15L
@@ -51,16 +63,7 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
         const val FETCH_RETRIES = 2
         private val RETRY_BACKOFF_MS = listOf(500L, 1500L, 3000L)
         private val WORKSPACE_ID_RE = Regex("wrk_[A-Za-z0-9]+")
-        private val WORKSPACE_ENTRY_RE = Regex(
-            """id\s*:\s*"(wrk_[^"]+)"[^{}]*?name\s*:\s*"([^"]*)"""",
-            setOf(RegexOption.DOT_MATCHES_ALL),
-        )
-        // keys 页面内嵌响应数据形如 {id:"key_xxx",name:"gongsi",key:"sk-...",...}
-        // 注意收尾必须是 """" (1 个内容引号 + 3 个原始字符串终止符):
-        // 原写作 "\"" 会让 pattern 以孤立反斜杠结尾, Regex 在类初始化时抛
-        // PatternSyntaxException("Unrecognized backslash escape sequence"),
-        // 即 OpenCodeApi 一旦被引用整个应用启动即崩溃.
-        private val KEY_ENTRY_RE = Regex("""\{id:"(key_[A-Za-z0-9]+)",name:"([^"]*)"""")
+        private val COOKIE_PAIR_RE = Regex("^[A-Za-z0-9_.\\-]+\\s*=\\s*\\S+$")
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
@@ -70,103 +73,122 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
             .build()
     }
 
-    /** Normalize token into the auth cookie segment. */
+    private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * 把 token 规范化为 Cookie 头 — port of opencode_api.build_cookie_header.
+     *
+     * 支持三种输入: 完整 Cookie 串 (``__Host-console_session=st_xxx`` / ``auth=Fe26...``,
+     * 直接取该段)、``Cookie:`` 前缀串、纯值 (补上新版会话 Cookie 名)。
+     */
     fun buildCookieHeader(token: String): String {
-        var cookie = token.trim()
-        if (cookie.startsWith("cookie:", ignoreCase = true)) cookie = cookie.substring(7).trim()
-        if (cookie.isEmpty()) return ""
-        for (part in cookie.split(";")) {
+        var raw = token.trim()
+        if (raw.startsWith("cookie:", ignoreCase = true)) raw = raw.substring(7).trim()
+        if (raw.isEmpty()) return ""
+        for (part in raw.split(";")) {
             val p = part.trim()
-            if (p.startsWith("auth=")) return p
+            if (p.isEmpty()) continue
+            val name = p.substringBefore("=").trim().lowercase()
+            if (name == SESSION_COOKIE.lowercase() || name == LEGACY_SESSION_COOKIE) return p
         }
-        return "auth=$cookie"
+        // 形如 name=value 的其它 Cookie 原样透传, 纯值则按新版会话 Cookie 处理
+        if (COOKIE_PAIR_RE.matches(raw)) return raw
+        return "$SESSION_COOKIE=$raw"
     }
 
-    private suspend fun fetch(url: String, headers: Map<String, String>): String =
-        withContext(Dispatchers.IO) {
-            var lastExc: Exception? = null
-            for (attempt in 0 until FETCH_RETRIES) {
-                try {
-                    val rb = Request.Builder().url(url)
-                    for ((k, v) in headers) rb.header(k, v)
-                    val result = client.newCall(rb.build()).execute().use { resp ->
-                        val status = resp.code
-                        // 有界读取 (desktop 为 socket 层 4MiB 截断): 防超大响应整读内存
-                        val declared = resp.header("Content-Length")?.toLongOrNull() ?: 0L
-                        if (declared > MAX_BODY_BYTES) {
-                            throw OpenCodeApiException("响应过大 ($declared 字节, 上限 $MAX_BODY_BYTES)")
-                        }
-                        val body = readBounded(resp)
-                        when {
-                            status == 401 || status == 403 ->
-                                throw AuthException("认证失败 (HTTP $status)，请重新登录")
-                            status == 404 ->
-                                throw OpenCodeApiException("工作区不存在 (HTTP 404)")
-                            status >= 500 ->
-                                // 5xx 视为瞬时故障: 走重试循环 (4xx 仍立即终止)
-                                throw RetryableHttpException("请求返回 HTTP $status")
-                            status !in 200..299 ->
-                                throw OpenCodeApiException("请求返回 HTTP $status")
-                            else -> body
+    /**
+     * GET 请求, 自动重试 — port of opencode_api._fetch.
+     * 401 -> AuthException; 403/404 -> 立即失败 (确定性错误); 其余非 2xx 与网络错误重试。
+     */
+    private suspend fun fetchText(
+        url: String,
+        headers: Map<String, String>,
+        retries: Int = FETCH_RETRIES,
+    ): String = withContext(Dispatchers.IO) {
+        var lastExc: Exception? = null
+        for (attempt in 0 until retries) {
+            try {
+                val rb = Request.Builder().url(url)
+                for ((k, v) in headers) rb.header(k, v)
+                val result = client.newCall(rb.build()).execute().use { resp ->
+                    val status = resp.code
+                    when {
+                        status == 401 -> throw AuthException("登录已过期，请重新登录")
+                        status == 403 -> throw OpenCodeApiException("无访问权限 (HTTP 403)")
+                        status == 404 -> throw OpenCodeApiException("工作区不存在或接口不可用 (HTTP 404)")
+                        status !in 200..299 -> throw RetryableHttpException("请求返回 HTTP $status")
+                        else -> {
+                            val declared = resp.header("Content-Length")?.toLongOrNull() ?: 0L
+                            if (declared > MAX_BODY_BYTES) {
+                                throw OpenCodeApiException(
+                                    "响应过大 (${declared / (1 shl 20)} MiB," +
+                                        " 上限 ${MAX_BODY_BYTES / (1 shl 20)} MiB)"
+                                )
+                            }
+                            readBounded(resp)
                         }
                     }
-                    return@withContext result
-                } catch (e: RetryableHttpException) {
-                    lastExc = e
-                    if (attempt < FETCH_RETRIES - 1) delay(RETRY_BACKOFF_MS[attempt])
-                } catch (e: IOException) {
-                    lastExc = e
-                    if (attempt < FETCH_RETRIES - 1) delay(RETRY_BACKOFF_MS[attempt])
-                } catch (e: AuthException) {
-                    throw e
-                } catch (e: OpenCodeApiException) {
-                    throw e
                 }
+                return@withContext result
+            } catch (e: RetryableHttpException) {
+                lastExc = e
+                if (attempt < retries - 1) delay(RETRY_BACKOFF_MS[attempt.coerceAtMost(RETRY_BACKOFF_MS.size - 1)])
+            } catch (e: IOException) {
+                lastExc = e
+                if (attempt < retries - 1) delay(RETRY_BACKOFF_MS[attempt.coerceAtMost(RETRY_BACKOFF_MS.size - 1)])
+            } catch (e: AuthException) {
+                throw e
+            } catch (e: OpenCodeApiException) {
+                throw e
             }
-            throw OpenCodeApiException("网络错误: $lastExc")
         }
+        throw OpenCodeApiException("网络错误: $lastExc")
+    }
 
     /** 流式读取响应体, 超 MAX_BODY_BYTES 即中止 (防止先整读内存再截断). */
     private fun readBounded(resp: okhttp3.Response): String =
         readBoundedBody(resp, MAX_BODY_BYTES)
 
-    private suspend fun serverCall(serverId: String, args: List<Any?>, refererPath: String, token: String): String {
+    /** 调用 /console/api 下接口, 返回解析后的 JSON — port of opencode_api._api_get. */
+    private suspend fun apiGet(
+        path: String,
+        token: String,
+        orgId: String? = null,
+        params: Map<String, String?> = emptyMap(),
+        retries: Int = FETCH_RETRIES,
+    ): JsonElement {
         val cookie = buildCookieHeader(token)
         if (cookie.isEmpty()) throw OpenCodeApiException("token 为空")
-        val url = "https://opencode.ai/_server?id=" +
-            java.net.URLEncoder.encode(serverId, "UTF-8") +
-            "&args=" + java.net.URLEncoder.encode(argsToJson(args), "UTF-8")
-        val headers = mapOf(
+        var url = "$API_BASE$path"
+        val query = params.entries
+            .filter { it.value != null }
+            .joinToString("&") { (k, v) ->
+                java.net.URLEncoder.encode(k, "UTF-8") + "=" + java.net.URLEncoder.encode(v!!, "UTF-8")
+            }
+        if (query.isNotEmpty()) url += "?$query"
+        val headers = mutableMapOf(
             "Cookie" to cookie,
-            "X-Server-Id" to serverId,
-            "X-Server-Instance" to "server-fn:${System.currentTimeMillis() * 1000}",
+            "Accept" to "application/json",
             "User-Agent" to USER_AGENT,
-            "Origin" to "https://opencode.ai",
-            "Referer" to "https://opencode.ai$refererPath",
-            "Accept" to "text/javascript, application/json;q=0.9, */*;q=0.8",
+            "Origin" to CONSOLE_ORIGIN,
+            "Referer" to "$CONSOLE_ORIGIN/console/",
         )
-        return fetch(url, headers)
+        if (!orgId.isNullOrBlank()) headers["x-org-id"] = orgId
+        val text = fetchText(url, headers, retries = retries)
+        return try {
+            json.parseToJsonElement(text)
+        } catch (e: Exception) {
+            throw OpenCodeApiException("接口返回非 JSON 数据")
+        }
     }
 
-    private fun argsToJson(args: List<Any?>): String {
-        // Python json.dumps style: strings quoted, ints plain, null
-        val sb = StringBuilder("[")
-        for ((i, a) in args.withIndex()) {
-            if (i > 0) sb.append(",")
-            sb.append(
-                when (a) {
-                    null -> "null"
-                    is String -> "\"" + a.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-                    else -> a.toString()
-                }
-            )
-        }
-        sb.append("]")
-        return sb.toString()
+    private fun JsonElement?.asText(): String {
+        val text = (this as? JsonPrimitive)?.content ?: return ""
+        return if (text == "null") "" else text
     }
 
     // ------------------------------------------------------------------
-    // Workspace resolution
+    // Workspace resolution (GET /orgs)
     // ------------------------------------------------------------------
 
     fun extractWorkspaceId(raw: String): String {
@@ -176,54 +198,49 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
         return WORKSPACE_ID_RE.find(value)?.value ?: ""
     }
 
-    /** Fetch all workspaces (id, name) for the account. */
+    /** Fetch all workspaces (id, name) for the account — port of fetch_workspace_refs. */
     suspend fun fetchWorkspaceRefs(token: String): List<Pair<String, String>> {
-        val cookie = buildCookieHeader(token)
-        if (cookie.isEmpty()) throw OpenCodeApiException("token 为空")
-        val url = "https://opencode.ai/_server?id=" +
-            java.net.URLEncoder.encode(WORKSPACE_SERVER_ID, "UTF-8")
-        val headers = mapOf(
-            "Cookie" to cookie,
-            "X-Server-Id" to WORKSPACE_SERVER_ID,
-            "X-Server-Instance" to "server-fn:${System.currentTimeMillis() * 1000}",
-            "User-Agent" to USER_AGENT,
-            "Origin" to "https://opencode.ai",
-            "Referer" to "https://opencode.ai",
-            "Accept" to "text/javascript, application/json;q=0.9, */*;q=0.8",
-        )
-        val text = fetch(url, headers)
+        val data = apiGet("/orgs", token)
         val refs = mutableListOf<Pair<String, String>>()
         val seen = HashSet<String>()
-        for (m in WORKSPACE_ENTRY_RE.findAll(text)) {
-            val workspaceId = m.groupValues[1]
-            val name = m.groupValues[2].trim()
-            if (workspaceId in seen) continue
-            seen.add(workspaceId)
-            refs.add(workspaceId to name)
+        if (data is JsonArray) {
+            for (element in data) {
+                val item = element as? JsonObject ?: continue
+                val workspaceId = item["id"].asText().trim()
+                if (workspaceId.isEmpty() || workspaceId in seen) continue
+                seen.add(workspaceId)
+                refs.add(workspaceId to item["name"].asText().trim())
+            }
         }
-        if (refs.isEmpty()) throw OpenCodeApiException("无法从账号数据解析工作区 ID")
+        if (refs.isEmpty()) throw OpenCodeApiException("无法获取工作区列表 (账号下没有工作区)")
         return refs
     }
 
-    /** Resolve workspace hint (id / name / Default) into wrk_xxx ID. */
-    suspend fun resolveWorkspaceId(hint: String, token: String): String {
+    /**
+     * 解析工作区提示 -> (workspace_id, 显示名) — port of _resolve_workspace.
+     * hint 已是 wrk_xxx 时直接采用; 否则拉一次工作区列表按 ID/名称匹配, 匹配不到取第一个。
+     */
+    private suspend fun resolveWorkspace(hint: String, token: String): Pair<String, String> {
         val resolved = extractWorkspaceId(hint)
-        if (resolved.isNotEmpty()) return resolved
+        if (resolved.isNotEmpty()) return resolved to ""
         val refs = fetchWorkspaceRefs(token)
         val hintL = hint.trim().lowercase()
         if (hintL.isNotEmpty()) {
             for ((workspaceId, name) in refs) {
                 if (workspaceId.lowercase() == hintL || name.lowercase() == hintL) {
-                    return workspaceId
+                    return workspaceId to name
                 }
             }
         }
-        if (refs.isNotEmpty()) return refs[0].first
-        throw OpenCodeApiException("无法从 \"$hint\" 解析工作区 ID")
+        return refs[0]
     }
 
+    /** Resolve workspace hint (id / name / Default) into wrk_xxx ID. */
+    suspend fun resolveWorkspaceId(hint: String, token: String): String =
+        resolveWorkspace(hint, token).first
+
     // ------------------------------------------------------------------
-    // Quota
+    // Quota (GET /go/status)
     // ------------------------------------------------------------------
 
     /** Fetch quota windows for a workspace. Never throws — returns QuotaResult with error. */
@@ -233,112 +250,80 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
         if (token.isBlank()) {
             return QuotaResult("Default", hint, false, nowIso, error = "未配置 token")
         }
+        var name = hint
         return try {
-            val workspaceId = resolveWorkspaceId(hint, token)
-            val cookie = buildCookieHeader(token)
-            if (cookie.isEmpty()) throw OpenCodeApiException("token 为空")
-            val url = "$DASHBOARD_BASE/${java.net.URLEncoder.encode(workspaceId, "UTF-8")}/go"
-            val headers = mapOf(
-                "Cookie" to cookie,
-                "User-Agent" to USER_AGENT,
-                "Accept" to "text/html, application/xhtml+xml",
-            )
-            // dashboard HTML is slow: shorter timeout + fewer retries (desktop parity)
-            val html = withContext(Dispatchers.IO) {
-                var last: Exception? = null
-                for (attempt in 0 until 2) {
-                    try {
-                        val rb = Request.Builder().url(url)
-                        for ((k, v) in headers) rb.header(k, v)
-                    val result = client.newCall(rb.build()).execute().use { resp ->
-                        when (resp.code) {
-                            401, 403 -> throw AuthException("认证失败 (HTTP ${resp.code})，请重新登录")
-                            404 -> throw OpenCodeApiException("工作区不存在 (HTTP 404)")
-                        }
-                        if (resp.code !in 200..299) throw OpenCodeApiException("请求返回 HTTP ${resp.code}")
-                        readBounded(resp)
-                    }
-                        return@withContext result
-                    } catch (e: IOException) {
-                        last = e
-                        if (attempt == 0) delay(500)
-                    } catch (e: AuthException) {
-                        throw e
-                    } catch (e: OpenCodeApiException) {
-                        throw e
-                    }
-                }
-                throw OpenCodeApiException("网络错误: $last")
+            val (workspaceId, wsName) = resolveWorkspace(hint, token)
+            if (wsName.isNotEmpty()) name = wsName
+            val payload = apiGet("/go/status", token, orgId = workspaceId, retries = 2)
+            val windows = QuotaParser.parseGoStatus(payload)
+            if (windows.isEmpty()) {
+                throw OpenCodeApiException("账号未订阅 OpenCode Go (接口无额度数据)")
             }
-            val windows = QuotaParser.parseQuotaHtml(html)
-            if (windows.isEmpty()) throw OpenCodeApiException("无法从 Dashboard HTML 解析额度数据")
-            QuotaResult("Default", workspaceId, true, nowIso, windows = windows)
+            QuotaResult(name, workspaceId, true, nowIso, windows = windows)
         } catch (e: CancellationException) {
             // 协程取消必须向上传播: 否则被取消的调用会继续跑完阻塞请求,
             // 并把"取消失败"当成一次配额错误写进缓存
             throw e
         } catch (e: Exception) {
-            QuotaResult("Default", hint, false, nowIso, error = e.message ?: "未知错误")
+            QuotaResult(name, hint, false, nowIso, error = e.message ?: "未知错误")
         }
     }
 
     // ------------------------------------------------------------------
-    // Usage records
+    // Usage records (GET /request-logs, 游标分页)
     // ------------------------------------------------------------------
 
-    /** Fetch one page of usage records (50 per page, page starts at 0). */
+    /**
+     * 拉取一页用量明细 (游标分页, 按时间倒序) — port of fetch_usage_page.
+     *
+     * @param cursor 上一页返回的 nextCursor; 首页传 null
+     * @param sinceMs 只取该毫秒时间戳之后的记录 (增量同步用)
+     */
     suspend fun fetchUsagePage(
         token: String,
         workspaceId: String,
-        page: Int = 0,
-        keyId: String? = null,
-        usageServerId: String? = null,
-    ): List<io.github.yphyphyph.gogauge.data.model.UsageRecord> {
-        val args = mutableListOf<Any?>(workspaceId as Any?)
-        if (keyId != null) {
-            if (page > 0) {
-                args.add(page); args.add(keyId)
-            } else {
-                args.add(keyId)
-            }
-        } else if (page > 0) {
-            args.add(page)
-        }
-        val serverId = usageServerId ?: DEFAULT_USAGE_SERVER_ID
-        val text = serverCall(serverId, args, "/workspace/$workspaceId/usage", token)
-        return UsageParser.parseUsageResponse(text)
+        cursor: String? = null,
+        limit: Int = USAGE_PAGE_SIZE,
+        sinceMs: Long? = null,
+    ): UsagePage {
+        val params = mutableMapOf<String, String?>(
+            "limit" to limit.coerceIn(1, USAGE_PAGE_SIZE).toString(),
+        )
+        if (!cursor.isNullOrBlank()) params["cursor"] = cursor
+        if (sinceMs != null && sinceMs > 0) params["since"] = sinceMs.toString()
+        val payload = apiGet("/request-logs", token, orgId = workspaceId, params = params)
+        return UsageParser.parseRequestLogs(payload)
     }
 
+    // ------------------------------------------------------------------
+    // Key 名称 (GET /service-accounts)
+    // ------------------------------------------------------------------
+
     /**
-     * 拉取工作区下所有 API key 的名称映射 (key_id -> 名称) — port of
-     * opencode_api.fetch_key_names (desktop). keys 页面内嵌响应数据形如
-     * {id:"key_xxx",name:"gongsi",key:"sk-...",...}, 正则提取 id 与 name 即可.
-     * 页面拉取或解析失败时返回空 map, 不影响主流程 (desktop parity).
+     * 拉取工作区下所有 API key 的名称映射 (key_id -> 名称) — port of fetch_key_names.
+     * service-accounts 响应形如 ``{"items":[{account:{...}, keys:[{id,name},...]}]}``;
+     * 失败时返回空 map (不影响主流程)。
      */
     suspend fun fetchKeyNames(token: String, workspaceId: String): Map<String, String> {
-        val cookie = buildCookieHeader(token)
-        if (cookie.isEmpty()) return emptyMap()
-        val url = "$DASHBOARD_BASE/$workspaceId/keys"
-        val headers = mapOf(
-            "Cookie" to cookie,
-            "User-Agent" to USER_AGENT,
-            "Origin" to "https://opencode.ai",
-            "Referer" to "$DASHBOARD_BASE/$workspaceId/keys",
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        return try {
-            val html = fetch(url, headers)
-            val names = linkedMapOf<String, String>()
-            for (m in KEY_ENTRY_RE.findAll(html)) {
-                val id = m.groupValues[1]
-                val name = m.groupValues[2].trim()
-                if (id.isNotEmpty() && name.isNotEmpty()) names.putIfAbsent(id, name)
-            }
-            names
+        val payload = try {
+            apiGet("/service-accounts", token, orgId = workspaceId, retries = 2)
         } catch (e: CancellationException) {
-            throw e  // 取消不当作"拉取失败", 见 fetchQuota 同处说明
+            throw e  // 取消不当作"拉取失败"
         } catch (e: Exception) {
-            emptyMap()
+            return emptyMap()
         }
+        val names = linkedMapOf<String, String>()
+        val items = (payload as? JsonObject)?.get("items") as? JsonArray ?: return names
+        for (entry in items) {
+            val obj = entry as? JsonObject ?: continue
+            val keys = obj["keys"] as? JsonArray ?: continue
+            for (key in keys) {
+                val k = key as? JsonObject ?: continue
+                val keyId = k["id"].asText().trim()
+                val name = k["name"].asText().trim()
+                if (keyId.isNotEmpty() && name.isNotEmpty()) names.putIfAbsent(keyId, name)
+            }
+        }
+        return names
     }
 }

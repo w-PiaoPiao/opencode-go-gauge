@@ -83,6 +83,8 @@ data class AppSettings(
     val windowDays: Int? = 60,        // 30/60/90/180, null = all
     val autoSync: Boolean = true,
     val showAccountsPanel: Boolean = false,  // 账户总览面板开关 (v2.1.0)
+    /** 图表动画开关 (默认关闭: 低配设备上每次刷新重建动画是掉帧大头; desktop chart_animation parity). */
+    val chartAnimation: Boolean = false,
 )
 
 /** Dashboard bundle — mirrors GET /api/dashboard (desktop). */
