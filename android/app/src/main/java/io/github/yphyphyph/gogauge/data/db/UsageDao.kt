@@ -101,15 +101,36 @@ abstract class UsageDao {
         return clause to args
     }
 
-    /** 组合 WHERE: account 过滤恒在首位, 周期条件以 AND 追加. */
-    private fun buildWhere(period: String, accountId: Int, cycleStart: String? = null): Pair<String, Array<Any>> {
+    /** 组合 WHERE: account 过滤恒在首位, 周期与排除条件以 AND 追加. */
+    private fun buildWhere(
+        period: String,
+        accountId: Int,
+        cycleStart: String? = null,
+        excludeModels: Collection<String> = emptyList(),
+    ): Pair<String, Array<Any>> {
         val (clause, args) = periodClause(period, cycleStart)
-        val allArgs = listOf<Any>(accountId) + args.toList()
-        return if (clause == null) {
-            "WHERE account_id = ?" to arrayOf<Any>(accountId)
-        } else {
-            "WHERE account_id = ? AND $clause" to allArgs.toTypedArray()
+        val parts = mutableListOf("account_id = ?")
+        val params = mutableListOf<Any>(accountId)
+        if (clause != null) {
+            parts.add(clause)
+            params.addAll(args)
         }
+        val (exClause, exArgs) = excludeClause(excludeModels)
+        if (exClause != null) {
+            parts.add(exClause)
+            params.addAll(exArgs)
+        }
+        return "WHERE ${parts.joinToString(" AND ")}" to params.toTypedArray()
+    }
+
+    /**
+     * 「排除模型」SQL 片段 — mirrors db._exclude_clause (参数化 NOT IN, 模型名不拼进 SQL 文本).
+     * 去空白去重后为空返回 null.
+     */
+    private fun excludeClause(excludeModels: Collection<String>): Pair<String?, List<String>> {
+        val cleaned = excludeModels.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (cleaned.isEmpty()) return null to emptyList()
+        return "model NOT IN (${cleaned.joinToString(", ") { "?" }})" to cleaned
     }
 
     private fun totalsSql(where: String): String = """
@@ -129,8 +150,13 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun totalsRaw(query: SupportSQLiteQuery): TotalsRow
 
-    suspend fun totals(period: String, accountId: Int, cycleStart: String? = null): Totals {
-        val (where, args) = buildWhere(period, accountId, cycleStart)
+    suspend fun totals(
+        period: String,
+        accountId: Int,
+        cycleStart: String? = null,
+        excludeModels: Collection<String> = emptyList(),
+    ): Totals {
+        val (where, args) = buildWhere(period, accountId, cycleStart, excludeModels)
         val row = totalsRaw(SimpleSQLiteQuery(totalsSql(where), args))
         val hit = row.cacheHitTokens
         val miss = row.uncachedInputTokens
@@ -152,9 +178,11 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun dailyStatsRaw(query: SupportSQLiteQuery): List<DailyStatRow>
 
-    /** Daily aggregation — mirrors db.daily_stats (按账号). */
-    suspend fun dailyStats(days: Int, accountId: Int): List<DailyStat> {
+    /** Daily aggregation — mirrors db.daily_stats (按账号, 支持排除模型). */
+    suspend fun dailyStats(days: Int, accountId: Int, excludeModels: Collection<String> = emptyList()): List<DailyStat> {
         val clamped = days.coerceIn(1, 365)
+        val (exClause, exArgs) = excludeClause(excludeModels)
+        val exAnd = if (exClause != null) " AND $exClause" else ""
         val rows = dailyStatsRaw(
             SimpleSQLiteQuery(
                 """
@@ -168,11 +196,11 @@ abstract class UsageDao {
                        COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
                        COALESCE(COUNT(*), 0) AS request_count
                 FROM usage_records
-                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?)
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?)$exAnd
                 GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
-                arrayOf(accountId, "-${clamped} days"),
+                (listOf<Any>(accountId, "-${clamped} days") + exArgs).toTypedArray(),
             )
         )
         // 连续日期补 0 (desktop db.daily_stats parity): 无记录的天也占位,

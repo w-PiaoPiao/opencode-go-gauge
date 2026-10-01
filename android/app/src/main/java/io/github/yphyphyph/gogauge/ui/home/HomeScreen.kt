@@ -65,8 +65,9 @@ import io.github.yphyphyph.gogauge.util.Fmt
 fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) {
     val s = vm.s
     LaunchedEffect(Unit) {
-        // 按 range 一致性判断: 统计页可能已把共享的 dashboard 切成别的周期
-        vm.ensureDashboard(vm.homeRange)
+        // 按口径一致性判断 (range + 排除集): 统计页可能已把共享的 dashboard
+        // 切成别的周期或带上了模型排除; 首页恒全量
+        vm.ensureHomeDashboard()
     }
 
     val ptrState = rememberPullToRefreshState()

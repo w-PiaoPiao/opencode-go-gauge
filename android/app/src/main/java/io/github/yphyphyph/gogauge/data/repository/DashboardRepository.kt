@@ -151,8 +151,18 @@ class DashboardRepository(
 
     /** 登录成功按模式落库: add=新建账号(同 provider+token 去重)并切换; relogin=更新活跃账号凭证。 */
     suspend fun loginSuccess(token: String, workspaceHint: String, mode: String, provider: String = PROVIDER_OPENCODE) {
-        if (mode == "add") syncDao.addAccount(token, workspaceHint, switch = true, provider = provider)
-        else syncDao.saveToken(token, workspaceHint.trim().ifEmpty { "Default" }, provider)
+        val aid = if (mode == "add") {
+            syncDao.addAccount(token, workspaceHint, switch = true, provider = provider)
+        } else {
+            val current = activeAccountId()
+            syncDao.saveToken(token, workspaceHint.trim().ifEmpty { "Default" }, provider)
+            current
+        }
+        // 凭证变更 → 丢弃该账号的配额缓存 (desktop invalidate_quota_cache parity):
+        // 否则 TTL (30s) 内仍会读到旧凭证的结果 (通常是 401 失败值), 界面表现为
+        // "重新登录成功但配额依旧是空的". 在途刷新写的是被移除的旧缓存对象,
+        // 不会污染重建后的新槽.
+        if (aid != 0) clearQuotaSlot(aid)
         _quota.value = null
     }
 
@@ -262,7 +272,11 @@ class DashboardRepository(
     // Dashboard bundle (server.py /api/dashboard parity — 活跃账号视角)
     // ------------------------------------------------------------------
 
-    suspend fun loadDashboard(range: String): DashboardData {
+    /**
+     * @param excludeModels 排除的模型 (统计页图例交互): totals/daily/trend 按排除后重聚合,
+     *   models 恒为全量 (环形图需保留被排除模型以便图例点击加回 — desktop v2.2.0 parity).
+     */
+    suspend fun loadDashboard(range: String, excludeModels: Set<String> = emptySet()): DashboardData {
         val aid = activeAccountId()
         val token = syncDao.getTokenFor(aid)
         val quota = if (token.isNotEmpty()) _quota.value else null
@@ -281,12 +295,13 @@ class DashboardRepository(
                 db.settingsDao().getMonthlyReset(aid), System.currentTimeMillis(),
             )
         } else null
+        val excluded = excludeModels.filter { it.isNotBlank() }.toSet()
         // Run the independent DB/exchange queries concurrently to cut first-paint latency.
         return coroutineScope {
-            val totalsDeferred = async { if (chartsFirst) chartDao.totals(range, aid, cycleStart) else usageDao.totals(range, aid, cycleStart) }
-            val todayDeferred = async { if (chartsFirst) chartDao.totals("today", aid) else usageDao.totals("today", aid) }
-            val dailyDeferred = async { if (chartsFirst) chartDao.dailyStats(7, aid) else usageDao.dailyStats(7, aid) }
-            val trendDeferred = async { if (chartsFirst) chartDao.dailyStats(30, aid) else usageDao.dailyStats(30, aid) }
+            val totalsDeferred = async { if (chartsFirst) chartDao.totals(range, aid, cycleStart, excluded) else usageDao.totals(range, aid, cycleStart, excluded) }
+            val todayDeferred = async { if (chartsFirst) chartDao.totals("today", aid, excludeModels = excluded) else usageDao.totals("today", aid, excludeModels = excluded) }
+            val dailyDeferred = async { if (chartsFirst) chartDao.dailyStats(7, aid, excluded) else usageDao.dailyStats(7, aid, excluded) }
+            val trendDeferred = async { if (chartsFirst) chartDao.dailyStats(30, aid, excluded) else usageDao.dailyStats(30, aid, excluded) }
             val todayTrendDeferred = async { if (chartsFirst) chartDao.todayTrend(aid) else usageDao.todayTrend(aid) }
             val modelsDeferred = async { if (chartsFirst) chartDao.modelStats(range, aid, cycleStart) else usageDao.modelStats(range, aid, cycleStart) }
             val syncDeferred = async { syncDao.getSyncStateFor(aid) }
@@ -305,6 +320,7 @@ class DashboardRepository(
                 range = range,
                 usdCny = usdCnyDeferred.await(),
                 serverTime = now,
+                excluded = excluded,
             )
         }
     }

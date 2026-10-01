@@ -53,8 +53,8 @@ import io.github.yphyphyph.gogauge.util.Fmt
 fun StatsScreen(vm: MainViewModel = viewModel()) {
     val s = vm.s
     LaunchedEffect(Unit) {
-        // 按 range 一致性判断: 首页可能已把共享的 dashboard 切成别的周期
-        vm.ensureDashboard(vm.statsRange)
+        // 按口径一致性判断 (range + 排除集): 首页可能已把共享的 dashboard 切成别的周期
+        vm.ensureStatsDashboard()
     }
 
     val ptrState = rememberPullToRefreshState()
@@ -130,54 +130,71 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                 ModelPieChart(
                     models = d.models,
                     dim = vm.modelDim,
+                    excludedModels = vm.excludedModels,
+                    onToggleModel = vm::toggleModelExclusion,
                     s = s,
                     labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     currency = vm.currency,
                     usdCny = d.usdCny,
                 )
-                d.models.sortedByDescending {
-                    when (vm.modelDim) {
-                        "output" -> it.totalOutputTokens.toDouble()
-                        "cost" -> it.totalCostUsd
-                        // input: 含缓存命中的总输入 (与 Charts.getVal 同口径)
-                        else -> it.totalInputTokens.toDouble()
+                // 排行只列参与统计的模型 (与总卡/构成/趋势口径一致); 全部被排除时
+                // 显示空态 (desktop chartModel 的 mr-empty parity)
+                val ranked = d.models
+                    .filter { it.model !in vm.excludedModels }
+                    .sortedByDescending {
+                        when (vm.modelDim) {
+                            "output" -> it.totalOutputTokens.toDouble()
+                            "cost" -> it.totalCostUsd
+                            // input: 含缓存命中的总输入 (与 Charts.getVal 同口径)
+                            else -> it.totalInputTokens.toDouble()
+                        }
                     }
-                }.take(3).forEachIndexed { i, m ->
-                    // 数值列与排序维度一致: 输入/输出显示 Token 数, 只有成本维度显示金额
-                    // (原先无论选哪个维度都显示金额)
-                    val rankToken = if (vm.modelDim == "cost") {
-                        Fmt.money(m.totalCostUsd, vm.currency, d.usdCny)
-                    } else {
-                        val v = if (vm.modelDim == "output") m.totalOutputTokens else m.totalInputTokens
-                        Fmt.tokens(v.toLong())
-                    }
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("#${i + 1}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = NumFontFamily, fontSize = 12.sp)
-                        Spacer(Modifier.padding(horizontal = 6.dp))
-                        ModelIcon(model = m.model, dark = vm.darkMode, modifier = Modifier.padding(end = 6.dp))
-                        Text(m.model, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                        Text(
-                            "${Fmt.int(m.requestCount)} · ${s.hitRate} ${m.hitRate.toInt()}%",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                        )
-                        Spacer(Modifier.padding(horizontal = 4.dp))
-                        Text(
-                            rankToken,
-                            fontSize = 12.sp,
-                            fontFamily = NumFontFamily,
-                            maxLines = 1,
-                            textAlign = TextAlign.End,
-                            // 定宽右对齐: Token 简写 (12.03M) 与金额 (¥78.53) 宽度不同,
-                            // 不固定会随维度切换左右抖动
-                            modifier = Modifier.widthIn(min = 58.dp),
-                        )
+                if (ranked.isEmpty()) {
+                    Text(
+                        s.noData,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                    )
+                } else {
+                    ranked.take(3).forEachIndexed { i, m ->
+                        // 数值列与排序维度一致: 输入/输出显示 Token 数, 只有成本维度显示金额
+                        // (原先无论选哪个维度都显示金额)
+                        val rankToken = if (vm.modelDim == "cost") {
+                            Fmt.money(m.totalCostUsd, vm.currency, d.usdCny)
+                        } else {
+                            val v = if (vm.modelDim == "output") m.totalOutputTokens else m.totalInputTokens
+                            Fmt.tokens(v.toLong())
+                        }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("#${i + 1}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = NumFontFamily, fontSize = 12.sp)
+                            Spacer(Modifier.padding(horizontal = 6.dp))
+                            ModelIcon(model = m.model, dark = vm.darkMode, modifier = Modifier.padding(end = 6.dp))
+                            Text(m.model, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            Text(
+                                "${Fmt.int(m.requestCount)} · ${s.hitRate} ${m.hitRate.toInt()}%",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                            Spacer(Modifier.padding(horizontal = 4.dp))
+                            Text(
+                                rankToken,
+                                fontSize = 12.sp,
+                                fontFamily = NumFontFamily,
+                                maxLines = 1,
+                                textAlign = TextAlign.End,
+                                // 定宽右对齐: Token 简写 (12.03M) 与金额 (¥78.53) 宽度不同,
+                                // 不固定会随维度切换左右抖动
+                                modifier = Modifier.widthIn(min = 58.dp),
+                            )
+                        }
                     }
                 }
             }

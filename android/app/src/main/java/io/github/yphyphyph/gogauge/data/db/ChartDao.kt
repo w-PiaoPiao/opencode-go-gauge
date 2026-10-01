@@ -85,14 +85,35 @@ abstract class ChartDao {
         return clause to args
     }
 
-    private fun buildWhere(period: String, accountId: Int, cycleStart: String?): Pair<String, Array<Any>> {
+    /**
+     * 「排除模型」SQL 片段 — mirrors db._exclude_clause (参数化 NOT IN, 模型名不拼进 SQL 文本).
+     * 去空白去重后为空返回 null.
+     */
+    private fun excludeClause(excludeModels: Collection<String>): Pair<String?, List<String>> {
+        val cleaned = excludeModels.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (cleaned.isEmpty()) return null to emptyList()
+        return "model NOT IN (${cleaned.joinToString(", ") { "?" }})" to cleaned
+    }
+
+    private fun buildWhere(
+        period: String,
+        accountId: Int,
+        cycleStart: String?,
+        excludeModels: Collection<String> = emptyList(),
+    ): Pair<String, Array<Any>> {
         val (clause, args) = periodClause(period, cycleStart)
-        val allArgs = listOf<Any>(accountId) + args.toList()
-        return if (clause == null) {
-            "WHERE account_id = ?" to arrayOf<Any>(accountId)
-        } else {
-            "WHERE account_id = ? AND $clause" to allArgs.toTypedArray()
+        val parts = mutableListOf("account_id = ?")
+        val params = mutableListOf<Any>(accountId)
+        if (clause != null) {
+            parts.add(clause)
+            params.addAll(args)
         }
+        val (exClause, exArgs) = excludeClause(excludeModels)
+        if (exClause != null) {
+            parts.add(exClause)
+            params.addAll(exArgs)
+        }
+        return "WHERE ${parts.joinToString(" AND ")}" to params.toTypedArray()
     }
 
     // ------------------------------------------------------------------
@@ -116,8 +137,13 @@ abstract class ChartDao {
     @RawQuery(observedEntities = [UsageChartEntity::class])
     abstract suspend fun totalsRaw(query: SupportSQLiteQuery): UsageDao.TotalsRow
 
-    suspend fun totals(period: String, accountId: Int, cycleStart: String? = null): Totals {
-        val (where, args) = buildWhere(period, accountId, cycleStart)
+    suspend fun totals(
+        period: String,
+        accountId: Int,
+        cycleStart: String? = null,
+        excludeModels: Collection<String> = emptyList(),
+    ): Totals {
+        val (where, args) = buildWhere(period, accountId, cycleStart, excludeModels)
         val row = totalsRaw(SimpleSQLiteQuery(totalsSql(where), args))
         val hit = row.cacheHitTokens
         val miss = row.uncachedInputTokens
@@ -185,9 +211,11 @@ abstract class ChartDao {
     @RawQuery(observedEntities = [UsageChartEntity::class])
     abstract suspend fun dailyStatsRaw(query: SupportSQLiteQuery): List<DailyStatRow>
 
-    /** Daily aggregation from chart buckets — mirrors db.daily_stats charts 分支 (按账号). */
-    suspend fun dailyStats(days: Int, accountId: Int): List<io.github.yphyphyph.gogauge.data.model.DailyStat> {
+    /** Daily aggregation from chart buckets — mirrors db.daily_stats charts 分支 (按账号, 支持排除). */
+    suspend fun dailyStats(days: Int, accountId: Int, excludeModels: Collection<String> = emptyList()): List<io.github.yphyphyph.gogauge.data.model.DailyStat> {
         val clamped = days.coerceIn(1, 365)
+        val (exClause, exArgs) = excludeClause(excludeModels)
+        val exAnd = if (exClause != null) " AND $exClause" else ""
         val rows = dailyStatsRaw(
             SimpleSQLiteQuery(
                 """
@@ -201,11 +229,11 @@ abstract class ChartDao {
                        SUM(total_cost) AS total_cost_usd,
                        SUM(requests) AS request_count
                 FROM usage_charts
-                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?)
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?)$exAnd
                 GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
-                arrayOf(accountId, "-${clamped} days"),
+                (listOf<Any>(accountId, "-${clamped} days") + exArgs).toTypedArray(),
             )
         )
         // 连续日期补 0 (与 UsageDao.dailyStats 同口径)

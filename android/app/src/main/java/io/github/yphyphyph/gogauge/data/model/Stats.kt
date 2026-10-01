@@ -100,6 +100,13 @@ data class DashboardData(
     val range: String,
     val usdCny: Double,
     val serverTime: String,
+    /**
+     * 本份数据对应的排除模型集 (desktop /api/dashboard 的 excluded_models 回显 parity).
+     *
+     * totals/daily/trend 按此集合重聚合; models 恒为全量 (环形图图例需保留被排除
+     * 模型以便点击加回). 容器比较用于判断"当前数据是否为目标口径"。
+     */
+    val excluded: Set<String> = emptySet(),
 )
 
 /** Account info — mirrors db._account_dict (desktop v2.0.0 + provider v2.1.0). */

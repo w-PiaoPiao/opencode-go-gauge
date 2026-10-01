@@ -1,10 +1,25 @@
 package io.github.yphyphyph.gogauge.ui.components
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -12,7 +27,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.BarChart
 import com.github.mikephil.charting.charts.LineChart
@@ -101,11 +118,20 @@ fun TodayBarChart(data: List<HourStat>, s: Strings, labelColor: Color, gridLineC
     )
 }
 
-/** Model usage doughnut — desktop chartModel. */
+/**
+ * Model usage doughnut — desktop chartModel (v2.2.0 图例排除交互 parity).
+ *
+ * 图例常驻全量 top 模型: 点击某项 = 全局排除/恢复该模型 (总卡/Token 构成/排行/趋势
+ * 一起变); 被排除项扇区隐藏、图例项画删除线, 再点即加回. MPAndroidChart 的内置
+ * 图例不支持删除线与点击回调, 故禁用内置图例、在 Compose 侧自绘 (Chart.js 原生体验).
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ModelPieChart(
     models: List<ModelStat>,
     dim: String,
+    excludedModels: Set<String>,
+    onToggleModel: (String) -> Unit,
     s: Strings,
     labelColor: Color,
     currency: String,
@@ -117,14 +143,16 @@ fun ModelPieChart(
             GgChart.Input, GgChart.Output, GgChart.Reasoning, GgChart.Cache, GgChart.Cost, GgChart.Extra,
         ).map { it.toArgbInt() }
     }
-    // Rebuild slices only when models/dim/formatting changes.
-    val pieData = remember(models, dim, currency, usdCny) {
-        val sorted = models.sortedByDescending { getVal(it, dim) }
-        val top = sorted.take(6)
+    // 全量 top6 定序: 颜色与图例都按全量排序的索引分配 —— 排除某项不改变其余项颜色
+    val top = remember(models, dim) { models.sortedByDescending { getVal(it, dim) }.take(6) }
+    // Rebuild slices only when models/dim/formatting/exclusions change; 扇区只画参与
+    // 统计的模型, 占比随排除自动归一.
+    val pieData = remember(top, dim, currency, usdCny, excludedModels) {
         val fmt: (Double) -> String = if (dim == "cost") { v -> Fmt.money(v, currency, usdCny) } else { v -> Fmt.tokens(v) }
-        val entries = top.map { PieEntry(getVal(it, dim).toFloat(), it.model) }
+        val visible = top.withIndex().filter { it.value.model !in excludedModels }
+        val entries = visible.map { PieEntry(getVal(it.value, dim).toFloat(), it.value.model) }
         val ds = PieDataSet(entries, "").apply {
-            colors = palette
+            colors = visible.map { palette[it.index % palette.size] }
             sliceSpace = 2f
             valueTextSize = 11f
             valueFormatter = object : ValueFormatter() {
@@ -133,30 +161,57 @@ fun ModelPieChart(
         }
         PieData(ds)
     }
-    AndroidView(
-        modifier = modifier.fillMaxWidth().height(230.dp),
-        factory = { ctx ->
-            PieChart(ctx).apply {
-                description.isEnabled = false
-                setDrawEntryLabels(false)
-                holeRadius = 60f
-                isRotationEnabled = true
+    Column(modifier.fillMaxWidth()) {
+        AndroidView(
+            modifier = Modifier.fillMaxWidth().height(230.dp),
+            factory = { ctx ->
+                PieChart(ctx).apply {
+                    description.isEnabled = false
+                    setDrawEntryLabels(false)
+                    holeRadius = 60f
+                    isRotationEnabled = true
+                    setNoDataText("")  // 全部模型被排除时不留英文占位提示
+                }
+            },
+            update = { chart ->
+                // Always (re)apply the value label color so theme switches stay in sync;
+                // the dataset itself is cached and only reassigned when it actually changes.
+                pieData.dataSet.valueTextColor = labelColor.toArgbInt()
+                if (chart.data !== pieData) chart.data = pieData
+                chart.legend.isEnabled = false  // 图例在 Compose 侧自绘 (删除线 + 点击)
+                chart.invalidate()
+            },
+        )
+        // 图例: 常驻全量 top, 点击切换排除; 被排除项删除线 + 降透明度
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            top.forEachIndexed { i, m ->
+                val excluded = m.model in excludedModels
+                Row(
+                    modifier = Modifier
+                        .clickable { onToggleModel(m.model) }
+                        .padding(horizontal = 7.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .background(Color(palette[i % palette.size]), CircleShape),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        m.model,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        textDecoration = if (excluded) TextDecoration.LineThrough else null,
+                        color = if (excluded) labelColor.copy(alpha = 0.55f) else labelColor,
+                    )
+                }
             }
-        },
-        update = { chart ->
-            // Always (re)apply the value label color so theme switches stay in sync;
-            // the dataset itself is cached and only reassigned when it actually changes.
-            pieData.dataSet.valueTextColor = labelColor.toArgbInt()
-            if (chart.data !== pieData) chart.data = pieData
-            chart.legend.isEnabled = true
-            chart.legend.textSize = 11f
-            chart.legend.textColor = labelColor.toArgbInt()
-            chart.legend.orientation = com.github.mikephil.charting.components.Legend.LegendOrientation.HORIZONTAL
-            chart.legend.verticalAlignment = com.github.mikephil.charting.components.Legend.LegendVerticalAlignment.BOTTOM
-            chart.legend.horizontalAlignment = com.github.mikephil.charting.components.Legend.LegendHorizontalAlignment.CENTER
-            chart.invalidate()
-        },
-    )
+        }
+    }
 }
 
 /**
