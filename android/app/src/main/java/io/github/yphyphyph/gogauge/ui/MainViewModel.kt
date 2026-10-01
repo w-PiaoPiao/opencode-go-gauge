@@ -96,6 +96,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var modelDim by mutableStateOf("input")
         private set
+    /**
+     * 统计页排除的模型 (环形图图例点击切换).
+     *
+     * 只作用于统计页口径 —— 首页恒全量 (desktop state.excludedModels +
+     * "排除仅作用于统计页, 切首页仍全量" parity). 切换账号时清空 (模型集不同).
+     */
+    var excludedModels by mutableStateOf<Set<String>>(emptySet())
+        private set
 
     // ---- records page ----
     var records by mutableStateOf<PageResult<UsageRecordRow>?>(null)
@@ -152,7 +160,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Quota arrives asynchronously (30s cache): refresh the dashboard when it lands
         scope.launch {
             repo.quota.collectLatest { q ->
-                if (loggedIn && dashboard != null) loadDashboard(currentDashRange())
+                if (loggedIn && dashboard != null) loadDashboard(currentDashRange(), currentExcluded())
             }
         }
         checkState()
@@ -260,19 +268,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         recordsPage = 1
         sessionsPage = 1
         models = emptyList()
+        excludedModels = emptySet()  // 新账号模型集不同: 旧的排除项一并清掉 (desktop parity)
     }
 
     // ------------------------------------------------------------------
     // Dashboard
     // ------------------------------------------------------------------
 
-    fun loadDashboard(range: String = homeRange) {
+    /**
+     * @param exclude 统计页排除的模型集; 首页调用方传空集 (首页恒全量口径).
+     *   数据按 (range, exclude) 双元组与目标比对, 任一不符才重载.
+     */
+    fun loadDashboard(range: String = homeRange, exclude: Set<String> = emptySet()) {
         scope.launch {
             try {
                 // Desktop parity: every dashboard load kicks a background quota refresh
                 // (30s cache + re-entry guard inside ensureQuota).
                 repo.ensureQuotaAsync(scope)
-                dashboard = repo.loadDashboard(range)
+                dashboard = repo.loadDashboard(range, exclude)
                 dashboardVersion++
             } catch (e: CancellationException) {
                 throw e // viewModelScope 取消时正常退出, 不当加载失败记录
@@ -282,15 +295,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 首页口径: 恒全量 (排除只作用于统计页 — desktop parity). */
+    fun ensureHomeDashboard() = ensureDashboard(homeRange, emptySet())
+
+    /** 统计页口径: 带当前排除集. */
+    fun ensureStatsDashboard() = ensureDashboard(statsRange, excludedModels)
+
     /**
-     * 仅在缓存数据与目标 range 不一致时重载.
+     * 仅在缓存数据与目标口径不一致时重载.
      *
-     * 首页与统计页共用同一个 dashboard 对象但各自的 range 状态独立: 之前在统计页
-     * 切到 "30d" 后回到首页, 首页会直接用 30d 的数据渲染, 而高亮的却是 "today".
-     * DashboardData.range 记录了数据对应的周期, 以此为判据即可.
+     * 首页与统计页共用同一个 dashboard 对象但各自的 range/排除集独立: 之前在
+     * 统计页切到 "30d" 后回到首页, 首页会直接用 30d 的数据渲染, 而高亮的却是
+     * "today". DashboardData 记录了数据对应的 (range, excluded), 以此为判据即可.
      */
-    fun ensureDashboard(range: String) {
-        if (dashboard?.range != range) loadDashboard(range)
+    private fun ensureDashboard(range: String, exclude: Set<String>) {
+        if (dashboard?.range != range || dashboard?.excluded != exclude) loadDashboard(range, exclude)
+    }
+
+    /** 图例点击: 切换模型排除并全局重聚合 (desktop onModelLegendClick parity).
+     *  扇区/图例的即时反馈由 UI 直接用 [excludedModels] 渲染, 数值等本次重载落地. */
+    fun toggleModelExclusion(model: String) {
+        excludedModels = if (model in excludedModels) excludedModels - model else excludedModels + model
+        loadDashboard(statsRange, excludedModels)
     }
 
     // ------------------------------------------------------------------
@@ -350,7 +376,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         scope.launch {
             repo.ensureQuotaAsync(scope)
             repo.syncUsage(mode)
-            loadDashboard()
+            // 保持当前页面的口径 (range + 排除集): 无条件用默认值会把统计页刷新
+            // 换成首页周期的全量数据
+            loadDashboard(currentDashRange(), currentExcluded())
         }
     }
 
@@ -363,16 +391,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 当前 dashboard 数据对应的周期; 无数据时回退首页默认 (避免刷新把统计页打回首页周期). */
     private fun currentDashRange(): String = dashboard?.range ?: homeRange
 
+    /** 当前 dashboard 数据对应的排除集 (统计页口径; 首页则为空集). */
+    private fun currentExcluded(): Set<String> = dashboard?.excluded ?: emptySet()
+
     fun refreshNow() {
         android.util.Log.i("GoGauge", "refreshNow called")
-        // 用当前已加载的 range 重载: 之前无条件用 homeRange, 在统计页刷新会把
-        // 数据换成首页周期
+        // 用当前已加载的 range + 排除集重载: 之前无条件用 homeRange, 在统计页刷新
+        // 会把数据换成首页周期
         if (repo.progress.value.running) {
-            loadDashboard(currentDashRange())
+            loadDashboard(currentDashRange(), currentExcluded())
             return
         }
         // Instant paint from the local DB — do not block the spinner on network calls.
-        loadDashboard(currentDashRange())
+        loadDashboard(currentDashRange(), currentExcluded())
         startSync("incremental")
     }
 
@@ -453,12 +484,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun changeHomeRange(r: String) {
         homeRange = r
-        loadDashboard(r)
+        loadDashboard(r, emptySet())  // 首页恒全量
     }
 
     fun changeStatsRange(r: String) {
         statsRange = r
-        loadDashboard(r)
+        loadDashboard(r, excludedModels)
     }
 
     fun changeModelDim(d: String) {
