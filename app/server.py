@@ -758,6 +758,15 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         else:
             period, days = "30d", 30
         token = db.get_token()
+        # 统计页「排除模型」筛选 (模型用量环形图图例点击): 可重复查询参数,
+        # 逐项清洗 — 去空白/去重/长度与数量上限, 防止超长 WHERE 拖慢聚合
+        exclude_models: list[str] = []
+        for raw in query.get("exclude_models", []):
+            name = (raw or "").strip()
+            if name and len(name) <= 200 and name not in exclude_models:
+                exclude_models.append(name)
+            if len(exclude_models) >= 50:
+                break
         # quota 使用缓存 (按账号分槽), 过期时后台刷新, 不阻塞 dashboard 响应
         active_id = db.get_active_account_id()
         _ensure_quota_async(active_id)
@@ -767,10 +776,12 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         # 显式透传 active_id: 各聚合内部若收到 None 会各自重跑
         # get_active_account_id() (settings 读取 + JSON 解析 + MIN(id) 查询),
         # 一次 dashboard 会重复 7 次.
-        totals_period = db.totals(period, active_id)
+        totals_period = db.totals(period, active_id, exclude_models)
         # 首页默认 range 即 today: 此时 totals(period) 与 totals("today") 是
         # 同一个查询, 复用结果省一次聚合 (弱机上聚合是 dashboard 的 CPU 大头)
-        totals_today = totals_period if period == "today" else db.totals("today", active_id)
+        totals_today = (
+            totals_period if period == "today" else db.totals("today", active_id, exclude_models)
+        )
         _json_response(
             handler,
             {
@@ -782,10 +793,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "quota": quota,
                 "totals": totals_period,
                 "today": totals_today,
-                "daily": db.daily_stats(7, active_id),  # 每日趋势固定显示近 7 天
-                "trend": db.daily_stats(30, active_id),  # 用量趋势 (费用/请求双轴)
+                "daily": db.daily_stats(7, active_id, exclude_models),  # 每日趋势固定显示近 7 天
+                "trend": db.daily_stats(30, active_id, exclude_models),  # 用量趋势 (费用/请求双轴)
                 "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势
-                "models": db.model_stats(period, active_id),
+                "models": db.model_stats(period, active_id, exclude_models),
+                "excluded_models": exclude_models,  # 回显生效的排除项 (前端校验/恢复用)
                 "sync": db.get_sync_state(active_id),
                 "progress": _sync_progress_snapshot(),
                 "range": range_param,

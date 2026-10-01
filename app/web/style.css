@@ -248,6 +248,16 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .seg { display: inline-flex; gap: 3px; background: var(--muted); padding: 3px; border-radius: 8px; }
 .seg button { border: none; background: transparent; padding: 4px 11px; border-radius: 6px; font-size: 12px; color: var(--text2); cursor: pointer; font-family: var(--font-sans); }
 .seg button.active { background: var(--card); color: var(--primary); font-weight: 600; box-shadow: 0 1px 2px rgba(30,20,60,.12); }
+/* 已隐藏模型 chips: 环形图图例点击排除后在此恢复 (单个/全部) */
+.mr-head { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
+.mr-excluded { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; }
+.mrx-label { font-size: 11px; color: var(--text3); white-space: nowrap; }
+.mrx-chip { display: inline-block; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--border); background: var(--muted); color: var(--text2); font-size: 11px; padding: 2px 8px; border-radius: 999px; cursor: pointer; font-family: var(--font-sans); }
+.mrx-chip:hover { color: var(--danger); border-color: currentColor; background: var(--danger-soft); }
+.mrx-x { font-size: 10px; opacity: .7; margin-left: 4px; }
+.mrx-reset { border: none; background: none; color: var(--primary); font-size: 11px; cursor: pointer; padding: 2px 4px; white-space: nowrap; font-family: var(--font-sans); }
+.mrx-reset:hover { text-decoration: underline; }
+.mr-empty { padding: 14px; text-align: center; color: var(--text3); font-size: 12px; }
 .mr-body { display: flex; flex-direction: column; }
 .mr-list { padding: 2px 14px 8px; display: flex; flex-direction: column; gap: 2px; }
 .mr-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 8px; font-size: 12px; }

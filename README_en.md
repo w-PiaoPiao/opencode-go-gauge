@@ -49,7 +49,7 @@
 - **Quota monitoring**: 5h rolling / weekly / monthly windows with progress bars, remaining % and reset countdown
 - **Usage overview**: cache hit rate / hit amount / total tokens (incl. cache hits) / requests / cost / sessions
 - **Today's trend**: 24-hour input / output bar chart
-- **Usage stats**: token breakdown (input / output / reasoning / cache read / cache write / sessions), model usage donut + ranking, cost / requests / total tokens triple-line trend
+- **Usage stats**: token breakdown (input / output / reasoning / cache read / cache write / sessions), model usage donut + ranking, cost / requests / total tokens triple-line trend; click a donut legend item to exclude a model — KPI cards, token breakdown, ranking and trend all follow, with one-click restore chips on the card header
 - **Session history**: per-session aggregation of requests / input / output / reasoning / total tokens / cost, paginated
 - **Usage records**: request-level detail with pagination and model filtering, incl. model / key-name columns
 - **Multi-account support**: user management (add / switch / rename / remove / re-login), usage isolated per account, key-name column on records & sessions; accounts can come from OpenCode or Command Code (with source badge)
