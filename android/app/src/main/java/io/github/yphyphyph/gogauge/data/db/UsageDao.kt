@@ -55,8 +55,19 @@ abstract class UsageDao {
     )
     abstract suspend fun pruneOldRecords(intervalArg: String, accountId: Int): Int
 
-    @Query("DELETE FROM usage_records")
-    abstract suspend fun deleteAll()
+    /**
+     * 回填 local_date 为 NULL 的历史行 —— 旧版 Android (API ≤33) 上 Instant.parse
+     * 拒绝 "+00:00" 导致 localDateOf 恒失败, 这些行在日期范围聚合里永远不命中。
+     *
+     * created_at 为 ISO8601 UTC ("...Z"), substr 取 "YYYY-MM-DDTHH:MM:SS" 这一 SQLite
+     * 原生支持的格式 (不依赖 3.38+ 才有的 Z 后缀解析), 'localtime' 转本地日 ——
+     * 与 Kotlin 侧 localDateOf 口径一致。幂等: 无 NULL 行时是无害空更新。
+     */
+    @Query(
+        "UPDATE usage_records SET local_date = date(substr(created_at, 1, 19), 'localtime')" +
+            " WHERE local_date IS NULL AND LENGTH(created_at) >= 19"
+    )
+    abstract suspend fun backfillNullLocalDates(): Int
 
     // ------------------------------------------------------------------
     // Aggregations (desktop db.py ports)

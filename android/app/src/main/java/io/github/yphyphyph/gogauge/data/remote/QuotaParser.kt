@@ -1,12 +1,11 @@
 package io.github.yphyphyph.gogauge.data.remote
 
 import io.github.yphyphyph.gogauge.data.model.QuotaWindow
+import io.github.yphyphyph.gogauge.util.parseIsoInstant
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import java.time.Instant
 import java.time.LocalDateTime
-import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
 /**
@@ -41,16 +40,7 @@ object QuotaParser {
     /** ISO 时间串规范为 ``...Z`` (无时区按 UTC 处理, 解析失败原样返回). */
     private fun isoFromText(raw: String): String {
         if (raw.isBlank()) return ""
-        try {
-            return Instant.parse(raw).toString()
-        } catch (e: Exception) {
-            // 继续尝试带偏移与无时区两种形态
-        }
-        try {
-            return OffsetDateTime.parse(raw).toInstant().toString()
-        } catch (e: Exception) {
-            // 继续尝试无时区
-        }
+        parseIsoInstant(raw)?.let { return it.toString() }
         return try {
             LocalDateTime.parse(raw).atZone(ZoneOffset.UTC).toInstant().toString()
         } catch (e: Exception) {
@@ -60,12 +50,8 @@ object QuotaParser {
 
     private fun secondsUntil(isoText: String, nowMillis: Long): Int {
         if (isoText.isBlank()) return 0
-        return try {
-            val target = Instant.parse(isoText).toEpochMilli()
-            maxOf(0L, (target - nowMillis) / 1000L).toInt()
-        } catch (e: Exception) {
-            0
-        }
+        val target = parseIsoInstant(isoText)?.toEpochMilli() ?: return 0
+        return maxOf(0L, (target - nowMillis) / 1000L).toInt()
     }
 
     /**

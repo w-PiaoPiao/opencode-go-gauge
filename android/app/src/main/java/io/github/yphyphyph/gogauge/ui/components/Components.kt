@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -201,7 +202,7 @@ fun QuotaCard(
     }
 }
 
-/** Pill row — desktop .pill-row / .pill (min touch 44dp height) */
+/** Pill row — desktop .pill-row / .pill (touch target ≥44dp height) */
 @Composable
 fun PillRow(
     options: List<Pair<String, String>>, // (value, label)
@@ -224,6 +225,9 @@ fun PillRow(
                     .clip(RoundedCornerShape(7.dp))
                     .background(if (active) MaterialTheme.colorScheme.surface else Color.Transparent)
                     .clickable { onSelect(value) }
+                    // 触控目标 ≥44dp: 原实现只有 ~36dp (13sp 文字 + 9dp*2 padding),
+                    // 单手/小屏下容易点空
+                    .defaultMinSize(minHeight = 44.dp)
                     .padding(horizontal = 13.dp, vertical = 9.dp),
                 contentAlignment = Alignment.Center,
             ) {

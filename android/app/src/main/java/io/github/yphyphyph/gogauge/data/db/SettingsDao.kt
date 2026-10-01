@@ -3,6 +3,7 @@ package io.github.yphyphyph.gogauge.data.db
 import androidx.room.Dao
 import androidx.room.Query
 import io.github.yphyphyph.gogauge.data.model.AppSettings
+import io.github.yphyphyph.gogauge.util.parseIsoInstant
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -124,15 +125,18 @@ abstract class SettingsDao {
 
     /** 持久化账号的下次月度重置时间, UTC "yyyy-MM-dd HH:mm:ss" (desktop db.record_monthly_reset parity). */
     suspend fun saveMonthlyReset(accountId: Int, resetUtc: String?) {
-        if (resetUtc.isNullOrBlank()) return
-        savePayloadKey("monthly_reset:$accountId", resetUtc)
+        val normalized = MonthlyCycle.normalize(resetUtc) ?: return
+        savePayloadKey("monthly_reset:$accountId", normalized)
     }
 
     /** 记录账号当前计费周期起止 (desktop db.record_period_bounds parity, commandcode 真实周期)。 */
     suspend fun savePeriodBounds(accountId: Int, startUtc: String?, endUtc: String?) {
-        if (startUtc.isNullOrBlank() || endUtc.isNullOrBlank()) return
-        savePayloadKey("period_start:$accountId", startUtc)
-        savePayloadKey("period_end:$accountId", endUtc)
+        // ISO -> UTC "yyyy-MM-dd HH:mm:ss" 归一化后再入库 (desktop _parse_utc_naive parity;
+        // 漏掉这步会让「本月」的 FMT 解析永远失败 -> 退化为滚动 30 天)
+        val start = MonthlyCycle.normalize(startUtc) ?: return
+        val end = MonthlyCycle.normalize(endUtc) ?: return
+        savePayloadKey("period_start:$accountId", start)
+        savePayloadKey("period_end:$accountId", end)
     }
 
     /** 读取账号的计费周期起止 (无记录返回 null 对)。 */
@@ -162,6 +166,22 @@ abstract class SettingsDao {
             savePayload(merged.toString(), java.time.Instant.now().toString())
         }
     }
+
+    /** 一次性维护标记 (payload 布尔键): 幂等数据修复的"只跑一次"语义。 */
+    suspend fun getMaintenanceFlag(key: String): Boolean {
+        val raw = payload() ?: return false
+        return try {
+            json.parseToJsonElement(raw).jsonObject[key]?.let {
+                (it as? JsonPrimitive)?.content == "1"
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    suspend fun setMaintenanceFlag(key: String) {
+        savePayloadKey(key, "1")
+    }
 }
 
 /**
@@ -178,6 +198,24 @@ object MonthlyCycle {
     private val FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     private const val MAX_PERIOD_ROLLS = 1200
 
+    /**
+     * 归一化周期时间串: 接受 ISO (Z/偏移/毫秒) 与 "yyyy-MM-dd HH:mm:ss" 两种形态,
+     * 输出 UTC "yyyy-MM-dd HH:mm:ss"; 无法解析返回 null (desktop db._parse_utc_naive parity)。
+     *
+     * CC 的 currentPeriodStart/End 是 ISO 串 ("2026-09-02T01:03:43.000Z"), 若直接
+     * 按 FMT 解析必然失败 —— 原先 savePeriodBounds 未归一化, 导致「本月」周期
+     * 静默退化为滚动 30 天。
+     */
+    fun normalize(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            java.time.LocalDateTime.parse(raw, FMT).format(FMT)
+        } catch (e: Exception) {
+            val instant = parseIsoInstant(raw) ?: return null
+            java.time.LocalDateTime.ofInstant(instant, java.time.ZoneOffset.UTC).format(FMT)
+        }
+    }
+
     /** 推导当前周期起点 (UTC "yyyy-MM-dd HH:mm:ss"); resetUtc 为存储的下次重置时间. */
     fun start(resetUtc: String?, nowUtc: String): String? {
         if (resetUtc.isNullOrBlank()) return null
@@ -192,16 +230,19 @@ object MonthlyCycle {
     }
 
     /**
-     * 统一入口: 优先真实计费周期 (commandcode), 无记录回退 monthly_reset 推算
-     * (opencode), 两者皆无返回 null (调用方回退滚动 30 天).
+     * 统一入口: 优先真实计费周期 (commandcode), 无记录/串非法回退 monthly_reset 推算
+     * (opencode), 两者皆无返回 null (调用方回退滚动 30 天)。周期串先经 [normalize]
+     * 归一化, 存量 ISO 数据也能生效。
      */
     fun startWithPeriod(periodStart: String?, periodEnd: String?, monthlyReset: String?, nowMs: Long): String? {
-        if (!periodStart.isNullOrBlank()) {
+        val ps = normalize(periodStart)
+        if (ps != null) {
             return try {
-                var start = java.time.LocalDateTime.parse(periodStart, FMT)
+                var start = java.time.LocalDateTime.parse(ps, FMT)
                     .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-                if (!periodEnd.isNullOrBlank()) {
-                    var end = java.time.LocalDateTime.parse(periodEnd, FMT)
+                val pe = normalize(periodEnd)
+                if (pe != null) {
+                    var end = java.time.LocalDateTime.parse(pe, FMT)
                         .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
                     var rolled = 0
                     // 顺延跨周期覆盖当前时刻; 上限兜底防异常数据死循环 (desktop parity:
@@ -219,7 +260,7 @@ object MonthlyCycle {
                 null
             }
         }
-        return start(monthlyReset, nowUtcString(nowMs))
+        return start(normalize(monthlyReset), nowUtcString(nowMs))
     }
 
     /** 当前 UTC 时间 (与存储格式一致)。 */

@@ -30,8 +30,8 @@ object UpdateDownloader {
     /**
      * 下载 APK 到 cacheDir/updates/; 校验失败或下载中断时删除临时文件并抛错。
      *
-     * @param digest GitHub API 的 assets[].digest, 形如 "sha256:<hex>"; 缺省/其它形态跳过校验
-     *               (desktop _verify_digest 的宽松语义)。
+     * @param digest GitHub API 的 assets[].digest, 形如 "sha256:<hex>";
+     *   缺失/非法一律拒绝安装 (desktop _verify_digest fail-closed parity)。
      * @param onProgress 0-100 (contentLength 不可知时不回调)
      */
     suspend fun download(
@@ -65,7 +65,7 @@ object UpdateDownloader {
                     }
                 }
             }
-            if (!digest.isNullOrBlank()) verifyDigest(tmp, digest)
+            verifyDigest(tmp, digest)
             if (target.exists()) target.delete()
             if (!tmp.renameTo(target)) {
                 tmp.copyTo(target, overwrite = true)
@@ -80,14 +80,20 @@ object UpdateDownloader {
     }
 
     /**
-     * SHA-256 校验 (desktop _verify_digest parity): 仅接受 "sha256:<hex>" 形态,
-     * 其它形态/缺省跳过 (上游均带官方摘要, 宽松处理不会影响正常更新)。
+     * SHA-256 校验 (desktop _verify_digest parity, fail-closed): 摘要缺失、算法不受支持
+     * 或格式非法时一律拒绝安装。先前的实现遇到空摘要 return 跳过校验 —— 被篡改或
+     * 拼错的资产仍会进入安装流程, 桌面端已按 fail-closed 修复, 安卓此前未同步。
+     * GitHub 对本仓库全部资产都返回 "sha256:<hex>", 严格要求不影响正常更新。
      */
-    private fun verifyDigest(file: File, digest: String) {
-        val d = digest.trim().lowercase()
-        if (!d.startsWith("sha256:")) return
+    private fun verifyDigest(file: File, digest: String?) {
+        val d = digest?.trim()?.lowercase().orEmpty()
+        if (!d.startsWith("sha256:")) {
+            throw OpenCodeApiException("下载包缺少官方 SHA-256 摘要, 已阻止安装")
+        }
         val expected = d.substringAfter(":").trim()
-        if (expected.isEmpty()) return
+        if (expected.length != 64 || expected.any { it !in "0123456789abcdef" }) {
+            throw OpenCodeApiException("下载包摘要格式非法, 已阻止安装")
+        }
         val md = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buf = ByteArray(1 shl 16)

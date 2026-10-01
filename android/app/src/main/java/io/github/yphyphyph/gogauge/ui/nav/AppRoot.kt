@@ -85,7 +85,7 @@ private fun MainShell(vm: MainViewModel) {
                                 restoreState = true
                             }
                         },
-                        icon = { Icon(tab.icon, contentDescription = tab.labelZh) },
+                        icon = { Icon(tab.icon, contentDescription = if (vm.lang == "en") tab.labelEn else tab.labelZh) },
                         label = { Text(if (vm.lang == "en") tab.labelEn else tab.labelZh) },
                     )
                 }

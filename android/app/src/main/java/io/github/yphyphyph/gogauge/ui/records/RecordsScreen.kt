@@ -86,13 +86,17 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
                     s.sessionUsage,
                     trailing = { Hint(sessions?.let { "${s.totalN} ${Fmt.int(it.total)} ${s.sessions}" } ?: "") },
                 )
-                if (sessions == null || sessions.records.isEmpty()) {
+                val err = vm.sessionsError
+                if (err != null && (sessions == null || sessions.records.isEmpty())) {
+                    // 查询失败不再伪装成"暂无记录": 给出错误原因与重试入口
+                    ErrorLine(err, s.retry, onRetry = vm::loadSessions)
+                } else if (sessions == null || sessions.records.isEmpty()) {
                     NoDataLine(s.noData)
                 }
             }
         }
         if (sessions != null && sessions.records.isNotEmpty()) {
-            items(sessions.records) { SessionRow(it, vm) }
+            items(sessions.records, key = { it.sessionId.ifEmpty { "key:${it.keyId ?: ""}:${it.lastAt}" } }) { SessionRow(it, vm) }
             item {
                 Pager(
                     page = vm.sessionsPage,
@@ -118,13 +122,16 @@ fun RecordsScreen(vm: MainViewModel = viewModel()) {
                         }
                     },
                 )
-                if (records == null || records.records.isEmpty()) {
+                val recErr = vm.recordsError
+                if (recErr != null && (records == null || records.records.isEmpty())) {
+                    ErrorLine(recErr, s.retry, onRetry = vm::loadRecords)
+                } else if (records == null || records.records.isEmpty()) {
                     NoDataLine(s.noData)
                 }
             }
         }
         if (records != null && records.records.isNotEmpty()) {
-            items(records.records) { RecordRow(it, vm) }
+            items(records.records, key = { it.usgId }) { RecordRow(it, vm) }
             item {
                 Pager(
                     page = vm.recordsPage,
@@ -154,6 +161,23 @@ private fun NoDataLine(text: String) {
         modifier = Modifier.padding(16.dp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+/** 加载失败行: 错误原因 + 重试按钮 (此前错误被吞, 界面只显示"暂无记录")。 */
+@Composable
+private fun ErrorLine(text: String, retryLabel: String, onRetry: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text,
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 13.sp,
+        )
+        TextButton(onClick = onRetry) { Text(retryLabel) }
+    }
 }
 @Composable
 private fun SessionRow(st: SessionStat, vm: MainViewModel) {

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -114,16 +115,21 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
                             listOf("input" to s.input, "output" to s.output, "cost" to s.cost).forEach { (v, label) ->
                                 val active = vm.modelDim == v
-                                Text(
-                                    label,
-                                    fontSize = 12.sp,
-                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = if (active) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                        .clickable { vm.changeModelDim(v) },
-                                )
+                                // 触控目标 ≥44dp: 原先 12sp + 4dp*2 ≈ 25dp, 容易点空
+                                Box(
+                                    Modifier
+                                        .clickable { vm.changeModelDim(v) }
+                                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        label,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (active) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     },
