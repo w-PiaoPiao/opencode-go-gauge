@@ -43,7 +43,19 @@ fun AppRoot() {
 
     GoGaugeTheme(darkTheme = vm.darkMode) {
         when {
-            vm.showLogin && !loginOpen -> WelcomeScreen(vm, onLogin = { loginOpen = true })
+            vm.showLogin && !loginOpen -> WelcomeScreen(
+                vm,
+                // 显式设定登录意图 (desktop btn-login/btn-login-goat parity):
+                // opencode=relogin 到活跃/默认账号; GOAT=add 新账号并切换
+                onLogin = {
+                    vm.startLogin("relogin", "opencode")
+                    loginOpen = true
+                },
+                onLoginGoat = {
+                    vm.startLogin("add", "commandcode")
+                    loginOpen = true
+                },
+            )
             loginOpen -> LoginScreen(vm, onCancel = { loginOpen = false })
             else -> MainShell(vm)
         }
