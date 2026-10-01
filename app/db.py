@@ -1626,7 +1626,27 @@ _PERIOD_CLAUSES = {
 }
 
 
-def _period_where(period: str, account_id: Optional[int] = None) -> tuple[str, list[Any]]:
+def _exclude_clause(exclude_models: Optional[list[str]]) -> tuple[str, list[str]]:
+    """「排除模型」SQL 片段: 参数化 NOT IN, 去空白去重后为空则返回空串.
+
+    模型名来自 HTTP 查询参数, 一律走占位符, 不拼接进 SQL 文本.
+    """
+    cleaned: list[str] = []
+    for m in exclude_models or ():
+        m = (m or "").strip()
+        if m and m not in cleaned:
+            cleaned.append(m)
+    if not cleaned:
+        return "", []
+    placeholders = ", ".join("?" * len(cleaned))
+    return f"model NOT IN ({placeholders})", cleaned
+
+
+def _period_where(
+    period: str,
+    account_id: Optional[int] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     if period in _PERIOD_CLAUSES:
@@ -1654,6 +1674,10 @@ def _period_where(period: str, account_id: Optional[int] = None) -> tuple[str, l
             days = max(1, int(match.group(1)))
         clauses.append("local_date >= date('now', 'localtime', ?)")
         params.append(f"-{days} days")
+    ex_sql, ex_params = _exclude_clause(exclude_models)
+    if ex_sql:
+        clauses.append(ex_sql)
+        params.extend(ex_params)
     return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
@@ -1677,7 +1701,11 @@ def _charts_ready(aid: int) -> bool:
     return row is not None
 
 
-def _charts_period_where(period: str, account_id: int) -> tuple[str, list[Any]]:
+def _charts_period_where(
+    period: str,
+    account_id: int,
+    exclude_models: Optional[list[str]] = None,
+) -> tuple[str, list[Any]]:
     """usage_charts 周期过滤 (与明细 _period_where 口径一致: UTC 存储 + localtime 日界)."""
     clauses = ["account_id = ?"]
     params: list[Any] = [account_id]
@@ -1700,17 +1728,26 @@ def _charts_period_where(period: str, account_id: int) -> tuple[str, list[Any]]:
             days = max(1, int(match.group(1)))
         clauses.append("datetime(time_bucket) >= datetime('now', ?)")
         params.append(f"-{days} days")
+    ex_sql, ex_params = _exclude_clause(exclude_models)
+    if ex_sql:
+        clauses.append(ex_sql)
+        params.extend(ex_params)
     return "WHERE " + " AND ".join(clauses), params
 
 
-def _charts_stats_select(period: str, account_id: int, group_by_model: bool = False):
+def _charts_stats_select(
+    period: str,
+    account_id: int,
+    group_by_model: bool = False,
+    exclude_models: Optional[list[str]] = None,
+):
     """charts 聚合查询, 输出列与明细统计查询同形.
 
     注意: charts 的 tokens_in 已包含缓存读 (tokensTotal = tokensIn + tokensOut,
     cacheReadInputTokens 为其中一部分), 因此 total_input = SUM(tokens_in) 而
     非叠加 cache_read, 否则重复计数.
     """
-    where, params = _charts_period_where(period, account_id)
+    where, params = _charts_period_where(period, account_id, exclude_models)
     if group_by_model:
         sql = f"""
             SELECT model,
@@ -1752,11 +1789,17 @@ def _use_charts_stats(aid: Optional[int]) -> bool:
     )
 
 
-def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[dict[str, Any]]:
+def model_stats(
+    period: str = "30d",
+    account_id: Optional[int] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
     """按模型聚合: 请求数 / 会话数 / 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 命中率."""
     aid = _resolve_account_id(account_id)
     if _use_charts_stats(aid):
-        rows = get_db().execute(*_charts_stats_select(period, aid, group_by_model=True)).fetchall()
+        rows = get_db().execute(
+            *_charts_stats_select(period, aid, group_by_model=True, exclude_models=exclude_models)
+        ).fetchall()
         result: list[dict[str, Any]] = []
         for r in rows:
             hit = int(r["cache_hit_tokens"] or 0)
@@ -1778,7 +1821,7 @@ def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[d
                 }
             )
         return result
-    where, params = _period_where(period, aid)
+    where, params = _period_where(period, aid, exclude_models)
     where, params = _account_filter(where, params, aid)
     rows = get_db().execute(
         f"""
@@ -1823,7 +1866,11 @@ def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[d
     return result
 
 
-def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[str, Any]]:
+def daily_stats(
+    days: int = 30,
+    account_id: Optional[int] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
     """每日聚合: 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 请求数.
 
     返回从 (今天 - days 天) 到今天(含)的**连续日期**序列; 无记录的天补 0,
@@ -1832,9 +1879,11 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
     """
     days = max(1, min(days, 365))
     aid = _resolve_account_id(account_id)
+    ex_sql, ex_params = _exclude_clause(exclude_models)
+    ex_and = f" AND {ex_sql}" if ex_sql else ""
     if _use_charts_stats(aid):
         rows = get_db().execute(
-            """
+            f"""
             SELECT local_date AS date,
                    SUM(tokens_in) AS total_input_tokens,
                    SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
@@ -1846,15 +1895,15 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
                    SUM(requests) AS request_count
             FROM usage_charts
             WHERE account_id = ?
-              AND local_date >= date('now', 'localtime', ?)
+              AND local_date >= date('now', 'localtime', ?){ex_and}
             GROUP BY local_date
             ORDER BY date ASC
             """,
-            (aid, f"-{days} days"),
+            (aid, f"-{days} days", *ex_params),
         ).fetchall()
     else:
         rows = get_db().execute(
-            """
+            f"""
             SELECT local_date AS date,
                    SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
                    SUM(input_tokens) AS uncached_input_tokens,
@@ -1866,11 +1915,11 @@ def daily_stats(days: int = 30, account_id: Optional[int] = None) -> list[dict[s
                    COUNT(*) AS request_count
             FROM usage_records
             WHERE account_id = ?
-              AND local_date >= date('now', 'localtime', ?)
+              AND local_date >= date('now', 'localtime', ?){ex_and}
             GROUP BY local_date
             ORDER BY date ASC
             """,
-            (aid, f"-{days} days"),
+            (aid, f"-{days} days", *ex_params),
         ).fetchall()
     # 连续日期窗口 [今天-days, 今天], 与上面 SQL 过滤条件同源 (同一 SQLite 时区口径)
     bounds = get_db().execute(
@@ -1970,11 +2019,15 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
     return result
 
 
-def totals(period: str = "30d", account_id: Optional[int] = None) -> dict[str, Any]:
+def totals(
+    period: str = "30d",
+    account_id: Optional[int] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """总览指标, 口径与模型占比一致."""
     aid = _resolve_account_id(account_id)
     if _use_charts_stats(aid):
-        sql, params = _charts_stats_select(period, aid)
+        sql, params = _charts_stats_select(period, aid, exclude_models=exclude_models)
         row = get_db().execute(sql, params).fetchone()
         if row is not None and row["request_count"] is not None:
             hit = int(row["cache_hit_tokens"] or 0)
@@ -1992,7 +2045,7 @@ def totals(period: str = "30d", account_id: Optional[int] = None) -> dict[str, A
                 "total_cost_usd": round(float(row["total_cost_usd"] or 0), 6),
                 "hit_rate": round(hit_rate, 2),
             }
-    where, params = _period_where(period, aid)
+    where, params = _period_where(period, aid, exclude_models)
     where, params = _account_filter(where, params, aid)
     row = get_db().execute(
         f"""
