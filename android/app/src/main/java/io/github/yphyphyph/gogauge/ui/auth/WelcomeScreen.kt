@@ -13,6 +13,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -25,9 +26,10 @@ import io.github.yphyphyph.gogauge.ui.MainViewModel
 
 /**
  * Welcome page shown when not logged in — port of the desktop login overlay.
+ * 两个登录入口 (desktop welcome parity): OpenCode 主按钮 + Command Code GOAT 次按钮。
  */
 @Composable
-fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit) {
+fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Unit) {
     val s = vm.s
     Column(
         Modifier
@@ -72,6 +74,15 @@ fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit) {
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
         ) {
             Text(s.loginBtn, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(8.dp))
+        // Command Code GOAT 登录入口 (desktop welcome 的 btn-login-goat parity; 此前
+        // 仅设置页的"添加 GOAT 账号"可达, 未登录时的欢迎页缺此入口)
+        OutlinedButton(
+            onClick = onLoginGoat,
+            modifier = Modifier.fillMaxWidth().height(50.dp),
+        ) {
+            Text(s.loginGoatBtn, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.height(8.dp))
         Text(
