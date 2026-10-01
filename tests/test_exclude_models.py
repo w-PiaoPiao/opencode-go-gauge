@@ -1,5 +1,6 @@
 """模型排除过滤链路测试: 统计页环形图图例点击隐藏模型后, 顶部总卡 / Token 构成 /
-排行 / 趋势必须一起排除该模型 (db 聚合层 exclude_models + dashboard 路由透传)."""
+趋势必须按排除后的口径聚合; models 保持全量 (环形图保留被排除模型以便图例点击加回),
+排行由前端按 excluded_models 过滤 (db 聚合层 + dashboard 路由透传)."""
 from __future__ import annotations
 
 import json
@@ -94,11 +95,11 @@ class TestRecordsSource:
         assert filtered["cache_hit_tokens"] == 30
         assert filtered["total_output_tokens"] == 30
 
-    def test_model_stats_excludes_model(self, tmp_db):
+    def test_model_stats_always_full(self, tmp_db):
+        # 回归防护: model_stats 不得接受排除过滤 (环形图要靠全量数据画图例删除线)
         _seed_records()
-        stats = db.model_stats("30d", None, ["model-a"])
-        assert [m["model"] for m in stats] == ["model-b"]
-        assert stats[0]["cache_hit_tokens"] == 30
+        stats = db.model_stats("30d")
+        assert sorted(m["model"] for m in stats) == ["model-a", "model-b"]
 
     def test_daily_stats_excludes_model(self, tmp_db):
         _seed_records()
@@ -130,10 +131,10 @@ class TestChartsSource:
         assert filtered["cache_hit_tokens"] == 0
         assert filtered["total_output_tokens"] == 200
 
-    def test_charts_model_stats_exclude(self, tmp_db):
+    def test_charts_model_stats_always_full(self, tmp_db):
         _seed_charts()
-        stats = db.model_stats("30d", None, ["goat-a"])
-        assert [m["model"] for m in stats] == ["goat-b"]
+        stats = db.model_stats("30d")
+        assert sorted(m["model"] for m in stats) == ["goat-a", "goat-b"]
 
     def test_charts_daily_stats_exclude(self, tmp_db):
         _seed_charts()
@@ -148,7 +149,8 @@ class TestDashboardRoute:
         params = urllib.parse.urlencode({"range": "30d", "exclude_models": ["model-a"]}, doseq=True)
         data, status = _get(f"{http}/api/dashboard?{params}")
         assert status == 200
-        assert [m["model"] for m in data["models"]] == ["model-b"]
+        # models 全量返回 (环形图保留被排除模型以便图例点击加回), 排行由前端过滤
+        assert sorted(m["model"] for m in data["models"]) == ["model-a", "model-b"]
         assert data["totals"]["request_count"] == 1
         assert data["excluded_models"] == ["model-a"]
         row = next(r for r in data["trend"] if r["date"] == _today())
@@ -169,4 +171,5 @@ class TestDashboardRoute:
         data, status = _get(f"{http}/api/dashboard?{params}")
         assert status == 200
         assert data["excluded_models"] == ["model-a"]  # 去重 / 去空白 / 超长丢弃
-        assert [m["model"] for m in data["models"]] == ["model-b"]
+        assert sorted(m["model"] for m in data["models"]) == ["model-a", "model-b"]  # models 始终全量
+        assert data["totals"]["request_count"] == 1  # 总卡按排除后聚合

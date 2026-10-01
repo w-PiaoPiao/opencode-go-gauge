@@ -1789,16 +1789,16 @@ def _use_charts_stats(aid: Optional[int]) -> bool:
     )
 
 
-def model_stats(
-    period: str = "30d",
-    account_id: Optional[int] = None,
-    exclude_models: Optional[list[str]] = None,
-) -> list[dict[str, Any]]:
-    """按模型聚合: 请求数 / 会话数 / 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 命中率."""
+def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[dict[str, Any]]:
+    """按模型聚合: 请求数 / 会话数 / 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 命中率.
+
+    始终返回全量模型 (不支持排除): 统计页环形图需要保留被排除模型以便图例点击加回,
+    排行的排除过滤由调用侧按 excluded_models 处理.
+    """
     aid = _resolve_account_id(account_id)
     if _use_charts_stats(aid):
         rows = get_db().execute(
-            *_charts_stats_select(period, aid, group_by_model=True, exclude_models=exclude_models)
+            *_charts_stats_select(period, aid, group_by_model=True)
         ).fetchall()
         result: list[dict[str, Any]] = []
         for r in rows:
@@ -1821,7 +1821,7 @@ def model_stats(
                 }
             )
         return result
-    where, params = _period_where(period, aid, exclude_models)
+    where, params = _period_where(period, aid)
     where, params = _account_filter(where, params, aid)
     rows = get_db().execute(
         f"""

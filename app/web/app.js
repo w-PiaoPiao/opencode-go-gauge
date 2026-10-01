@@ -12,7 +12,6 @@ const I18N = {
     todayTrend: "今日趋势", hours24: "24 小时",
     statsTitle: "用量统计", tokenBreakdown: "Token 构成",
     modelUsage: "模型用量", input: "输入", output: "输出", cost: "成本",
-    hiddenModels: "已隐藏", restoreModelTip: "点击恢复该模型", restoreAll: "全部恢复",
     usageTrend: "用量趋势", usageRecords: "使用记录", allModels: "全部模型",
     recordsPage: "使用记录",
     sessionUsage: "会话用量", colSession: "会话", colKey: "Key 名称", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
@@ -109,7 +108,6 @@ const I18N = {
     todayTrend: "Today's Trend", hours24: "24 Hours",
     statsTitle: "Usage Stats", tokenBreakdown: "Token Breakdown",
     modelUsage: "Model Usage", input: "Input", output: "Output", cost: "Cost",
-    hiddenModels: "Hidden", restoreModelTip: "Click to restore this model", restoreAll: "Restore all",
     usageTrend: "Usage Trend", usageRecords: "Usage Records", allModels: "All Models",
     recordsPage: "Records",
     sessionUsage: "Session Usage", colSession: "Session", colKey: "Key Name", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
@@ -623,7 +621,8 @@ function renderDetail6(totals) {
 /* ---------------- 统计页: 模型用量 ---------------- */
 let cModel = null;
 /* 图例点击 = 全页排除/恢复该模型 (顶部总卡 / Token 构成 / 排行 / 趋势一起变).
-   环内先即时隐藏/显示做视觉反馈, 统计数值等 dashboard 按排除集重载后统一渲染. */
+   扇区即时隐藏/显示, 图例项随之画删除线, 再点即加回; 统计数值等 dashboard
+   按排除集重载后统一渲染. */
 function onModelLegendClick(evt, item, legend) {
   const chart = legend.chart;
   const model = chart.data.labels[item.index];
@@ -631,36 +630,17 @@ function onModelLegendClick(evt, item, legend) {
   chart.toggleDataVisibility(item.index);
   chart.update();
   toggleModelExclusion(model);
-  renderModelExcluded();
   loadDashboard(true).then((ok) => {
-    if (ok !== false) return;  // 成功后图表重建即过滤结果; 被更新的请求取代时由最新渲染兜底
+    if (ok !== false) return;  // 成功后 renderAll 重建图表并按排除集恢复隐藏态; 被更新的请求取代时由最新渲染兜底
     // 请求失败: 回滚图例可见性与排除集, 避免界面与数据脱节
     chart.toggleDataVisibility(item.index);
     chart.update();
     toggleModelExclusion(model);
-    renderModelExcluded();
   });
 }
 function toggleModelExclusion(model) {
   if (state.excludedModels.has(model)) state.excludedModels.delete(model);
   else state.excludedModels.add(model);
-}
-/* 已隐藏模型 chips: 展示在「模型用量」卡片头部, 点击单个 / 全部恢复 */
-function renderModelExcluded() {
-  const box = $("mr-excluded");
-  if (!box) return;
-  const list = [...state.excludedModels];
-  box.hidden = !list.length;
-  if (!list.length) { box.innerHTML = ""; return; }
-  box.innerHTML =
-    `<span class="mrx-label">${t("hiddenModels")}</span>` +
-    list.map((m) => `<button type="button" class="mrx-chip" data-model="${escapeHtml(m)}" title="${t("restoreModelTip")}">${escapeHtml(m)}<span class="mrx-x">✕</span></button>`).join("") +
-    `<button type="button" class="mrx-reset" title="${t("restoreAll")}">${t("restoreAll")}</button>`;
-}
-function clearModelExclusion() {
-  if (!state.excludedModels.size) return;
-  state.excludedModels.clear();
-  renderModelExcluded();
 }
 function chartModel(models) {
   const canvas = $("mr-chart");
@@ -706,12 +686,18 @@ function chartModel(models) {
       },
     },
   });
+  // models 始终为全量: 重建后按排除集恢复隐藏态 (扇区隐藏 + 图例项删除线), 演示与数据同源
+  top.forEach((m, i) => { if (state.excludedModels.has(m.model)) cModel.toggleDataVisibility(i); });
+  cModel.update();
   cModel.resize();
-  $("mr-list").innerHTML = sorted.slice(0, 3).map((m, i) => `
+  // 排行只列参与统计的模型 (与总卡/构成/趋势口径一致)
+  const visible = sorted.filter((m) => !state.excludedModels.has(m.model));
+  $("mr-list").innerHTML = visible.length ? visible.slice(0, 3).map((m, i) => `
     <div class="mr-item"><span class="mr-rank">#${i + 1}</span>
     <span class="mr-name">${modelIcon(m.model)}<span class="txt">${escapeHtml(m.model)}</span></span>
     <span class="mr-sub">${fmtInt(m.request_count)} · ${t("hitRate")} ${m.hit_rate}%</span>
-    <span class="mr-val" title="${escapeHtml(fmtInt(getVal(m)))}">${fmt(getVal(m))}</span></div>`).join("");
+    <span class="mr-val" title="${escapeHtml(fmtInt(getVal(m)))}">${fmt(getVal(m))}</span></div>`).join("")
+    : `<div class="mr-empty">${t("noData")}</div>`;
 }
 
 /* ---------------- 统计页: 用量趋势 ---------------- */
@@ -884,7 +870,6 @@ function renderAll(data) {
     renderDetail6(data.totals);
     chartModel(data.models);
     chartTrend(data.trend);
-    renderModelExcluded();
     $("trend-hint").textContent = t("trendHint");
   }
   const sync = data.sync || {};
@@ -1288,7 +1273,7 @@ function resetRecordFilters() {
   state.records.page = 1;
   state.records.model = "";
   state.sessions.page = 1;
-  clearModelExclusion();  // 新账号模型集不同: 旧的排除项一并清掉
+  state.excludedModels.clear();  // 新账号模型集不同: 旧的排除项一并清掉
 }
 
 let menuSeq = 0;  // 用户菜单开关序号: 丢弃迟到的过期 /api/accounts 响应
@@ -1530,16 +1515,6 @@ function bindEvents() {
     document.querySelectorAll("#mr-dim button").forEach((x) => x.classList.remove("active"));
     b.classList.add("active"); state.modelDim = b.dataset.dim;
     if (state.data) chartModel(state.data.models);
-  });
-  // 已隐藏模型 chips: 点击恢复单个 / 全部 (与图例点击同一排除集, 重新拉取联动数据)
-  $("mr-excluded").addEventListener("click", (e) => {
-    const chip = e.target.closest(".mrx-chip");
-    const reset = e.target.closest(".mrx-reset");
-    if (!chip && !reset) return;
-    if (reset) state.excludedModels.clear();
-    else state.excludedModels.delete(chip.dataset.model);
-    renderModelExcluded();
-    loadDashboard(true);
   });
   $("tb-refresh").addEventListener("click", () => startSync("incremental"));
   $("btn-full-sync").addEventListener("click", () => {
