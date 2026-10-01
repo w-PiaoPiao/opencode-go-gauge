@@ -796,8 +796,10 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "daily": db.daily_stats(7, active_id, exclude_models),  # 每日趋势固定显示近 7 天
                 "trend": db.daily_stats(30, active_id, exclude_models),  # 用量趋势 (费用/请求双轴)
                 "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势
-                "models": db.model_stats(period, active_id, exclude_models),
-                "excluded_models": exclude_models,  # 回显生效的排除项 (前端校验/恢复用)
+                # models 始终全量: 环形图需保留被排除模型 (图例删除线 + 点击即加回),
+                # 排行由前端按 excluded_models 过滤; 排除只作用于 totals/trend 聚合
+                "models": db.model_stats(period, active_id),
+                "excluded_models": exclude_models,  # 回显生效的排除项
                 "sync": db.get_sync_state(active_id),
                 "progress": _sync_progress_snapshot(),
                 "range": range_param,
