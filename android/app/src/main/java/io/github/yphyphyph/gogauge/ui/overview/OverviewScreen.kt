@@ -9,15 +9,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -212,11 +216,11 @@ private fun SummaryCards(accounts: List<AccountOverview>, vm: MainViewModel, usd
     Column {
         cards.chunked(2).forEach { row ->
             Row(
-                Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                Modifier.fillMaxWidth().height(IntrinsicSize.Max).padding(bottom = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 row.forEach { (c, accent) ->
-                    KpiCard(label = c.first, value = c.second, sub = c.third, accent = accent, modifier = Modifier.weight(1f))
+                    KpiCard(label = c.first, value = c.second, sub = c.third, accent = accent, modifier = Modifier.weight(1f).fillMaxHeight())
                 }
                 if (row.size == 1) Spacer(Modifier.weight(1f))
             }
@@ -310,11 +314,14 @@ private fun TodayGrid(acc: AccountOverview, vm: MainViewModel, usdCny: Double, a
                 Modifier.fillMaxWidth().padding(bottom = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                row.forEach { (label, v, _) ->
+                row.forEachIndexed { ci, (label, v, _) ->
                     Column(
                         Modifier
                             .weight(1f)
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                            .padding(start = if (ci == 1) 10.dp else 0.dp)
+                            .padding(top = 10.dp, bottom = 2.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) {
                         Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

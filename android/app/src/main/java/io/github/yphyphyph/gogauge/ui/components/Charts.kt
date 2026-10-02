@@ -186,6 +186,8 @@ fun ModelPieChart(
                     description.isEnabled = false
                     setDrawEntryLabels(false)
                     holeRadius = 60f
+                    // 中心孔透出卡片底色 (暗色块上必须是暗底, 默认白孔在暗块上刺眼)
+                    setHoleColor(android.graphics.Color.TRANSPARENT)
                     isRotationEnabled = true
                     setNoDataText("")  // 全部模型被排除时不留英文占位提示
                 }

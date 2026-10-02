@@ -15,9 +15,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -41,26 +43,32 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.yphyphyph.gogauge.ui.theme.CaptionLabel
+import io.github.yphyphyph.gogauge.ui.theme.Gg
 import io.github.yphyphyph.gogauge.ui.theme.GgDark
 import io.github.yphyphyph.gogauge.ui.theme.NUM_FEATURE_SETTINGS
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 
 /**
- * Shared mobile-first components. Anthropic warm-paper style:
- * hairline borders, 16dp corners, restrained type, tabular numbers.
+ * Shared mobile-first components — Claude 官方令牌体系:
+ * 画布上的色调卡 + 发丝线, 内嵌砖块, 语义色数值, 暗色数据块。
+ * 圆角: 卡 12 / 砖块 8 / pill 全圆。
  */
 
-/** Card container — warm-paper surface with hairline border */
+val GgCardShape = RoundedCornerShape(12.dp)
+
+/** Card container — 色调卡 #F5F0E8 + 发丝线 (官方 model-comparison-card 模式) */
 @Composable
 fun GgCard(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = GgCardShape
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -101,7 +109,7 @@ fun Hint(text: String) {
     )
 }
 
-/** KPI card — label + big tabular number + sub */
+/** KPI 卡 — 暖白卡 + 发丝线 (与 GgCard 同语言) + caption 标签 + 语义色数值 */
 @Composable
 fun KpiCard(
     label: String,
@@ -110,7 +118,7 @@ fun KpiCard(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(12.dp)
     Column(
         modifier = modifier
             .clip(shape)
@@ -118,8 +126,12 @@ fun KpiCard(
             .border(1.dp, MaterialTheme.colorScheme.outline, shape)
             .padding(start = 14.dp, end = 12.dp, top = 12.dp, bottom = 10.dp),
     ) {
-        Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(2.dp))
+        Text(
+            label,
+            style = CaptionLabel,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(3.dp))
         Text(
             value,
             fontSize = 24.sp,
@@ -136,12 +148,68 @@ fun KpiCard(
             lineHeight = 16.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontFamily = NumFontFamily,
-            style = LocalTextStyle.current.copy(fontFeatureSettings = NUM_FEATURE_SETTINGS),
         )
     }
 }
 
-/** Quota progress card — thin spring-animated bar */
+/** 编辑式数据网格 — 内嵌砖块 + 语义色小点 + 墨色数值 (首页概览/统计构成共用); 行内等高 */
+data class EditorialCell(val label: String, val value: String, val sub: String, val accent: Color)
+
+@Composable
+fun EditorialGrid(cells: List<EditorialCell>, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        cells.chunked(2).forEach { row ->
+            Row(Modifier.fillMaxWidth().height(IntrinsicSize.Max)) {
+                row.forEachIndexed { i, cell ->
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .padding(start = if (i == 1) 10.dp else 0.dp)
+                            .padding(top = 10.dp, bottom = 2.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(5.dp)
+                                    .background(cell.accent, CircleShape),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                cell.label,
+                                style = CaptionLabel,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            cell.value,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = NumFontFamily,
+                            style = LocalTextStyle.current.copy(fontFeatureSettings = NUM_FEATURE_SETTINGS),
+                        )
+                        if (cell.sub.isNotEmpty()) {
+                            Text(
+                                cell.sub,
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontFamily = NumFontFamily,
+                            )
+                        }
+                    }
+                }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+/** Quota progress card — 细条 + 渐变填充 (桌面端渐变条的官方暖色版) */
 @Composable
 fun QuotaCard(
     label: String,
@@ -149,9 +217,10 @@ fun QuotaCard(
     remainingText: String,
     resetText: String,
     accent: Color,
+    accentEnd: Color? = null,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = GgCardShape
     val progress by animateFloatAsState(
         targetValue = (usedPercent.coerceIn(0.0, 100.0) / 100.0).toFloat(),
         animationSpec = spring(
@@ -160,6 +229,11 @@ fun QuotaCard(
         ),
         label = "quotaProgress",
     )
+    val fill = if (accentEnd != null && accentEnd != accent) {
+        Brush.horizontalGradient(listOf(accent, accentEnd))
+    } else {
+        Brush.horizontalGradient(listOf(accent, accent))
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -188,14 +262,14 @@ fun QuotaCard(
                 .fillMaxWidth()
                 .height(8.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
         ) {
             Box(
                 Modifier
                     .fillMaxWidth(progress)
                     .height(8.dp)
                     .clip(CircleShape)
-                    .background(accent),
+                    .background(fill),
             )
         }
         Spacer(Modifier.height(8.dp))
@@ -213,13 +287,12 @@ fun QuotaCard(
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = NumFontFamily,
-                style = LocalTextStyle.current.copy(fontFeatureSettings = NUM_FEATURE_SETTINGS),
             )
         }
     }
 }
 
-/** Segmented control (touch target ≥44dp height, spring press feedback) */
+/** Segmented control — 官方 active-tab 模式: 容器 cream-strong, 选中 = 画布色 + 墨字 */
 @Composable
 fun PillRow(
     options: List<Pair<String, String>>, // (value, label)
@@ -230,8 +303,8 @@ fun PillRow(
     Row(
         modifier = modifier
             .horizontalScroll(rememberScrollState())
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -247,18 +320,15 @@ fun PillRow(
             Box(
                 Modifier
                     .scale(scale)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(if (active) MaterialTheme.colorScheme.surface else Color.Transparent)
-                    .then(
-                        if (active) Modifier.border(
-                            1.dp,
-                            MaterialTheme.colorScheme.outline,
-                            RoundedCornerShape(9.dp),
-                        ) else Modifier,
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        when {
+                            active -> MaterialTheme.colorScheme.surface
+                            else -> Color.Transparent
+                        },
                     )
                     .clickable(interactionSource = interactionSource, indication = null) { onSelect(value) }
-                    // 触控目标 ≥44dp: 原实现只有 ~36dp (13sp 文字 + 9dp*2 padding),
-                    // 单手/小屏下容易点空
+                    // 触控目标 ≥44dp: 单手/小屏下容易点空
                     .defaultMinSize(minHeight = 44.dp)
                     .padding(horizontal = 13.dp, vertical = 9.dp),
                 contentAlignment = Alignment.Center,
@@ -275,7 +345,7 @@ fun PillRow(
     }
 }
 
-/** Accent colors per KPI class */
+/** Accent colors per KPI class — 官方语义色映射 */
 object Accent {
     val violet: Color @Composable get() = MaterialTheme.colorScheme.primary
     val blue: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Blue
@@ -308,7 +378,7 @@ fun GgPullIndicator(
     modifier: Modifier = Modifier,
 ) {
     val color = MaterialTheme.colorScheme.primary
-    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
     val density = LocalDensity.current
     val offsetPx = with(density) { (state.distanceFraction * 96).dp.roundToPx() }
     // Only render while pulling or refreshing — otherwise the circle sits on top of the

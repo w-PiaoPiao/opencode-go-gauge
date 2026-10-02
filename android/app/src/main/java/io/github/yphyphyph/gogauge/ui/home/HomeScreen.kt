@@ -2,6 +2,7 @@ package io.github.yphyphyph.gogauge.ui.home
 
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -50,13 +52,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
 import io.github.yphyphyph.gogauge.data.model.Totals
 import io.github.yphyphyph.gogauge.ui.MainViewModel
+import io.github.yphyphyph.gogauge.ui.theme.Gg
+import io.github.yphyphyph.gogauge.ui.theme.GgChart
 import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.components.Accent
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
+import io.github.yphyphyph.gogauge.ui.components.EditorialCell
+import io.github.yphyphyph.gogauge.ui.components.EditorialGrid
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.Hint
-import io.github.yphyphyph.gogauge.ui.components.KpiCard
 import io.github.yphyphyph.gogauge.ui.components.PillRow
 import io.github.yphyphyph.gogauge.ui.components.QuotaCard
 import io.github.yphyphyph.gogauge.ui.components.TodayBarChart
@@ -122,10 +127,11 @@ fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) 
             !quota.success -> QuotaErrorCard(quota, s, onRetry = vm::refreshNow)
             else -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 quota.windows.forEach { w ->
-                    val accent = when (w.label) {
-                        "5h Rolling" -> MaterialTheme.colorScheme.primary
-                        "Weekly" -> Accent.blue
-                        else -> Accent.amber
+                    // 渐变配额条 (桌面端三窗口渐变 parity, 官方暖色系)
+                    val (accent, accentEnd) = when (w.label) {
+                        "5h Rolling" -> Gg.Primary to GgChart.Cost      // 珊瑚 → kraft
+                        "Weekly" -> Gg.Cyan to GgChart.Output           // teal → 橄榄
+                        else -> Gg.Amber to Gg.Red                      // amber → error
                     }
                     QuotaCard(
                         label = quotaLabel(w.label, s),
@@ -133,6 +139,7 @@ fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) 
                         remainingText = "${s.remaining} ${w.remaining.toInt()}%",
                         resetText = "${s.resetsIn} ${Fmt.dur(w.resetInSec.toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon)}",
                         accent = accent,
+                        accentEnd = accentEnd,
                     )
                 }
             }
@@ -184,7 +191,7 @@ private fun AccountSwitcher(vm: MainViewModel, s: Strings, onManageUsers: () -> 
     val chipMaxWidth = (LocalConfiguration.current.screenWidthDp * 0.42f).dp
     Surface(
         shape = RoundedCornerShape(999.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
         modifier = Modifier.widthIn(max = chipMaxWidth).clickable { showSheet = true },
     ) {
         Row(
@@ -296,7 +303,7 @@ private fun QuotaSkeleton() {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .height(12.dp)
+                        .height(8.dp)
                         .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.extraSmall)
                 ) {}
                 Spacer(Modifier.height(8.dp))
@@ -307,12 +314,20 @@ private fun QuotaSkeleton() {
 
 @Composable
 private fun QuotaErrorCard(quota: QuotaResult, s: Strings, onRetry: () -> Unit) {
-    GgCard {
+    val shape = RoundedCornerShape(12.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .border(1.dp, MaterialTheme.colorScheme.outline, shape)
+            .padding(vertical = 6.dp),
+    ) {
         Text(
             "${s.quotaFail}：${quota.error ?: "?"}",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.error,
-            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 14.dp),
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 12.dp),
         )
         Text(
             s.retryTip,
@@ -320,39 +335,26 @@ private fun QuotaErrorCard(quota: QuotaResult, s: Strings, onRetry: () -> Unit) 
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 2.dp),
         )
-        TextButton(onClick = onRetry, modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)) {
+        TextButton(onClick = onRetry, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)) {
             Text(s.refresh, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
 
-/** 6 KPI cards in a 2-column grid — desktop renderOverview parity. */
+/** 6 KPI in a 2-col editorial grid — desktop renderOverview parity (与统计页构成网格同语言). */
 @Composable
 private fun OverviewGrid(totals: Totals, vm: MainViewModel) {
     val s = vm.s
     val totalTokens = totals.totalTokens
-    val cards = listOf(
-        Triple(s.hitRate, totals.hitRate.toInt().toString() + "%", "${s.hit} ${Fmt.tokens(totals.cacheHitTokens)} · ${s.miss} ${Fmt.tokens(totals.uncachedInputTokens)}") to Accent.green,
-        Triple(s.hitAmount, Fmt.tokens(totals.cacheHitTokens), "${s.pctOfInput} ${totals.hitRate.toInt()}%") to Accent.cyan,
-        Triple(s.totalTokens, Fmt.tokens(totalTokens), s.inclCache) to Accent.blue,
-        Triple(s.totalRequests, Fmt.int(totals.requestCount), s.currentRange) to Accent.slate,
-        Triple(s.totalCost, Fmt.money(totals.totalCostUsd, vm.currency, vm.dashboard?.usdCny ?: 7.2), "${s.avgPer} ${Fmt.money(if (totals.requestCount > 0) totals.totalCostUsd / totals.requestCount else 0.0, vm.currency, vm.dashboard?.usdCny ?: 7.2)}${s.perReq}") to Accent.amber,
-        Triple(s.sessions, Fmt.int(totals.sessionCount), s.dedup) to Accent.violet,
+    EditorialGrid(
+        cells = listOf(
+            EditorialCell(s.hitRate, totals.hitRate.toInt().toString() + "%", "${s.hit} ${Fmt.tokens(totals.cacheHitTokens)} · ${s.miss} ${Fmt.tokens(totals.uncachedInputTokens)}", Accent.green),
+            EditorialCell(s.hitAmount, Fmt.tokens(totals.cacheHitTokens), "${s.pctOfInput} ${totals.hitRate.toInt()}%", Accent.cyan),
+            EditorialCell(s.totalTokens, Fmt.tokens(totalTokens), s.inclCache, Accent.blue),
+            EditorialCell(s.totalRequests, Fmt.int(totals.requestCount), s.currentRange, Accent.slate),
+            EditorialCell(s.totalCost, Fmt.money(totals.totalCostUsd, vm.currency, vm.dashboard?.usdCny ?: 7.2), "${s.avgPer} ${Fmt.money(if (totals.requestCount > 0) totals.totalCostUsd / totals.requestCount else 0.0, vm.currency, vm.dashboard?.usdCny ?: 7.2)}${s.perReq}", Accent.amber),
+            EditorialCell(s.sessions, Fmt.int(totals.sessionCount), s.dedup, Accent.violet),
+        ),
+        modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
     )
-    Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp)) {
-        cards.chunked(2).forEach { row ->
-            Row(
-                Modifier.fillMaxWidth().padding(bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                row.forEach { (c, accent) ->
-                    KpiCard(
-                        label = c.first, value = c.second, sub = c.third, accent = accent,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                if (row.size == 1) Spacer(Modifier.weight(1f))
-            }
-        }
-    }
 }

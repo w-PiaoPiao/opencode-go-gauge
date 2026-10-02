@@ -87,7 +87,7 @@ private fun MainShell(vm: MainViewModel) {
             Column {
                 HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline)
                 NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surface,
+                    containerColor = MaterialTheme.colorScheme.background,
                     tonalElevation = 0.dp,
                 ) {
                     GgTab.entries.filter { it != GgTab.Overview || showOverviewTab }.forEach { tab ->
