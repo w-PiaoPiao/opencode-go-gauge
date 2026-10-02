@@ -4,26 +4,21 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- GoGauge: gauge dial + needle -->
+    <!-- GoGauge gauge mark: 240° dial (gap at bottom) + 45° needle + hub.
+         Content within the 66dp adaptive-icon safe zone (outer extent 31dp < 33dp).
+         monochrome 层复用本文件(系统按 alpha 取形,颜色无关)。 -->
     <path
-        android:pathData="M54,40 m-20,0 a20,20 0 1 1 40,0 a20,20 0 1 1 -40,0"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="5"
+        android:pathData="M30.62,68.5 A27,27 0 1 1 77.38,68.5"
+        android:strokeColor="#FAF9F5"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
         android:fillColor="#00000000" />
     <path
-        android:pathData="M54,40 L70,24"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="5"
+        android:pathData="M54,55 L66,43"
+        android:strokeColor="#FAF9F5"
+        android:strokeWidth="7"
         android:strokeLineCap="round" />
     <path
-        android:pathData="M54,40 L54,27"
-        android:strokeColor="#A78BFA"
-        android:strokeWidth="5"
-        android:strokeLineCap="round" />
-    <path
-        android:pathData="M54,58 m-11,0 a11,11 0 1 1 22,0 a11,11 0 1 1 -22,0"
-        android:fillColor="#FFFFFF" />
-    <path
-        android:pathData="M54,58 m-5,0 a5,5 0 1 1 10,0 a5,5 0 1 1 -10,0"
-        android:fillColor="#7C5CF6" />
+        android:pathData="M54,55 m-5.5,0 a5.5,5.5 0 1 1 11,0 a5.5,5.5 0 1 1 -11,0"
+        android:fillColor="#FAF9F5" />
 </vector>
