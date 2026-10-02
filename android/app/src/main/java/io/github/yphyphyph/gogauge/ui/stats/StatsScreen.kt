@@ -5,20 +5,26 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -28,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,6 +45,8 @@ import io.github.yphyphyph.gogauge.data.model.Totals
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.components.Accent
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
+import io.github.yphyphyph.gogauge.ui.components.EditorialCell
+import io.github.yphyphyph.gogauge.ui.components.EditorialGrid
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.Hint
@@ -46,6 +55,8 @@ import io.github.yphyphyph.gogauge.ui.components.ModelIcon
 import io.github.yphyphyph.gogauge.ui.components.ModelPieChart
 import io.github.yphyphyph.gogauge.ui.components.PillRow
 import io.github.yphyphyph.gogauge.ui.components.TrendLineChart
+import io.github.yphyphyph.gogauge.ui.theme.Gg
+import io.github.yphyphyph.gogauge.ui.theme.GgChart
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import io.github.yphyphyph.gogauge.util.Fmt
 
@@ -252,13 +263,13 @@ private fun StatsTotalGrid(totals: Totals, vm: MainViewModel) {
     Column {
         cards.chunked(2).forEach { row ->
             Row(
-                Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                Modifier.fillMaxWidth().height(IntrinsicSize.Max).padding(bottom = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 row.forEach { (c, accent) ->
                     KpiCard(
                         label = c.first, value = c.second, sub = c.third, accent = accent,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
                     )
                 }
             }
@@ -266,38 +277,20 @@ private fun StatsTotalGrid(totals: Totals, vm: MainViewModel) {
     }
 }
 
-/** Token breakdown 2x3 — desktop renderDetail6 parity. */
+/** Token breakdown 2x3 — desktop renderDetail6 parity (编辑式: 细线分隔, 无底色方块). */
 @Composable
 private fun BreakdownGrid(totals: Totals, vm: MainViewModel) {
     val s = vm.s
     val total = totals.uncachedInputTokens + totals.totalOutputTokens + totals.totalReasoningTokens
-    val cells = listOf(
-        Triple(s.input, Fmt.tokens(totals.uncachedInputTokens), "${s.inclCache} ${Fmt.tokens(totals.totalInputTokens)}"),
-        Triple(s.output, Fmt.tokens(totals.totalOutputTokens), s.output),
-        Triple(s.colReasoning, Fmt.tokens(totals.totalReasoningTokens), if (total > 0) (totals.totalReasoningTokens.toDouble() / total * 100).toInt().toString() + "%" else "0%"),
-        Triple(s.colCacheRead, Fmt.tokens(totals.cacheHitTokens), "${s.hitRate} ${totals.hitRate.toInt()}%"),
-        Triple(s.cacheWrite, Fmt.tokens(totals.cacheWriteTokens), s.newCacheWrites),
-        Triple(s.sessions, Fmt.int(totals.sessionCount), s.dedup),
+    EditorialGrid(
+        cells = listOf(
+            EditorialCell(s.input, Fmt.tokens(totals.uncachedInputTokens), "${s.inclCache} ${Fmt.tokens(totals.totalInputTokens)}", GgChart.Input),
+            EditorialCell(s.output, Fmt.tokens(totals.totalOutputTokens), s.output, GgChart.Output),
+            EditorialCell(s.colReasoning, Fmt.tokens(totals.totalReasoningTokens), if (total > 0) (totals.totalReasoningTokens.toDouble() / total * 100).toInt().toString() + "%" else "0%", GgChart.Reasoning),
+            EditorialCell(s.colCacheRead, Fmt.tokens(totals.cacheHitTokens), "${s.hitRate} ${totals.hitRate.toInt()}%", GgChart.Cache),
+            EditorialCell(s.cacheWrite, Fmt.tokens(totals.cacheWriteTokens), s.newCacheWrites, GgChart.Cache),
+            EditorialCell(s.sessions, Fmt.int(totals.sessionCount), s.dedup, Gg.Slate),
+        ),
+        modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
     )
-    Column(Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
-        cells.chunked(2).forEach { row ->
-            Row(
-                Modifier.fillMaxWidth().padding(bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                row.forEach { (label, v, sub) ->
-                    Column(
-                        Modifier
-                            .weight(1f)
-                            .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.medium)
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                    ) {
-                        Text(label, fontSize = 11.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(v, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = NumFontFamily)
-                        Text(sub, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = NumFontFamily)
-                    }
-                }
-            }
-        }
-    }
 }

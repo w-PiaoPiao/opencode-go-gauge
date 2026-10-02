@@ -8,10 +8,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -22,13 +25,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.yphyphyph.gogauge.R
 import io.github.yphyphyph.gogauge.auth.Login
 import io.github.yphyphyph.gogauge.ui.MainViewModel
-import io.github.yphyphyph.gogauge.ui.theme.BrandSerif
+import io.github.yphyphyph.gogauge.ui.theme.TitleSerif
 
 /**
  * Welcome page shown when not logged in — port of the desktop login overlay.
@@ -49,17 +54,18 @@ fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Uni
         verticalArrangement = Arrangement.Center,
     ) {
         Spacer(Modifier.height(48.dp))
-        Text(
-            "◉",
-            fontSize = 52.sp,
-            color = MaterialTheme.colorScheme.primary,
+        Icon(
+            painter = painterResource(R.drawable.ic_spike),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(52.dp),
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
             "GoGauge",
-            fontFamily = BrandSerif,
-            fontSize = 34.sp,
-            fontWeight = FontWeight.Bold,
+            fontFamily = TitleSerif,
+            fontSize = 40.sp,
+            fontWeight = FontWeight.Normal,
             color = MaterialTheme.colorScheme.onBackground,
         )
         Spacer(Modifier.height(10.dp))
