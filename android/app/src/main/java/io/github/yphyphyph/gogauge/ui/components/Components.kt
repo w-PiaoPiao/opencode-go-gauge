@@ -1,9 +1,14 @@
 package io.github.yphyphyph.gogauge.ui.components
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -24,11 +29,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,34 +45,35 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.github.yphyphyph.gogauge.ui.theme.Gg
 import io.github.yphyphyph.gogauge.ui.theme.GgDark
+import io.github.yphyphyph.gogauge.ui.theme.NUM_FEATURE_SETTINGS
+import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 
 /**
- * Shared mobile-first components. Layout adapted from desktop style.css:
- * cards full-width, larger type, ≥48dp touch targets.
+ * Shared mobile-first components. Anthropic warm-paper style:
+ * hairline borders, 16dp corners, restrained type, tabular numbers.
  */
 
-/** Card container — desktop .card */
+/** Card container — warm-paper surface with hairline border */
 @Composable
 fun GgCard(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RoundedCornerShape(16.dp)
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
             .background(MaterialTheme.colorScheme.surface)
             .border(1.dp, MaterialTheme.colorScheme.outline, shape)
-            .padding(vertical = 4.dp),
+            .padding(vertical = 6.dp),
     ) {
         content()
     }
 }
 
-/** Card header — desktop .card-h */
+/** Card header */
 @Composable
 fun CardHeader(
     title: String,
@@ -81,7 +91,7 @@ fun CardHeader(
     }
 }
 
-/** Hint text — desktop .hint */
+/** Hint text */
 @Composable
 fun Hint(text: String) {
     Text(
@@ -91,7 +101,7 @@ fun Hint(text: String) {
     )
 }
 
-/** KPI card — desktop .kpi (accent bar + label + big number + sub) */
+/** KPI card — label + big tabular number + sub */
 @Composable
 fun KpiCard(
     label: String,
@@ -100,41 +110,38 @@ fun KpiCard(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
+    val shape = RoundedCornerShape(16.dp)
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, shape)
             .padding(start = 14.dp, end = 12.dp, top = 12.dp, bottom = 10.dp),
     ) {
-        // accent bar via Box behind content
-        Box(
-            Modifier
-                .width(3.dp)
-                .height(0.dp),
-        )
         Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(2.dp))
         Text(
             value,
-            fontSize = 22.sp,
-            lineHeight = 26.sp,
+            fontSize = 24.sp,
+            lineHeight = 28.sp,
             fontWeight = FontWeight.Bold,
             color = accent,
-            fontFamily = io.github.yphyphyph.gogauge.ui.theme.NumFontFamily,
+            fontFamily = NumFontFamily,
+            style = LocalTextStyle.current.copy(fontFeatureSettings = NUM_FEATURE_SETTINGS),
         )
         Spacer(Modifier.height(2.dp))
         Text(
             sub,
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontFamily = io.github.yphyphyph.gogauge.ui.theme.NumFontFamily,
+            fontFamily = NumFontFamily,
+            style = LocalTextStyle.current.copy(fontFeatureSettings = NUM_FEATURE_SETTINGS),
         )
     }
 }
 
-/** Quota progress card — desktop .ub (full-width, thicker bar) */
+/** Quota progress card — thin spring-animated bar */
 @Composable
 fun QuotaCard(
     label: String,
@@ -144,12 +151,21 @@ fun QuotaCard(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
+    val shape = RoundedCornerShape(16.dp)
+    val progress by animateFloatAsState(
+        targetValue = (usedPercent.coerceIn(0.0, 100.0) / 100.0).toFloat(),
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessLow,
+        ),
+        label = "quotaProgress",
+    )
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, shape)
             .padding(16.dp),
     ) {
         Row(
@@ -162,22 +178,22 @@ fun QuotaCard(
                 remainingText,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = io.github.yphyphyph.gogauge.ui.theme.NumFontFamily,
+                fontFamily = NumFontFamily,
+                style = LocalTextStyle.current.copy(fontFeatureSettings = NUM_FEATURE_SETTINGS),
             )
         }
         Spacer(Modifier.height(10.dp))
-        // thicker progress bar (12dp vs desktop 8px) for readability
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(12.dp)
+                .height(8.dp)
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             Box(
                 Modifier
-                    .fillMaxWidth(usedPercent.coerceIn(0.0, 100.0).toFloat() / 100f)
-                    .height(12.dp)
+                    .fillMaxWidth(progress)
+                    .height(8.dp)
                     .clip(CircleShape)
                     .background(accent),
             )
@@ -189,20 +205,21 @@ fun QuotaCard(
         ) {
             Text(
                 "${usedPercent.toInt()}%",
-                fontSize = 11.5.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
                 resetText,
-                fontSize = 11.5.sp,
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = io.github.yphyphyph.gogauge.ui.theme.NumFontFamily,
+                fontFamily = NumFontFamily,
+                style = LocalTextStyle.current.copy(fontFeatureSettings = NUM_FEATURE_SETTINGS),
             )
         }
     }
 }
 
-/** Pill row — desktop .pill-row / .pill (touch target ≥44dp height) */
+/** Segmented control (touch target ≥44dp height, spring press feedback) */
 @Composable
 fun PillRow(
     options: List<Pair<String, String>>, // (value, label)
@@ -213,18 +230,33 @@ fun PillRow(
     Row(
         modifier = modifier
             .horizontalScroll(rememberScrollState())
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         options.forEach { (value, label) ->
             val active = value == selected
+            val interactionSource = remember { MutableInteractionSource() }
+            val pressed by interactionSource.collectIsPressedAsState()
+            val scale by animateFloatAsState(
+                targetValue = if (pressed) 0.97f else 1f,
+                animationSpec = spring(stiffness = Spring.StiffnessHigh),
+                label = "pillPress",
+            )
             Box(
                 Modifier
-                    .clip(RoundedCornerShape(7.dp))
+                    .scale(scale)
+                    .clip(RoundedCornerShape(9.dp))
                     .background(if (active) MaterialTheme.colorScheme.surface else Color.Transparent)
-                    .clickable { onSelect(value) }
+                    .then(
+                        if (active) Modifier.border(
+                            1.dp,
+                            MaterialTheme.colorScheme.outline,
+                            RoundedCornerShape(9.dp),
+                        ) else Modifier,
+                    )
+                    .clickable(interactionSource = interactionSource, indication = null) { onSelect(value) }
                     // 触控目标 ≥44dp: 原实现只有 ~36dp (13sp 文字 + 9dp*2 padding),
                     // 单手/小屏下容易点空
                     .defaultMinSize(minHeight = 44.dp)
@@ -235,7 +267,7 @@ fun PillRow(
                     label,
                     fontSize = 13.sp,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (active) MaterialTheme.colorScheme.primary
+                    color = if (active) MaterialTheme.colorScheme.onSurface
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -243,14 +275,14 @@ fun PillRow(
     }
 }
 
-/** Accent colors per KPI class — desktop .kpi.c-* */
+/** Accent colors per KPI class */
 object Accent {
     val violet: Color @Composable get() = MaterialTheme.colorScheme.primary
-    val blue: Color @Composable get() = Gg.Blue
-    val green: Color @Composable get() = Gg.Green
-    val amber: Color @Composable get() = Gg.Amber
-    val cyan: Color @Composable get() = Gg.Cyan
-    val slate: Color @Composable get() = Gg.Slate
+    val blue: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Blue
+    val green: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Green
+    val amber: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Amber
+    val cyan: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Cyan
+    val slate: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Slate
 }
 
 /** Dark-aware accent helper */

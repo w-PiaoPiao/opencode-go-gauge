@@ -47,14 +47,16 @@ val Typography = Typography(
     titleLarge = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Bold,
-        fontSize = 22.sp,
-        lineHeight = 28.sp,
+        fontSize = 26.sp,
+        lineHeight = 32.sp,
+        letterSpacing = (-0.3).sp,
     ),
     titleMedium = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Bold,
-        fontSize = 17.sp,
+        fontSize = 18.sp,
         lineHeight = 24.sp,
+        letterSpacing = (-0.2).sp,
     ),
     titleSmall = TextStyle(
         fontFamily = FontFamily.Default,
@@ -64,5 +66,9 @@ val Typography = Typography(
     ),
 )
 
-// Tabular numbers for token/cost figures (desktop used Fira Code monospace)
-val NumFontFamily = FontFamily.Monospace
+// 品牌展示位衬线(拉丁字母呈编辑级衬线感;中文/数字自动回退系统字体)
+val BrandSerif = FontFamily.Serif
+
+// 等宽数字风格:跟随正文字体 + tabular-nums,替代程序员等宽体
+val NumFontFamily = FontFamily.Default
+const val NUM_FEATURE_SETTINGS = "tnum"

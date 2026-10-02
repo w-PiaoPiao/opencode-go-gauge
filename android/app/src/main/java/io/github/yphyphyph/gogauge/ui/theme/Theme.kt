@@ -26,19 +26,19 @@ private val LightColors = lightColorScheme(
     outlineVariant = Gg.Border,
     error = Gg.Red,
     onError = Color.White,
-    errorContainer = Color(0xFFFDF0F0),
+    errorContainer = Color(0xFFFAECEA),
     onErrorContainer = Gg.Red,
 )
 
 private val DarkColors = darkColorScheme(
     primary = GgDark.Primary,
-    onPrimary = Color(0xFF14121A),
+    onPrimary = Color(0xFF201E1B),
     primaryContainer = GgDark.PrimarySoft,
     onPrimaryContainer = GgDark.Text,
     secondary = GgDark.Blue,
-    onSecondary = Color(0xFF14121A),
+    onSecondary = Color(0xFF201E1B),
     tertiary = GgDark.Green,
-    onTertiary = Color(0xFF14121A),
+    onTertiary = Color(0xFF201E1B),
     background = GgDark.Bg,
     onBackground = GgDark.Text,
     surface = GgDark.Card,
@@ -48,8 +48,8 @@ private val DarkColors = darkColorScheme(
     outline = GgDark.Border,
     outlineVariant = GgDark.Border,
     error = GgDark.Red,
-    onError = Color(0xFF14121A),
-    errorContainer = Color(0xFF3D2429),
+    onError = Color(0xFF201E1B),
+    errorContainer = Color(0xFF3D2825),
     onErrorContainer = GgDark.Red,
 )
 

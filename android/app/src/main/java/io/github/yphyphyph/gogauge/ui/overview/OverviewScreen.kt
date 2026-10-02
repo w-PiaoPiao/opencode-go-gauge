@@ -177,14 +177,14 @@ fun OverviewScreen(vm: MainViewModel = viewModel()) {
     }
 }
 
-/** 账号配色 — desktop OV_COLORS parity (按账号顺序循环取色). */
+/** 账号配色 — 暖纸面语义色板 (按账号顺序循环取色). */
 private val OvColors = listOf(
-    androidx.compose.ui.graphics.Color(0xFF7C5CF6),
-    androidx.compose.ui.graphics.Color(0xFF4F8EF7),
-    androidx.compose.ui.graphics.Color(0xFF22C55E),
-    androidx.compose.ui.graphics.Color(0xFFD97706),
-    androidx.compose.ui.graphics.Color(0xFF06B6D4),
-    androidx.compose.ui.graphics.Color(0xFFEC4899),
+    androidx.compose.ui.graphics.Color(0xFFD97757),
+    androidx.compose.ui.graphics.Color(0xFF5B8DEF),
+    androidx.compose.ui.graphics.Color(0xFF3D9A6C),
+    androidx.compose.ui.graphics.Color(0xFFC98A2D),
+    androidx.compose.ui.graphics.Color(0xFF3FA9BC),
+    androidx.compose.ui.graphics.Color(0xFFD97C9E),
 )
 
 /** 今日合计 KPI — desktop renderAccountOverview sum cards parity (violet/blue/cyan/amber). */
