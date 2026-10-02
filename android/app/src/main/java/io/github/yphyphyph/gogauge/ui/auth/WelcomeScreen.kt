@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yphyphyph.gogauge.auth.Login
 import io.github.yphyphyph.gogauge.ui.MainViewModel
+import io.github.yphyphyph.gogauge.ui.theme.BrandSerif
 
 /**
  * Welcome page shown when not logged in — port of the desktop login overlay.
@@ -54,7 +55,13 @@ fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Uni
             color = MaterialTheme.colorScheme.primary,
         )
         Spacer(Modifier.height(8.dp))
-        Text("GoGauge", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "GoGauge",
+            fontFamily = BrandSerif,
+            fontSize = 34.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
         Spacer(Modifier.height(10.dp))
         Text(
             s.welcomeDesc,

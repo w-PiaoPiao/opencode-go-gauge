@@ -339,6 +339,7 @@ fun TrendLineChart(
         val costDs = LineDataSet(trend.mapIndexed { i, d -> mk(i, d.totalCostUsd) }, s.totalCost).apply {
             color = GgChart.Input.toArgbInt()
             lineWidth = 2f
+            mode = LineDataSet.Mode.CUBIC_BEZIER
             setDrawCircles(false)
             setDrawValues(false)
             axisDependency = com.github.mikephil.charting.components.YAxis.AxisDependency.LEFT
@@ -346,6 +347,7 @@ fun TrendLineChart(
         val reqDs = LineDataSet(trend.mapIndexed { i, d -> mk(i, d.requestCount.toDouble()) }, s.totalRequests).apply {
             color = GgChart.Output.toArgbInt()
             lineWidth = 2f
+            mode = LineDataSet.Mode.CUBIC_BEZIER
             setDrawCircles(false)
             setDrawValues(false)
             enableDashedLine(8f, 6f, 0f)
@@ -364,6 +366,7 @@ fun TrendLineChart(
         val tokDs = LineDataSet(trend.mapIndexed { i, _ -> mk(i, tokenValues[i] * tokenScale) }, s.totalTokens).apply {
             color = GgChart.Reasoning.toArgbInt()
             lineWidth = 2f
+            mode = LineDataSet.Mode.CUBIC_BEZIER
             setDrawCircles(false)
             setDrawValues(false)
             axisDependency = com.github.mikephil.charting.components.YAxis.AxisDependency.LEFT
