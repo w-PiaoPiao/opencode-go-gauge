@@ -38,6 +38,12 @@ _schema_init_path: Optional[str] = None
 # settings payload 是整包 JSON 读-改-写: 多线程 (quota/sync/HTTP) 并发改不同键时
 # 无锁会互相覆盖丢键 (active_account_id 回退 / key_names 丢失). 写侧全走此锁.
 _payload_lock = threading.RLock()
+# payload 进程内读缓存: _raw_payload 在一次 dashboard 请求里被 get_active_account_id
+# / monthly_cycle_start / get_key_names 等重复调用 10+ 次, 每次都是 SELECT + JSON
+# 解析. 以库路径为键 —— set_data_dir / 测试 monkeypatch data_dir 切库后自动失效;
+# 写侧 _write_payload 提交后同步更新, 读到的值与原"每查现读"一致.
+_payload_cache: Optional[dict[str, Any]] = None
+_payload_cache_path: Optional[str] = None
 _data_dir_override: Optional[str] = None
 # 凭证缓存: 避免账户总览在每个请求线程上重复派生 keychain/DPAPI 解密.
 # 仅登录/登出/删除/改 provider 等写路径失效, 见 _invalidate_cred_cache.
@@ -55,7 +61,15 @@ def _invalidate_cred_cache(account_id: Optional[int] = None) -> None:
             _cred_cache.pop(int(account_id), None)
 
 
+def _invalidate_payload_cache() -> None:
+    """丢弃 payload 读缓存 (set_data_dir 切库; 测试绕开 _write_payload 直改库后用)."""
+    global _payload_cache, _payload_cache_path
+    _payload_cache = None
+    _payload_cache_path = None
+
+
 def set_data_dir(path: str) -> None:
+    _invalidate_payload_cache()
     global _data_dir_override
     _data_dir_override = path
     # 数据目录已切换: 凭证缓存键虽是账号 id, 内容却指向旧库, 必须整体失效
@@ -129,8 +143,8 @@ def _frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def _dpapi_protect(data: bytes) -> Optional[bytes]:
-    """Windows DPAPI CryptProtectData (用户作用域), 失败返回 None.
+def _dpapi_crypt(data: bytes, protect: bool) -> Optional[bytes]:
+    """Windows DPAPI CryptProtectData/CryptUnprotectData (用户作用域), 失败返回 None.
 
     DATA_BLOB.pbData 必须用 c_void_p: c_char_p 的字段读取按 C 字符串语义
     (遇 NUL 截断), 而 DPAPI 的输出 blob 是二进制 —— 旧实现存进库的是被
@@ -145,55 +159,36 @@ def _dpapi_protect(data: bytes) -> Optional[bytes]:
             _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_void_p)]
 
         crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-        crypt32.CryptProtectData.argtypes = [
-            ctypes.POINTER(_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_BLOB),
+        fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+        # 第二参数 (描述串): protect 收 LPCWSTR, unprotect 收其指针
+        fn.argtypes = [
+            ctypes.POINTER(_BLOB),
+            wintypes.LPCWSTR if protect else ctypes.POINTER(wintypes.LPCWSTR),
+            ctypes.POINTER(_BLOB),
             ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_BLOB),
         ]
-        crypt32.CryptProtectData.restype = wintypes.BOOL
+        fn.restype = wintypes.BOOL
         buf = ctypes.create_string_buffer(bytes(data), len(data))
         pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_void_p))
         pout = _BLOB(0, None)
         # CRYPTPROTECT_UI_FORBIDDEN = 0x01
-        ok = crypt32.CryptProtectData(
-            ctypes.byref(pin), None, None, None, None, 0x01, ctypes.byref(pout))
+        ok = fn(ctypes.byref(pin), None, None, None, None, 0x01, ctypes.byref(pout))
         if not ok or not pout.pbData:
             return None
         try:
             return ctypes.string_at(pout.pbData, pout.cbData)
         finally:
             ctypes.windll.kernel32.LocalFree(ctypes.c_void_p(pout.pbData))
-    except Exception:  # noqa: BLE001 加密失败走明文回退
+    except Exception:  # noqa: BLE001 加解密失败走明文回退/返回空
         return None
+
+
+def _dpapi_protect(data: bytes) -> Optional[bytes]:
+    return _dpapi_crypt(data, protect=True)
 
 
 def _dpapi_unprotect(data: bytes) -> Optional[bytes]:
-    """Windows DPAPI CryptUnprotectData, 失败返回 None (pbData 用 c_void_p, 见 _dpapi_protect)."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        class _BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_void_p)]
-
-        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-        crypt32.CryptUnprotectData.argtypes = [
-            ctypes.POINTER(_BLOB), ctypes.POINTER(wintypes.LPCWSTR), ctypes.POINTER(_BLOB),
-            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_BLOB),
-        ]
-        crypt32.CryptUnprotectData.restype = wintypes.BOOL
-        buf = ctypes.create_string_buffer(bytes(data), len(data))
-        pin = _BLOB(len(data), ctypes.cast(buf, ctypes.c_void_p))
-        pout = _BLOB(0, None)
-        ok = crypt32.CryptUnprotectData(
-            ctypes.byref(pin), None, None, None, None, 0x01, ctypes.byref(pout))
-        if not ok or not pout.pbData:
-            return None
-        try:
-            return ctypes.string_at(pout.pbData, pout.cbData)
-        finally:
-            ctypes.windll.kernel32.LocalFree(ctypes.c_void_p(pout.pbData))
-    except Exception:  # noqa: BLE001
-        return None
+    return _dpapi_crypt(data, protect=False)
 
 
 def _keychain_set(aid: int, secret: str) -> bool:
@@ -624,21 +619,37 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def _raw_payload(conn: sqlite3.Connection) -> dict[str, Any]:
+    global _payload_cache, _payload_cache_path
+    path = db_path()
+    cached = _payload_cache
+    if cached is not None and _payload_cache_path == path:
+        # 返回浅拷贝: 调用方惯例是取整包后改顶层键再写回, 浅拷贝已隔离缓存本体
+        return dict(cached)
     row = conn.execute("SELECT payload FROM settings WHERE id = 1").fetchone()
     if not row:
-        return {}
-    try:
-        data = json.loads(row["payload"])
-        return data if isinstance(data, dict) else {}
-    except (TypeError, ValueError):
-        return {}
+        data: dict[str, Any] = {}
+    else:
+        try:
+            parsed = json.loads(row["payload"])
+            data = parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            data = {}
+    _payload_cache = data
+    _payload_cache_path = path
+    return dict(data)
 
 
 def _write_payload(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+    global _payload_cache, _payload_cache_path
     conn.execute(
         "UPDATE settings SET payload = ?, updated_at = ? WHERE id = 1",
         (json.dumps(data, ensure_ascii=False), _now_iso()),
     )
+    # 提交成功后才更新缓存: 保证"缓存命中 ⇒ 库里已有该值". 历史调用方都在
+    # 写后紧跟 conn.commit(), 提交收拢到这里不改变任何调用点的语义.
+    conn.commit()
+    _payload_cache = data
+    _payload_cache_path = db_path()
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1060,8 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
 
     若记录 dict 带 ``provider`` 字段则一并写入 (usage_records.provider 为
     来源快照, 查询不受影响); 不带时回填账号当前 provider.
+    记录带 ``account_id`` 字段时逐行归属 (备份导入按行 remap), 未带时整批
+    归属 account_id 参数指定/活跃的账号.
     """
     if not records:
         return 0
@@ -1091,7 +1104,9 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
                 rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
                 rec["cache_write_1h_tokens"], rec["cost_raw"], rec["cost_usd"],
                 rec.get("key_id"), rec.get("session_id"), rec.get("plan"),
-                synced_at, aid,
+                synced_at,
+                # 行级 account_id 优先 (备份导入逐行 remap); 未带时整批归属
+                rec.get("account_id") or aid,
                 # local_date 由 SQLite 按本地时区从 created_at 派生 (末位绑定)
                 rec["created_at"],
             )
@@ -1477,7 +1492,7 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                             current[key] = max(1, min(int(val), 3650))
                         except (TypeError, ValueError):
                             pass
-                elif key in ("auto_sync", "show_accounts_panel", "chart_animation"):
+                elif key in ("auto_sync", "autostart", "show_accounts_panel", "chart_animation"):
                     current[key] = bool(payload[key])
                 else:
                     current[key] = payload[key]
@@ -1606,7 +1621,11 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
                             return None
                         start = end
                         end = end + span
-            return start.strftime("%Y-%m-%d %H:%M:%S")
+                    return start.strftime("%Y-%m-%d %H:%M:%S")
+            # 周期终点缺失/非法: 正常路径 start+end 同时落库 (record_period_bounds),
+            # 走到这里的只有手改库等异常数据 —— 无法顺延过期周期, 回退 None 让
+            # 调用方走 30 天滚动口径, 避免把上个周期拉进「本月」窗口
+            return None
     # 无真实周期: 老规则, 由重置时间回推 (opencode)
     monthly = raw.get(f"monthly_reset:{aid}")
     if not monthly:
@@ -1715,19 +1734,29 @@ def _charts_period_where(
     account_id: int,
     exclude_models: Optional[list[str]] = None,
 ) -> tuple[str, list[Any]]:
-    """usage_charts 周期过滤 (与明细 _period_where 口径一致: UTC 存储 + localtime 日界)."""
+    """usage_charts 周期过滤 (与明细 _period_where 口径一致: UTC 存储 + localtime 日界).
+
+    与明细同款两段式: 先用 local_date 把行集收敛到窗口附近 (走
+    idx_charts_account_localdate 范围扫), 再叠加 datetime() 保留秒级精确口径 ——
+    直接 datetime(time_bucket) >= ... 包裹索引列, 每条 charts 聚合都按账号全量扫.
+    """
     clauses = ["account_id = ?"]
     params: list[Any] = [account_id]
     if period == "5h":
+        clauses.append("local_date >= date('now', 'localtime', '-1 day')")
         clauses.append("datetime(time_bucket) >= datetime('now', '-5 hours')")
     elif period == "today":
         clauses.append("local_date = date('now', 'localtime')")
     elif period == "month":
         start = monthly_cycle_start(account_id)
         if start:
+            clauses.append("local_date >= date(?, 'localtime')")
+            params.append(start)
             clauses.append("datetime(time_bucket) >= datetime(?)")
             params.append(start)
         else:
+            clauses.append("local_date >= date('now', 'localtime', ?)")
+            params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
             clauses.append("datetime(time_bucket) >= datetime('now', ?)")
             params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
     elif period != "all":
@@ -1735,6 +1764,8 @@ def _charts_period_where(
         match = _NUM_DAYS_RE.match(period or "")
         if match:
             days = max(1, int(match.group(1)))
+        clauses.append("local_date >= date('now', 'localtime', ?)")
+        params.append(f"-{days} days")
         clauses.append("datetime(time_bucket) >= datetime('now', ?)")
         params.append(f"-{days} days")
     ex_sql, ex_params = _exclude_clause(exclude_models)

@@ -109,3 +109,65 @@ def test_import_rejects_foreign_backup(tmp_db):
     path.write_bytes(gzip.compress(json.dumps({"app": "Other"}).encode()))
     with pytest.raises(ValueError):
         backup.import_backup(str(path))
+
+
+def test_import_maps_rows_to_own_accounts(tmp_db):
+    """多账号备份: 每条记录必须按行级 remap 归到自己的账号.
+
+    回归: insert_usage_records 曾忽略行内 account_id、整批写入批级账号,
+    同库重导时 r-a 会被 UPSERT 改归到 chunk 最后一条所属的账号."""
+    a1 = db.add_account("tok-1", "ws-a", provider=db.PROVIDER_OPENCODE)
+    a2 = db.add_account("tok-2", "ws-b", provider=db.PROVIDER_OPENCODE)
+
+    def _row(usg_id: str) -> dict:
+        return {
+            "usg_id": usg_id,
+            "created_at": "2026-09-02T10:00:00Z",
+            "model": "m1",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_5m_tokens": 0,
+            "cache_write_1h_tokens": 0,
+            "cost_raw": 0,
+            "cost_usd": 0.1,
+        }
+
+    db.insert_usage_records([_row("r-a")], a1)
+    db.insert_usage_records([_row("r-b")], a2)
+    path = tmp_db / "b.json.gz"
+    backup.export_backup(str(path))
+    # 同库重导: 账号按 (provider, workspace) 匹配到既有行, 记录幂等 upsert
+    result = backup.import_backup(str(path))
+    assert result["accounts_added"] == 0
+    assert result["records_added"] == 0  # usg_id 已存在, 无新增
+    owner = {
+        r["usg_id"]: r["account_id"]
+        for r in db.get_db().execute(
+            "SELECT usg_id, account_id FROM usage_records WHERE usg_id IN ('r-a','r-b')"
+        ).fetchall()
+    }
+    assert owner["r-a"] == a1
+    assert owner["r-b"] == a2
+
+
+def test_import_skips_unmappable_account_id(tmp_db):
+    """记录指向备份中不存在的账号 (手改/损坏文件): 跳过防脏行, 不再错归账号 1."""
+    _seed_account_and_records()
+    path = tmp_db / "backup.json.gz"
+    backup.export_backup(str(path))
+    body = json.loads(gzip.open(str(path), "rb").read())
+    aid = db.get_active_account_id()
+    for r in body["records"]:
+        r["accountId"] = 424242  # 备份 accounts 里没有的 id
+    path.write_bytes(gzip.compress(json.dumps(body).encode()))
+    result = backup.import_backup(str(path))
+    assert result["records_added"] == 0
+    # 记录既没新增也没被搬进账号 1 / 其他账号
+    assert db.count_records(aid) == 2
+    owners = {
+        r["account_id"]
+        for r in db.get_db().execute("SELECT DISTINCT account_id FROM usage_records").fetchall()
+    }
+    assert owners == {aid}

@@ -464,7 +464,7 @@ function applyDarkMode(on) {
   $("tb-theme").innerHTML = `◐ <span data-i18n="${on ? "themeLight" : "themeDark"}">${on ? t("themeLight") : t("themeDark")}</span>`;
   try { localStorage.setItem("gousage-dark", on ? "1" : "0"); } catch (e) { /* ignore */ }
   syncThemePills();
-  rerenderCharts();  // 含统计页图表重绘, 勿再调 refreshIcons (会重复创建图表)
+  rerenderCharts();  // 统一重绘首页+统计页图表 (勿在此重复创建统计页图表)
 }
 function syncThemePills() {
   document.querySelectorAll("#set-theme-pills .pill").forEach((b) => b.classList.toggle("active", b.dataset.v === (state.darkMode ? "dark" : "light")));
@@ -941,13 +941,6 @@ function shortId(id) {
   const tail = s.slice(-6);
   return `${head}…${tail}`;
 }
-function fmtDateTimeShort(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d)) return "—";
-  const pad = (x) => String(x).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
 
 /* ---------------- 使用记录 ---------------- */
 let recSeq = 0;
@@ -1003,9 +996,6 @@ function modelIcon(m) {
   const dark = document.documentElement.dataset.theme === "dark";
   const themed = dark && ["gpt", "grok", "mimo"].includes(name) ? `${name}-color` : name;
   return `<img src="icons/${themed}.svg" alt="${escapeHtml(m)}" title="${escapeHtml(m)}" style="width:16px;height:16px">`;
-}
-function refreshIcons() {
-  // 主题切换的重绘由 rerenderCharts 统一处理 (此处曾重复创建统计页图表)
 }
 
 /* ---------------- 组装 ---------------- */
@@ -1352,9 +1342,10 @@ function showLoginDialog(mode, provider) {
       const ok = await a.open_login_external(prov);
       if (!ok) toast(t("loadFailed"), "err");
     } else {
-      // 浏览器环境兜底: 直接新窗口打开登录页
+      // 浏览器环境兜底: 直接新窗口打开登录页 (旧 auth.opencode.ai/authorize
+      // 已随 2026-09 控制台改版下线, 统一走 /console/login)
       window.open(prov === "commandcode" ? "https://commandcode.ai/signin"
-        : "https://opencode.ai/authorize?client_id=app&redirect_uri=https%3A%2F%2Fopencode.ai%2Fauth%2Fcallback&response_type=code", "_blank");
+        : "https://opencode.ai/console/login", "_blank");
     }
   };
   $("goat-paste").onclick = async () => {

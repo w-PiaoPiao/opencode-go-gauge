@@ -296,6 +296,24 @@ def test_settings_window_days_all(tmp_db):
     assert db.save_settings({"window_days": 99999})["window_days"] == 3650
 
 
+def test_payload_cache_read_write_consistency(tmp_db):
+    """payload 读缓存: 常规读写路径 (_write_payload) 必须立即互见;
+    绕开它的直改库只有显式失效后才可见 (直改库是测试/外部工具的越界行为)."""
+    db.save_key_names({"k1": "n1"})
+    assert db.get_key_names() == {"k1": "n1"}
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE settings SET payload = ? WHERE id = 1",
+        ('{"key_names": {"k2": "n2"}}',),
+    )
+    conn.commit()
+    assert db.get_key_names() == {"k1": "n1"}  # 缓存命中 (直改库对读侧不可见)
+    db._invalidate_payload_cache()
+    assert db.get_key_names() == {"k2": "n2"}  # 失效后重读拿到库内新值
+    db.save_key_names({"k3": "n3"})            # 写路径继续正常工作
+    assert db.get_key_names() == {"k3": "n3"}
+
+
 # ---------------------------------------------------------------------------
 # 「本月」= 当前月度重置周期 (最近激活的 $10 付费期间) 筛选
 # ---------------------------------------------------------------------------
@@ -332,6 +350,24 @@ def test_month_range_past_reset(tmp_db):
 def test_month_range_fallback_30d(tmp_db):
     """无月度重置记录 (配额从未拉到): 回退为滚动 30 天, 与 30d 口径一致."""
     db.insert_usage_records([_rec("u-in", created=_iso_utc(20)), _rec("u-out", created=_iso_utc(40))])
+    assert db.totals("month")["request_count"] == db.totals("30d")["request_count"] == 1
+
+
+def test_month_range_period_without_end_falls_back(tmp_db):
+    """有周期起点但终点缺失/非法 (手改库等异常数据): 无法顺延过期周期,
+    回退 None 走 30 天滚动口径, 避免把上个周期拉进「本月」窗口."""
+    import json as _json
+
+    db.insert_usage_records([_rec("u-old", created=_iso_utc(40)), _rec("u-new", created=_iso_utc(5))])
+    # record_period_bounds 要求起止同时有效; 这里直改库构造 "只有 start" 的状态
+    conn = db.get_db()
+    payload = _json.loads(conn.execute("SELECT payload FROM settings WHERE id=1").fetchone()["payload"])
+    payload["period_start:1"] = _iso_utc(40)
+    payload.pop("period_end:1", None)
+    conn.execute("UPDATE settings SET payload=? WHERE id=1", (_json.dumps(payload),))
+    conn.commit()
+    db._invalidate_payload_cache()  # 绕开 _write_payload 的直改库必须手动失效缓存
+    assert db.monthly_cycle_start() is None
     assert db.totals("month")["request_count"] == db.totals("30d")["request_count"] == 1
 
 

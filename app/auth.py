@@ -130,27 +130,9 @@ def session_cookie_names(provider: str) -> tuple[str, ...]:
     return SESSION_COOKIE_NAMES
 
 
-def _cookie_value(cookie) -> dict[str, str]:
-    """把 pywebview 返回的 cookie 对象摊平成 {name: value}."""
-    pairs: dict[str, str] = {}
-    if isinstance(cookie, SimpleCookieCls):  # SimpleCookie 是 dict 子类, 需先判断
-        for name in list(cookie.keys()):
-            try:
-                pairs[name] = cookie[name].value
-            except Exception:  # noqa: BLE001
-                continue
-    elif isinstance(cookie, dict):
-        name = cookie.get("name") or ""
-        if name:
-            pairs[name] = cookie.get("value") or ""
-    return pairs
-
-
 def _pick_session_cookie(cookies, provider: str = PROVIDER_OPENCODE) -> Optional[tuple[str, str]]:
     """按优先级挑选 provider 的会话 cookie, 返回 (cookie名, 值)."""
-    jar: dict[str, str] = {}
-    for cookie in cookies or []:
-        jar.update(_cookie_value(cookie))
+    jar = dict(_cookie_entries(cookies or []))
     for name in session_cookie_names(provider):
         value = jar.get(name) or ""
         if value.strip():
@@ -1408,14 +1390,20 @@ class LoginWatcher:
             if not self._window_alive():
                 _log("[login] window gone, watcher exits")
                 break
-            try:
-                url = self.win.get_current_url() or ""
-            except Exception as exc:  # noqa: BLE001 窗口未加载完成或已销毁
-                if not self._window_alive():
-                    _log("[login] window closed, watcher exits")
-                    break
-                self._stop.wait(1.0)
-                continue
+            # Windows 走 _win_current_url: pywebview 的 get_current_url 是无超时
+            # 信号量调用, UI 线程被页面加载占住时会永久挂起本线程 (单飞守卫随之
+            # 卡死, 用户无法再次登录) —— 与 login_entry_lost 同一分流.
+            if sys.platform == "win32":
+                url = _win_current_url(self.win)
+            else:
+                try:
+                    url = self.win.get_current_url() or ""
+                except Exception as exc:  # noqa: BLE001 窗口未加载完成或已销毁
+                    if not self._window_alive():
+                        _log("[login] window closed, watcher exits")
+                        break
+                    self._stop.wait(1.0)
+                    continue
 
             if url != self._last_nav:  # 任意域名的 URL 变化都记录 (暴露监听盲区)
                 _log(f"[login] nav: {url[:180]}")
@@ -1565,17 +1553,3 @@ class LoginWatcher:
             self.win.evaluate_js(js)
         except Exception:  # noqa: BLE001 页面未就绪/窗口销毁: 下轮再注入
             pass
-
-
-def clear_login_cookies(win, provider: str = PROVIDER_OPENCODE) -> None:
-    """清空登录窗口的 Cookie (添加新账号时确保出现登录页, 可切换账号).
-
-    上游 v2.2.0 引入的通用入口; 本 fork 的 ``clear_provider_cookies`` 覆盖
-    更多平台分支 (macOS 按域删除 / Windows DeleteAllCookies+回读验证),
-    这里委托之, 保留两套调用方的同名习惯.
-    """
-    try:
-        clear_provider_cookies(provider, win)
-        _log("[login] cookies cleared for fresh sign-in")
-    except Exception as exc:  # noqa: BLE001 清不掉不阻断登录 (有指纹兜底)
-        _log(f"[login] clear cookies unavailable: {exc}")

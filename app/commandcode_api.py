@@ -76,7 +76,7 @@ def build_cookie_header(token: str) -> str:
 
 
 def _fetch(url: str, headers: dict[str, str], timeout: float = REQUEST_TIMEOUT) -> str:
-    """GET 并返回响应文本; 带重试; 401/403 抛 AuthError."""
+    """GET 并返回响应文本; 带重试; 401/403 抛 AuthError (不重试)."""
     last_exc: Optional[Exception] = None
     for attempt in range(FETCH_RETRIES):
         try:
@@ -97,11 +97,15 @@ def _fetch(url: str, headers: dict[str, str], timeout: float = REQUEST_TIMEOUT) 
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise AuthError("认证失败 (HTTP %d)，请重新登录" % exc.code) from exc
-            raise CommandCodeAPIError(f"请求返回 HTTP {exc.code}") from exc
+            # 瞬时 5xx 等与网络错误同样重试 (对齐 opencode_api._fetch;
+            # 此前直接抛出, 一次抖动就把整轮同步打成 partial)
+            last_exc = exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_exc = exc
-            if attempt < FETCH_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
+        if attempt < FETCH_RETRIES - 1:
+            time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
+    if isinstance(last_exc, urllib.error.HTTPError):
+        raise CommandCodeAPIError(f"请求返回 HTTP {last_exc.code}") from last_exc
     raise CommandCodeAPIError(f"网络错误: {last_exc}") from last_exc
 
 
@@ -425,18 +429,20 @@ def _float_or(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def parse_usage_response(text: str, provider: str = "commandcode") -> tuple[list[UsageRecord], Optional[str]]:
+def parse_usage_response(data: Any, provider: str = "commandcode") -> tuple[list[UsageRecord], Optional[str]]:
     """解析 /internal/usage 响应为 (records, next_cursor).
 
     响应形如: {"usages": [{id, createdAt, tokensIn:"69691", tokensOut:"1437",
                             durationTotal, status, message,
                             meta:{totalCost, inputCost, outputCost, cacheCost, model, traceId},
                             type, mode}], "nextCursor": "..."}
+    data 接受已解析的 dict 或原始 JSON 文本 (旧调用兼容, 文本只解析一次).
     """
-    try:
-        data = json.loads(text)
-    except ValueError as exc:
-        raise CommandCodeAPIError("usage 响应不是合法 JSON") from exc
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError as exc:
+            raise CommandCodeAPIError("usage 响应不是合法 JSON") from exc
     if not isinstance(data, dict):
         raise CommandCodeAPIError("usage 响应结构异常")
     records: list[UsageRecord] = []
@@ -495,7 +501,7 @@ def fetch_usage_page(
     """拉一页用量记录; 返回 (records, next_cursor). 首页不传 cursor."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     data = _get("/usage", token, {"limit": limit, "cursor": cursor})
-    return parse_usage_response(json.dumps(data))
+    return parse_usage_response(data)
 
 
 def fetch_usage_summary(token: str) -> dict[str, Any]:
@@ -549,17 +555,19 @@ class UsageChartBucket:
         }
 
 
-def parse_charts_response(text: str) -> list[UsageChartBucket]:
+def parse_charts_response(data: Any) -> list[UsageChartBucket]:
     """解析 /internal/usage/charts 响应为聚合行列表.
 
     data[] 元素形如: {model, provider, timeBucket, requests, totalCost, inputCost,
     outputCost, creditsTotal, tokensIn, tokensOut, tokensTotal,
     cacheReadInputTokens, cacheCreationInputTokens, ...}
+    data 接受已解析的 dict 或原始 JSON 文本 (旧调用兼容).
     """
-    try:
-        data = json.loads(text)
-    except ValueError as exc:
-        raise CommandCodeAPIError("charts 响应不是合法 JSON") from exc
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError as exc:
+            raise CommandCodeAPIError("charts 响应不是合法 JSON") from exc
     if not isinstance(data, dict):
         raise CommandCodeAPIError("charts 响应结构异常")
     rows: list[UsageChartBucket] = []
@@ -592,5 +600,4 @@ def parse_charts_response(text: str) -> list[UsageChartBucket]:
 
 def fetch_usage_charts(token: str, period: str = "billing") -> list[UsageChartBucket]:
     """拉取聚合用量 (默认整个计费周期); period 透传, 服务端目前仅识别 billing."""
-    data = _get("/usage/charts", token, {"period": period} if period else None)
-    return parse_charts_response(json.dumps(data))
+    return parse_charts_response(_get("/usage/charts", token, {"period": period} if period else None))
