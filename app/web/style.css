@@ -415,3 +415,30 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .ur-ws { font-size: 11.5px; color: var(--text3); margin-top: 0; word-break: break-all; line-height: 1.35; }
 .ur-actions { display: flex; gap: 6px; flex-shrink: 0; }
 #rename-input { width: 100%; margin-top: 4px; }
+
+/* ---------- v2.2.0b: 预测小字 / 预测与对比卡 / 日历热力图 ---------- */
+.ub-fc { margin-top: 5px; font-size: 11.5px; color: var(--primary); font-variant-numeric: tabular-nums; }
+
+#comparison-block { border-top: 1px solid var(--border); }
+.cmp { padding: 10px 16px; }
+.cmp + .cmp { border-top: 1px dashed var(--border); }
+.cmp-label { font-size: 11px; color: var(--text3); }
+.cmp-line { font-size: 13px; font-variant-numeric: tabular-nums; }
+.cmp-row { display: flex; align-items: baseline; gap: 10px; }
+.cmp-delta { font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.cmp-delta.up { color: var(--red); }
+.cmp-delta.down { color: var(--green); }
+.cmp-sub { margin-top: 3px; font-size: 11px; color: var(--text3); font-variant-numeric: tabular-nums; }
+
+.hm-body { padding: 6px 16px 14px; }
+.hm-scroll { overflow-x: auto; padding-bottom: 4px; }
+.hm-grid { display: grid; grid-template-rows: repeat(7, 12px); grid-auto-flow: column; grid-auto-columns: 12px; gap: 3px; width: max-content; }
+.hcell { width: 12px; height: 12px; border-radius: 3px; background: var(--muted); }
+.hcell.empty { visibility: hidden; }
+.hcell.lv1 { background: var(--primary-soft); }
+.hcell.lv2 { background: #c9b4f8; }
+.hcell.lv3 { background: var(--primary); }
+.hcell.lv4 { background: var(--primary-strong); }
+html[data-theme="dark"] .hcell.lv2 { background: #4a3d78; }
+.hm-legend { display: flex; align-items: center; gap: 4px; margin-top: 8px; font-size: 10.5px; color: var(--text3); }
+.hm-legend .hcell { width: 10px; height: 10px; }

@@ -100,6 +100,18 @@ const I18N = {
     setToCurrent: "设为当前", loggedOut: "已退出登录",
     logoutUserConfirm: "将退出「{name}」并清除其本地用量数据与同步记录，确定？",
     reloginConfirmNew: "将打开控制台登录页重新登录当前账号，确定？",
+    fcTitleFull: "预测与对比", fcDailyBudget: "今日可用预算", fcMonthRunOut: "月度额度预计用尽",
+    fcProjectedPeriod: "预计整周期总耗", fcFiveHourFull: "5h 窗口预计打满", fcWeekLeft: "周窗口还能用",
+    fcByRecentRate: "按近期速率", fcNeverFull: "按当前速率到重置也不会打满",
+    fcDegraded: "数据积累中，预测仅供参考", fcNotEnough: "数据不足", fcRemaining: "剩余",
+    fcMonthLine: "按近期速率 ~%1 用尽", fcWeekLine: "按近期速率 ~%1 后用完", fc5hLine: "按当前速率 ~%1 后打满",
+    weekThis: "本周", weekLast: "上周", periodThis: "本周期", periodLast: "上一周期",
+    heatmapTitle: "日历热力图", heatmapNoData: "本地暂无历史数据", fewer: "少", more: "多",
+    exportCsv: "导出 CSV", exportCsvDesc: "用量明细导出为表格文件（时间/模型/Token/费用）",
+    exportBackup: "导出 JSON 备份", exportBackupDesc: "账号（不含凭证）与全部用量记录打包 (.json.gz)，与移动端互通",
+    importBackup: "导入备份", importBackupDesc: "从 JSON 备份合并数据；凭证不可迁移，恢复后需重新登录",
+    exportDone: "已导出", exportFailed: "导出失败", importDone: "导入完成，新增 %1 条记录",
+    needDesktopApp: "需要在桌面客户端中使用", busyWorking: "处理中…",
   },
   en: {
     syncing: "Syncing", themeDark: "Dark", themeLight: "Light", refresh: "Refresh",
@@ -196,6 +208,18 @@ const I18N = {
     setToCurrent: "Make Active", loggedOut: "Signed out",
     logoutUserConfirm: "Sign out \"{name}\" and remove their local usage data and sync history?",
     reloginConfirmNew: "This opens the console sign-in page to re-login the current account. Continue?",
+    fcTitleFull: "Forecast & Comparison", fcDailyBudget: "Today's budget", fcMonthRunOut: "Monthly quota runs out",
+    fcProjectedPeriod: "Projected period cost", fcFiveHourFull: "5h window fills in", fcWeekLeft: "Week window lasts",
+    fcByRecentRate: "At recent pace", fcNeverFull: "At this pace it won't fill before reset",
+    fcDegraded: "Collecting data — forecast is rough", fcNotEnough: "Not enough data", fcRemaining: "remaining",
+    fcMonthLine: "At recent pace, runs out ~%1", fcWeekLine: "At recent pace, used up in ~%1", fc5hLine: "At this pace, fills in ~%1",
+    weekThis: "This week", weekLast: "Last week", periodThis: "This period", periodLast: "Previous period",
+    heatmapTitle: "Daily Heatmap", heatmapNoData: "No local history yet", fewer: "less", more: "more",
+    exportCsv: "Export CSV", exportCsvDesc: "Export usage records as a spreadsheet (time/model/tokens/cost)",
+    exportBackup: "Export JSON Backup", exportBackupDesc: "Pack accounts (no tokens) and all usage records (.json.gz), interchangeable with mobile",
+    importBackup: "Import Backup", importBackupDesc: "Merge data from a JSON backup; tokens can't migrate — re-login after restore",
+    exportDone: "Exported", exportFailed: "Export failed", importDone: "Imported, %1 new records",
+    needDesktopApp: "Available in the desktop client only", busyWorking: "Working…",
   },
 };
 let lang = "zh";
@@ -206,6 +230,7 @@ let state = {
   range: "today",
   statsRange: "7d",
   modelDim: "input",
+  heatmapDim: "cost",
   data: null,
   exchangeRate: 7.0,
   currency: "CNY",
@@ -464,6 +489,7 @@ function switchPage(page) {
   $("page-" + page).hidden = false;
   document.querySelectorAll(".side-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (page === "home" || page === "stats") loadDashboard();
+  if (page === "stats") loadHeatmap().catch(() => {});  // 热力图独立端点: 不随 dashboard 每次刷新重拉
   if (page === "overview") loadOverview().catch(() => {});
   if (page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
   if (page === "settings") renderSettings();
@@ -528,6 +554,7 @@ function renderUsageBlocks(quota) {
     return;
   }
   if (state.quotaRetryTimer) { clearTimeout(state.quotaRetryTimer); state.quotaRetryTimer = null; }
+  const fc = state.data ? state.data.forecast : null;
   const blocks = [];
   for (const w of quota.windows || []) {
     const used = Number(w.used) || 0;
@@ -537,6 +564,7 @@ function renderUsageBlocks(quota) {
       used: used,
       remaining: (Number(w.remaining) || 0).toFixed(0) + "%",
       reset: `${t("resetsIn")} ${fmtDur(w.reset_in_sec)}`,
+      forecast: forecastLine(w.label, fc),
     });
   }
   row.innerHTML = blocks.map((b) => `
@@ -544,7 +572,31 @@ function renderUsageBlocks(quota) {
       <div class="ub-head"><span class="ub-l">${b.label}</span><span class="ub-rem">${t("remaining")} ${b.remaining}</span></div>
       <div class="ub-bar"><div class="ub-bar-fill" style="width:${b.used}%"></div></div>
       <div class="ub-meta"><span>${t("used")} ${b.used.toFixed(0)}%</span><span>${b.reset}</span></div>
+      ${b.forecast ? `<div class="ub-fc">${b.forecast}</div>` : ""}
     </div>`).join("");
+}
+
+/* 每窗口预测小字 (v2.2.0b) — 与 Android HomeScreen.forecastLine 同口径 */
+function forecastLine(label, fc) {
+  if (!fc) return "";
+  const dateStr = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
+  if (label === "5h Rolling") {
+    const min = fc.five_hour_exhaust_in_min;
+    if (min == null) return "";
+    return min <= 300 ? t("fc5hLine").replace("%1", fmtDur(min * 60)) : t("fcNeverFull");
+  }
+  if (label === "Weekly") {
+    return fc.week_days_left != null
+      ? t("fcWeekLine").replace("%1", fmtDur(fc.week_days_left * 86400))
+      : "";
+  }
+  if (label === "Monthly") {
+    if (fc.month_days_left == null) return "";
+    const d = new Date();
+    d.setDate(d.getDate() + Math.ceil(fc.month_days_left));
+    return t("fcMonthLine").replace("%1", dateStr(d));
+  }
+  return "";
 }
 
 /* ---------------- 首页: 用量概览 6 格 ---------------- */
@@ -616,6 +668,107 @@ function renderDetail6(totals) {
   ];
   $("stats-detail6").innerHTML = cards.map((c) => `
     <div class="tc"><div class="tc-l">${c.l}</div><div class="tc-v">${c.v}</div><div class="tc-s">${c.s}</div></div>`).join("");
+}
+
+/* ---------------- 统计页: 预测与对比 + 日历热力图 (v2.2.0b, Android parity) ---------------- */
+function renderForecastCard(data) {
+  const card = $("forecast-card");
+  if (!card) return;
+  const fc = data.forecast;
+  const cmp = data.comparison || [];
+  if (!fc && !cmp.length) { card.hidden = true; return; }
+  card.hidden = false;
+  $("fc-degraded").hidden = !(fc && fc.degraded);
+  const dash = "—";
+  const cells = fc ? [
+    { l: t("fcDailyBudget"), v: fc.daily_budget_usd != null ? fmtMoney(fc.daily_budget_usd) : dash, s: `${t("fcRemaining")} ${fc.month_remaining_usd != null ? fmtMoney(fc.month_remaining_usd) : dash}` },
+    { l: t("fcMonthRunOut"), v: fc.month_days_left != null ? monthRunOutDate(fc.month_days_left) : dash, s: fc.month_days_left != null ? `~${Math.ceil(fc.month_days_left)} ${t("dUnit")}` : t("fcNotEnough") },
+    { l: t("fcProjectedPeriod"), v: fc.projected_period_cost_usd != null ? fmtMoney(fc.projected_period_cost_usd) : dash, s: t("fcByRecentRate") },
+    { l: t("fcFiveHourFull"), v: fc.five_hour_exhaust_in_min != null ? (fc.five_hour_exhaust_in_min <= 300 ? fmtDur(fc.five_hour_exhaust_in_min * 60) : t("fcNeverFull")) : dash, s: t("fcByRecentRate") },
+    { l: t("fcWeekLeft"), v: fc.week_days_left != null ? `~${fmtDur(fc.week_days_left * 86400)}` : dash, s: t("fcByRecentRate") },
+  ] : [];
+  $("forecast-grid").innerHTML = cells.map((c) => `
+    <div class="tc"><div class="tc-l">${c.l}</div><div class="tc-v">${c.v}</div><div class="tc-s">${c.s}</div></div>`).join("");
+  renderComparisonBlock(cmp);
+}
+
+function monthRunOutDate(daysLeft) {
+  const d = new Date();
+  d.setDate(d.getDate() + Math.ceil(daysLeft));
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+function renderComparisonBlock(cmp) {
+  const box = $("comparison-block");
+  if (!box) return;
+  if (!cmp.length) { box.innerHTML = ""; return; }
+  box.innerHTML = cmp.map((c) => {
+    const label = c.key === "week" ? t("weekThis") : t("periodThis");
+    const prevLabel = c.key === "week" ? t("weekLast") : t("periodLast");
+    const line = (x) => `${fmtMoney(x.total_cost_usd)} · ${fmtInt(x.request_count)} · ${fmtTokens(x.total_input_tokens + x.total_output_tokens + x.total_reasoning_tokens)}`;
+    const delta = deltaPct(c.current.total_cost_usd, c.previous.total_cost_usd);
+    const reqDelta = deltaPct(c.current.request_count, c.previous.request_count);
+    const tokDelta = deltaPct(c.current.total_input_tokens + c.current.total_output_tokens + c.current.total_reasoning_tokens,
+      c.previous.total_input_tokens + c.previous.total_output_tokens + c.previous.total_reasoning_tokens);
+    return `
+      <div class="cmp">
+        <div class="cmp-label">${label}</div>
+        <div class="cmp-line">${line(c.current)}</div>
+        <div class="cmp-label">${prevLabel}</div>
+        <div class="cmp-row"><span class="cmp-line">${line(c.previous)}</span><span class="cmp-delta ${delta && delta.startsWith("↑") ? "up" : "down"}">${delta || ""}</span></div>
+        <div class="cmp-sub">${reqDelta ? `${t("totalRequests")} ${reqDelta}` : ""}${reqDelta && tokDelta ? " · " : ""}${tokDelta ? `${t("totalTokens")} ${tokDelta}` : ""}</div>
+      </div>`;
+  }).join("");
+}
+
+/* 环比箭头: prev<=0 且 cur>0 视为新增; 两者皆 0 不显示 (与 Android deltaPct 同口径) */
+function deltaPct(cur, prev) {
+  cur = Number(cur) || 0; prev = Number(prev) || 0;
+  if (prev <= 0) return cur > 0 ? "↑new" : "";
+  const pct = (cur - prev) / prev * 100;
+  if (Math.abs(pct) < 0.5) return "±0%";
+  return `${pct > 0 ? "↑" : "↓"}${Math.abs(Math.round(pct))}%`;
+}
+
+/* 热力图数据按账号缓存: 切指标不重拉, 切到统计页/换账号时重新加载 */
+let heatmapDays = [];
+let heatmapSeq = 0;
+async function loadHeatmap() {
+  const seq = ++heatmapSeq;
+  try {
+    const r = await api("/api/heatmap?days=126");
+    if (seq !== heatmapSeq) return;
+    heatmapDays = r.days || [];
+    renderHeatmap();
+  } catch (e) { /* 统计页非关键块: 静默 */ }
+}
+function renderHeatmap() {
+  const body = $("heatmap-body");
+  if (!body) return;
+  if (!heatmapDays.length || !heatmapDays.some((d) => d.request_count > 0)) {
+    body.innerHTML = `<div class="hint" style="padding:12px 16px">${t("heatmapNoData")}</div>`;
+    return;
+  }
+  const metric = state.heatmapDim;
+  const val = (d) => metric === "cost" ? (d.total_cost_usd || 0)
+    : metric === "requests" ? (d.request_count || 0)
+    : (d.total_input_tokens || 0) + (d.total_output_tokens || 0) + (d.total_reasoning_tokens || 0);
+  const max = Math.max(...heatmapDays.map(val), 1);
+  const first = new Date(heatmapDays[0].date + "T00:00:00");
+  const leadingBlanks = (first.getDay() + 6) % 7;  // 周一为首行
+  // 列式网格 (每列一周), 横向滚动 — GitHub contribution 布局
+  let html = `<div class="hm-scroll"><div class="hm-grid" style="--hm-cols:${Math.ceil((leadingBlanks + heatmapDays.length) / 7)}">`;
+  for (let i = 0; i < leadingBlanks; i++) html += `<div class="hcell empty"></div>`;
+  for (const d of heatmapDays) {
+    const v = val(d);
+    const level = v <= 0 ? 0 : Math.min(4, Math.floor(v / max * 4) + 1);
+    const tip = `${d.date} · ${fmtMoney(d.total_cost_usd)} · ${fmtInt(d.request_count)} · ${fmtTokens(d.total_input_tokens + d.total_output_tokens + d.total_reasoning_tokens)}`;
+    html += `<div class="hcell lv${level}" title="${escapeHtml(tip)}"></div>`;
+  }
+  html += `</div></div><div class="hm-legend"><span>${t("fewer")}</span>`;
+  for (let i = 0; i < 5; i++) html += `<div class="hcell lv${i}"></div>`;
+  html += `<span>${t("more")}</span></div>`;
+  body.innerHTML = html;
 }
 
 /* ---------------- 统计页: 模型用量 ---------------- */
@@ -868,6 +1021,7 @@ function renderAll(data) {
   if (statsVisible) {
     renderStatsTotal(data.totals);
     renderDetail6(data.totals);
+    renderForecastCard(data);
     chartModel(data.models);
     chartTrend(data.trend);
     $("trend-hint").textContent = t("trendHint");
@@ -1515,6 +1669,47 @@ function bindEvents() {
     document.querySelectorAll("#mr-dim button").forEach((x) => x.classList.remove("active"));
     b.classList.add("active"); state.modelDim = b.dataset.dim;
     if (state.data) chartModel(state.data.models);
+  });
+  // 热力图指标切换: 用缓存数据重渲染, 不重拉
+  $("hm-dim").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    document.querySelectorAll("#hm-dim button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active"); state.heatmapDim = b.dataset.dim;
+    renderHeatmap();
+  });
+
+  // ---- 导出/导入 (v2.2.0b): pywebview 系统对话框选路径, 后端写文件 ----
+  async function pickSave(defaultName) {
+    const a = await pywebviewApi();
+    if (a && a.pick_save_path) return a.pick_save_path(defaultName);
+    toast(t("needDesktopApp"), "err");
+    return null;
+  }
+  async function runExport(endpoint, defaultName, doneMsg) {
+    const path = await pickSave(defaultName);
+    if (!path) return;
+    try {
+      const r = await api(endpoint, { method: "POST", body: JSON.stringify({ path }) });
+      if (r.ok === false) throw new Error(r.error || t("exportFailed"));
+      toast(doneMsg.includes("%1")
+        ? doneMsg.replace("%1", fmtInt(r.rows ?? r.records ?? 0))
+        : doneMsg);
+    } catch (e) { toast(e.message || t("exportFailed"), "err"); }
+  }
+  $("btn-export-csv").addEventListener("click", () => runExport("/api/export/csv", "gogauge-export.csv", t("exportDone")));
+  $("btn-export-backup").addEventListener("click", () => runExport("/api/backup/export", "gogauge-backup.json.gz", t("exportDone")));
+  $("btn-import-backup").addEventListener("click", async () => {
+    const a = await pywebviewApi();
+    let path = null;
+    if (a && a.pick_open_path) path = await a.pick_open_path();
+    else { toast(t("needDesktopApp"), "err"); return; }
+    if (!path) return;
+    try {
+      const r = await api("/api/backup/import", { method: "POST", body: JSON.stringify({ path }) });
+      if (r.ok === false) throw new Error(r.error || t("exportFailed"));
+      toast(t("importDone").replace("%1", fmtInt(r.records_added || 0)));
+      await loadDashboard();
+    } catch (e) { toast(e.message || t("exportFailed"), "err"); }
   });
   $("tb-refresh").addEventListener("click", () => startSync("incremental"));
   $("btn-full-sync").addEventListener("click", () => {

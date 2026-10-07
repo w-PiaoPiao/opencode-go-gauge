@@ -739,6 +739,44 @@ class WindowApi:
             self._win.minimize()
         return True
 
+    def pick_save_path(self, default_name: str = "gogauge-export.csv") -> Optional[str]:
+        """系统保存对话框 (导出用); 用户取消返回 None.
+
+        浏览器环境 (无 pywebview 窗口) 返回 None, 前端据此提示需要桌面客户端.
+        """
+        try:
+            import webview
+
+            win = self._win or (webview.windows[0] if webview.windows else None)
+            if win is None:
+                return None
+            result = win.create_file_dialog(webview.SAVE_DIALOG, save_filename=default_name)
+            # pywebview 各后端返回 list/tuple/str 不一, 统一取第一个非空项
+            if isinstance(result, (list, tuple)):
+                return str(result[0]) if result else None
+            return str(result) if result else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def pick_open_path(self) -> Optional[str]:
+        """系统打开对话框 (导入备份用); 用户取消返回 None."""
+        try:
+            import webview
+
+            win = self._win or (webview.windows[0] if webview.windows else None)
+            if win is None:
+                return None
+            result = win.create_file_dialog(
+                webview.OPEN_DIALOG,
+                allow_multiple=False,
+                file_types=("GoGauge 备份 (*.json.gz;*.gz)", "所有文件 (*.*)"),
+            )
+            if isinstance(result, (list, tuple)):
+                return str(result[0]) if result else None
+            return str(result) if result else None
+        except Exception:  # noqa: BLE001
+            return None
+
     def move_by(self, dx: float, dy: float) -> bool:
         """标题栏拖动(增量): dx/dy 为屏幕物理像素增量, 直接换算窗口位置.
 

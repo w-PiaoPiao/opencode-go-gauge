@@ -1516,6 +1516,15 @@ def record_period_bounds(account_id: Optional[int], period_start: str, period_en
         conn.commit()
 
 
+def period_bounds(account_id: Optional[int] = None) -> tuple[Optional[str], Optional[str]]:
+    """读取记录的计费周期起止 (GOAT 真实周期; 无记录返回 (None, None))."""
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return None, None
+    payload = _raw_payload(get_db())
+    return payload.get(f"period_start:{aid}"), payload.get(f"period_end:{aid}")
+
+
 def _parse_utc_naive(value: str) -> Optional[str]:
     """把 ISO/毫秒/常见格式的时间串归一化为 UTC naive "YYYY-MM-DD HH:MM:SS"."""
     if value is None:
@@ -2085,3 +2094,123 @@ def totals(
         "total_cost_usd": round(float(row["total_cost_usd"] or 0), 6),
         "hit_rate": round(hit_rate, 2),
     }
+
+
+# ---------------------------------------------------------------------------
+# v2.2.0b: 预测/周期对比/导出 (Android 端 UsageDao 扩展的桌面 parity)
+# ---------------------------------------------------------------------------
+
+
+def recent_cost_usd(hours: int = 2, account_id: Optional[int] = None) -> float:
+    """近 N 小时已耗 $ (5h 窗口速率预测的输入).
+
+    两段式过滤 (与 _period_where "5h" 同口径): local_date 先收敛到昨/今走索引,
+    substr(created_at,1,19) 精筛 (不依赖 SQLite 版本对 ISO Z 后缀的解析差异,
+    与 Android 端 UsageDao.recentUsage 逐字对齐).
+    """
+    aid = _resolve_account_id(account_id)
+    row = get_db().execute(
+        """
+        SELECT COALESCE(SUM(cost_usd), 0) AS c
+        FROM usage_records
+        WHERE account_id = ?
+          AND local_date >= date('now', 'localtime', '-1 day')
+          AND datetime(substr(created_at, 1, 19)) >= datetime('now', ?)
+        """,
+        (aid, f"-{max(1, hours)} hours"),
+    ).fetchone()
+    return float(row["c"] or 0) if row else 0.0
+
+
+def totals_between(
+    start_local_date: str,
+    end_local_date_exclusive: str,
+    account_id: Optional[int] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """任意本地日区间 [start, end) 的聚合 (周期对比用), 输出与 totals() 同形.
+
+    两种数据源都按 local_date 索引直查 (charts 的 local_date 物化列同样可用).
+    """
+    aid = _resolve_account_id(account_id)
+    ex_sql, ex_params = _exclude_clause(exclude_models)
+    ex_and = f" AND {ex_sql}" if ex_sql else ""
+    params: list[Any] = [start_local_date, end_local_date_exclusive, *ex_params]
+    if _use_charts_stats(aid):
+        row = get_db().execute(
+            f"""
+            SELECT SUM(requests) AS request_count,
+                   0 AS session_count,
+                   SUM(tokens_in) AS total_input_tokens,
+                   SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
+                   0 AS total_reasoning_tokens,
+                   SUM(cache_read_tokens) AS cache_hit_tokens,
+                   SUM(cache_creation_tokens) AS cache_write_tokens,
+                   SUM(tokens_out) AS total_output_tokens,
+                   SUM(total_cost) AS total_cost_usd
+            FROM usage_charts
+            WHERE account_id = ? AND local_date >= ? AND local_date < ?{ex_and}
+            """,
+            [aid, *params],
+        ).fetchone()
+    else:
+        row = get_db().execute(
+            f"""
+            SELECT COUNT(*) AS request_count,
+                   COUNT(DISTINCT CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id END) AS session_count,
+                   SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
+                   SUM(input_tokens) AS uncached_input_tokens,
+                   SUM(reasoning_tokens) AS total_reasoning_tokens,
+                   SUM(cache_read_tokens) AS cache_hit_tokens,
+                   SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS cache_write_tokens,
+                   SUM(output_tokens) AS total_output_tokens,
+                   SUM(cost_usd) AS total_cost_usd
+            FROM usage_records
+            WHERE account_id = ? AND local_date >= ? AND local_date < ?{ex_and}
+            """,
+            [aid, *params],
+        ).fetchone()
+    if row is None or row["request_count"] is None:
+        return {
+            "request_count": 0, "session_count": 0, "total_input_tokens": 0,
+            "uncached_input_tokens": 0, "total_reasoning_tokens": 0,
+            "cache_hit_tokens": 0, "cache_write_tokens": 0,
+            "total_output_tokens": 0, "total_cost_usd": 0.0, "hit_rate": 0.0,
+        }
+    hit = int(row["cache_hit_tokens"] or 0)
+    miss = int(row["uncached_input_tokens"] or 0)
+    hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
+    return {
+        "request_count": int(row["request_count"] or 0),
+        "session_count": int(row["session_count"] or 0),
+        "total_input_tokens": int(row["total_input_tokens"] or 0),
+        "uncached_input_tokens": miss,
+        "total_reasoning_tokens": int(row["total_reasoning_tokens"] or 0),
+        "cache_hit_tokens": hit,
+        "cache_write_tokens": int(row["cache_write_tokens"] or 0),
+        "total_output_tokens": int(row["total_output_tokens"] or 0),
+        "total_cost_usd": round(float(row["total_cost_usd"] or 0), 6),
+        "hit_rate": round(hit_rate, 2),
+    }
+
+
+def export_page(
+    limit: int = 1000,
+    offset: int = 0,
+    account_id: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """按时间升序分页导出明细 (BackupManager 流式写文件用)."""
+    aid = _resolve_account_id(account_id)
+    rows = get_db().execute(
+        "SELECT * FROM usage_records WHERE account_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+        (aid, max(1, limit), max(0, offset)),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_records(account_id: Optional[int] = None) -> int:
+    aid = _resolve_account_id(account_id)
+    row = get_db().execute(
+        "SELECT COUNT(*) AS c FROM usage_records WHERE account_id = ?", (aid,)
+    ).fetchone()
+    return int(row["c"] or 0) if row else 0
