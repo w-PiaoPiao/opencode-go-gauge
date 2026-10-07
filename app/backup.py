@@ -171,8 +171,11 @@ def import_backup(path: str) -> dict[str, Any]:
             # 缺主键/时间的记录无法入库 (local_date 由 created_at 派生), 跳过防脏行
             if not usg_id or not created_at:
                 continue
-            aid = id_remap.get(int(r.get("accountId") or 0), 1)
-            default_aid = aid
+            # accountId 无法映射 (指向备份中不存在的账号, 手改/损坏文件): 跳过,
+            # 不再回退写入账号 1 —— 那可能是不相干账号, 造成记录错归
+            mapped = id_remap.get(int(r.get("accountId") or 0))
+            if mapped is None:
+                continue
             entities.append(
                 {
                     "usg_id": usg_id,
@@ -191,8 +194,9 @@ def import_backup(path: str) -> dict[str, Any]:
                     "session_id": r.get("sessionId"),
                     "plan": r.get("plan"),
                     "synced_at": now_iso,
-                    "account_id": aid,
+                    "account_id": mapped,
                 }
             )
+            default_aid = mapped
         records_added += db.insert_usage_records(entities, default_aid)
     return {"accounts_added": accounts_added, "records_added": records_added, "accounts_skipped": accounts_skipped}

@@ -1319,6 +1319,11 @@ def main() -> None:
 
     if not _quitting:
         tray.stop()
+    # 正常退出路径 (事件循环已随最后一个窗口销毁而退出): 停 server / 关库连接 /
+    # WAL checkpoint. 此前 shutdown 只挂在 3s 兜底 Timer 上, 而本函数返回后进程
+    # 即刻结束, daemon Timer 被丢弃 —— checkpoint_wal 在正常退出时从未执行过.
+    # 兜底 Timer 再跑一遍是幂等的, 无副作用.
+    shutdown()
 
 
 def shutdown() -> None:

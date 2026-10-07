@@ -185,19 +185,23 @@ def _record_monthly_reset(account_id: int, quota: dict[str, Any], provider: str 
 # ---------------------------------------------------------------------------
 
 def _time_to_ms(raw: Optional[str]) -> Optional[int]:
-    """时间串 → epoch ms: 接受 ISO (reset_at) 与 UTC naive "yyyy-MM-dd HH:mm:ss" (period_bounds 存储)."""
+    """时间串 → epoch ms: 接受 ISO (reset_at) 与 UTC naive "yyyy-MM-dd HH:mm:ss" (period_bounds 存储).
+
+    naive 串一律按 UTC 补时区: fromisoformat 同样接受空格分隔格式, 若对解析出的
+    naive datetime 直接 .timestamp() 会按**本地时区**解释 —— 非 UTC 时区下
+    period_bounds 的周期终点被偏移数小时 (UTC+8 偏 8h), daily_budget 虚低、
+    周期对比窗口错位.
+    """
     if not raw:
         return None
     text = str(raw).strip()
     try:
-        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp() * 1000)
-    except ValueError:
-        pass
-    try:
-        dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1000)
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
 
 
 def _build_forecast(active_id: int, quota: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
@@ -212,7 +216,6 @@ def _build_forecast(active_id: int, quota: Optional[dict[str, Any]]) -> Optional
     monthly, five_h, week = win("Monthly"), win("5h Rolling"), win("Weekly")
 
     daily = db.daily_stats(14, active_id)
-    start_raw = db.monthly_cycle_start(active_id)
     period_cost = float(db.totals("month", active_id).get("total_cost_usd") or 0)
     recent_2h = db.recent_cost_usd(2, active_id)
 
@@ -310,7 +313,13 @@ def _ensure_quota_async(account_id: Optional[int] = None) -> None:
         except Exception:  # noqa: BLE001
             # 缓存槽已被凭证变更清掉时不再回写 (也不重建): 让下次请求按新凭证重拉
             slot = _quota_cache.get(aid)
-            if slot is not None:
+            if slot is None:
+                return
+            if slot.get("data"):
+                # 保留上次成功的配额 (界面不闪空), 仅把时间戳拨到短退避点:
+                # 30s 后才允许后台再试, 不随每个请求都触发刷新线程
+                slot["at"] = time.time() - QUOTA_CACHE_TTL + 30.0
+            else:
                 slot["at"] = time.time()
                 slot["data"] = None
         finally:
@@ -461,35 +470,27 @@ def _sync_one_account(
                 retention_days = usage_page.retention_days
             records = usage_page.records
 
+            inserted = 0
             if records:
                 # 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 -> 该页保留后停止
-                if mode == "full" and window_days is not None:
-                    earliest = min(r.created_at for r in records if r.created_at)
-                    if earliest:
-                        try:
-                            et = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
-                            boundary = datetime.now(timezone.utc) - timedelta(days=window_days)
-                            if et < boundary:
-                                window_boundary_reached = True
-                        except (ValueError, TypeError):
-                            pass
+                # (与 commandcode 分支共用同一判定, 此前这里内联了一份等价逻辑)
+                if _window_boundary_hit(records, mode, window_days):
+                    window_boundary_reached = True
                 inserted = db.insert_usage_records(
                     [r.to_db_dict() for r in records], account_id
                 )
                 total_inserted += inserted
                 with _sync_lock:
                     _sync_state["inserted"] = total_inserted
-                empty_pages = empty_pages + 1 if inserted == 0 else 0
-            else:
-                empty_pages += 1
+            # 增量停止判定与 commandcode 同一实现: 连续两批 0 新增 (空页同计) 即追平
+            stop, empty_pages = _incremental_done(inserted, empty_pages, mode)
 
             cursor = usage_page.next_cursor
             if not cursor:
                 break  # 已到最早一条
             if window_boundary_reached:
                 break
-            # 增量模式: 连续两页没有新数据 -> 停止
-            if mode == "incremental" and empty_pages >= 2:
+            if stop:
                 break
 
         # 按同步范围裁剪窗口外记录 (与本次新增数独立)
@@ -885,6 +886,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         totals_today = (
             totals_period if period == "today" else db.totals("today", active_id, exclude_models)
         )
+        # 近 7 天趋势是 30 天序列的后缀子集: 一次聚合切片复用, 省一条按天 GROUP BY
+        daily30 = db.daily_stats(30, active_id, exclude_models)
         # burn-rate 预测 + 周期对比 (v2.2.0b): 配额缓存未就绪时 forecast 为 null,
         # 前端显示占位; 对比纯本地聚合, 代价低
         _json_response(
@@ -900,8 +903,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "comparison": _period_comparison(active_id) if token else [],
                 "totals": totals_period,
                 "today": totals_today,
-                "daily": db.daily_stats(7, active_id, exclude_models),  # 每日趋势固定显示近 7 天
-                "trend": db.daily_stats(30, active_id, exclude_models),  # 用量趋势 (费用/请求双轴)
+                "daily": daily30[-7:],  # 每日趋势固定显示近 7 天
+                "trend": daily30,  # 用量趋势 (费用/请求双轴)
                 "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势
                 # models 始终全量: 环形图需保留被排除模型 (图例删除线 + 点击即加回),
                 # 排行由前端按 excluded_models 过滤; 排除只作用于 totals/trend 聚合
@@ -1038,6 +1041,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 _json_response(handler, {"ok": False, "error": "无效账号 id"}, 400)
                 return
             _quota_cache.pop(aid, None)  # 清理该账号的配额缓存槽
+            _key_names_fetched_at.pop(aid, None)  # key 名称刷新时间戳一并回收
             _json_response(handler, {"ok": True, "remaining": remaining})
             return
 
