@@ -83,7 +83,7 @@ data class SyncProgress(
     val account: String = "",
 )
 
-/** App settings — mirrors db._DEFAULT_SETTINGS (desktop). */
+/** App settings — mirrors db._DEFAULT_SETTINGS (desktop) + Android 专属键. */
 data class AppSettings(
     val syncIntervalSec: Int = 300,   // 1/5/15/30 min
     val windowDays: Int? = 60,        // 30/60/90/180, null = all
@@ -91,6 +91,8 @@ data class AppSettings(
     val showAccountsPanel: Boolean = false,  // 账户总览面板开关 (v2.1.0)
     /** 图表动画开关 (默认关闭: 低配设备上每次刷新重建动画是掉帧大头; desktop chart_animation parity). */
     val chartAnimation: Boolean = false,
+    /** 常驻通知开关 (v2.2.0b, Android 专属): 低优先级 ongoing 通知显示三窗口余量。 */
+    val persistentNotification: Boolean = false,
 )
 
 /** Dashboard bundle — mirrors GET /api/dashboard (desktop). */

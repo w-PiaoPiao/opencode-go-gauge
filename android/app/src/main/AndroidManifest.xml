@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- 应用内下载更新后触发系统安装器 (个人侧载; 需用户在系统设置中授权) -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 常驻通知 (v2.2.0b, 设置开关; API 33+ 运行时请求) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".GoGaugeApp"
@@ -24,6 +26,40 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 配额小组件 (v2.2.0b) -->
+        <receiver
+            android:name=".widget.QuotaWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/quota_widget_info" />
+        </receiver>
+
+        <!-- 小组件账号选择配置页 (由桌面 launcher 调起) -->
+        <activity
+            android:name=".widget.QuotaWidgetConfigActivity"
+            android:exported="true"
+            android:theme="@style/Theme.GoGauge">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+
+        <!-- 配额快捷磁贴 (QuickSettings) -->
+        <service
+            android:name=".widget.QuotaTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_notif"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- 更新包目录 (cacheDir/updates) 经 FileProvider 共享给系统安装器 -->
         <provider

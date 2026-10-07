@@ -41,6 +41,8 @@ abstract class SettingsDao {
                     ?.toBooleanStrictOrNull() ?: defaults().showAccountsPanel,
                 chartAnimation = obj["chart_animation"]?.jsonPrimitive?.contentOrNull()
                     ?.toBooleanStrictOrNull() ?: defaults().chartAnimation,
+                persistentNotification = obj["persistent_notification"]?.jsonPrimitive?.contentOrNull()
+                    ?.toBooleanStrictOrNull() ?: defaults().persistentNotification,
             )
         } catch (e: Exception) {
             defaults()
@@ -54,6 +56,7 @@ abstract class SettingsDao {
             autoSync = patch.autoSync,
             showAccountsPanel = patch.showAccountsPanel,
             chartAnimation = patch.chartAnimation,
+            persistentNotification = patch.persistentNotification,
         )
         // 保存时在既有 payload 上合并覆盖 (与桌面 db.save_settings 的整行 JSON 覆盖不同,
         // 安卓端 settings 行还承载 active_account_id 等运行时键, 不能整包丢弃)
@@ -71,6 +74,7 @@ abstract class SettingsDao {
                 put("auto_sync", JsonPrimitive(merged.autoSync))
                 put("show_accounts_panel", JsonPrimitive(merged.showAccountsPanel))
                 put("chart_animation", JsonPrimitive(merged.chartAnimation))
+                put("persistent_notification", JsonPrimitive(merged.persistentNotification))
                 put("key_names", buildJsonObject { for ((k, v) in keyNames) put(k, JsonPrimitive(v)) })
             }.toString()
             savePayload(payload, java.time.Instant.now().toString())
@@ -181,6 +185,39 @@ abstract class SettingsDao {
 
     suspend fun setMaintenanceFlag(key: String) {
         savePayloadKey(key, "1")
+    }
+
+    /**
+     * 小组件账号选择 (v2.2.0b): 键 `widget_account:{appWidgetId}`,
+     * 值 "active" (跟随活跃账号) 或 "account:{id}" (固定账号)。默认 "active"。
+     */
+    suspend fun getWidgetAccount(appWidgetId: Int): String {
+        val raw = payload() ?: return "active"
+        return try {
+            json.parseToJsonElement(raw).jsonObject["widget_account:$appWidgetId"]
+                ?.let { (it as? JsonPrimitive)?.content } ?: "active"
+        } catch (e: Exception) {
+            "active"
+        }
+    }
+
+    suspend fun setWidgetAccount(appWidgetId: Int, mode: String) {
+        savePayloadKey("widget_account:$appWidgetId", mode)
+    }
+
+    /** 小组件被移除时清掉对应配置键 (payload 键少, 整包读改写成本可忽略)。 */
+    suspend fun removeWidgetAccount(appWidgetId: Int) {
+        PayloadLock.mutex.withLock {
+            val base = try {
+                json.parseToJsonElement(payload() ?: "{}").jsonObject
+            } catch (e: Exception) {
+                buildJsonObject {}
+            }
+            val merged = buildJsonObject {
+                for ((k, v) in base) if (k != "widget_account:$appWidgetId") put(k, v)
+            }
+            savePayload(merged.toString(), java.time.Instant.now().toString())
+        }
     }
 }
 

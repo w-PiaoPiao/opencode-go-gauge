@@ -15,6 +15,7 @@ import io.github.yphyphyph.gogauge.data.remote.OpenCodeApi
 import io.github.yphyphyph.gogauge.data.remote.UpdateApi
 import io.github.yphyphyph.gogauge.data.repository.DashboardRepository
 import io.github.yphyphyph.gogauge.sync.SyncWorker
+import io.github.yphyphyph.gogauge.widget.Updaters
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -42,6 +43,8 @@ class GoGaugeApp : Application() {
         )
         appScope.launch { database.ensureSeedRows() }
         scheduleBackgroundSync(this)
+        // 配额快照落库 → 刷新三个进程外入口 (小组件/磁贴/常驻通知)
+        repository.onSnapshotsChanged = { Updaters.dispatch(this) }
     }
 
     private fun scheduleBackgroundSync(context: Context) {

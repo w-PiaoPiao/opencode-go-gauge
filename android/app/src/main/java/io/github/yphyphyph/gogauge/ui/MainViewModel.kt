@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.yphyphyph.gogauge.GoGaugeApp
+import io.github.yphyphyph.gogauge.data.backup.BackupManager
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
 import io.github.yphyphyph.gogauge.data.model.AccountsOverviewData
 import io.github.yphyphyph.gogauge.data.model.AppSettings
@@ -78,6 +79,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var loggedIn by mutableStateOf(false)
         private set
     var dashboard by mutableStateOf<DashboardData?>(null)
+        private set
+    /**
+     * Burn-rate 预测 (v2.2.0b) — 随 dashboard 重载联动刷新; 配额未就绪时为 null。
+     */
+    var forecast by mutableStateOf<io.github.yphyphyph.gogauge.domain.ForecastEngine.Forecast?>(null)
+        private set
+
+    /** 周期对比 (本周 vs 上周 / 本周期 vs 上一周期) — 与 forecast 同步加载。 */
+    var periodComparison by mutableStateOf<List<DashboardRepository.PeriodCompare>?>(null)
+        private set
+
+    /** 日历热力图逐日数据 (近 18 周)。 */
+    var heatmapDays by mutableStateOf<List<io.github.yphyphyph.gogauge.data.model.DailyStat>>(emptyList())
+        private set
+
+    /** 热力图指标: cost / requests / tokens。 */
+    var heatmapDim by mutableStateOf("cost")
+        private set
+
+    // ---- 导出/导入 (v2.2.0b, SAF) ----
+    var backupBusy by mutableStateOf(false)
+        private set
+    var backupMessage by mutableStateOf("")
         private set
     /**
      * dashboard 数据版本号 — 每次成功加载自增.
@@ -374,10 +398,69 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (seq != dashSeq) return@launch // 丢弃过期响应, 防口径串写
                 dashboard = data
                 dashboardVersion++
+                loadForecast()
             } catch (e: CancellationException) {
                 throw e // viewModelScope 取消时正常退出, 不当加载失败记录
             } catch (e: Exception) {
                 android.util.Log.e("GoGauge", "loadDashboard failed range=$range", e)
+            }
+        }
+    }
+
+    /** Burn-rate 预测 + 周期对比 + 热力图数据重算 (配额未就绪 → forecast 置 null, UI 显示占位)。 */
+    private fun loadForecast() {
+        scope.launch {
+            try {
+                forecast = repo.buildForecast()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("GoGauge", "loadForecast failed", e)
+            }
+            try {
+                periodComparison = repo.periodComparison()
+                heatmapDays = repo.heatmapDaily()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("GoGauge", "loadComparison failed", e)
+            }
+        }
+    }
+
+    fun changeHeatmapDim(d: String) {
+        heatmapDim = d
+    }
+
+    // ------------------------------------------------------------------
+    // Export / import (v2.2.0b, SAF — 无存储权限)
+    // ------------------------------------------------------------------
+
+    private val app: Application get() = getApplication()
+
+    fun exportCsv(uri: android.net.Uri) = runBackup { BackupManager.exportCsv(app, uri); s.exportDone }
+
+    fun exportBackup(uri: android.net.Uri) = runBackup { BackupManager.exportBackup(app, uri); s.exportDone }
+
+    fun importBackup(uri: android.net.Uri) = runBackup {
+        val r = BackupManager.importBackup(app, uri)
+        s.importDone.format(r.recordsAdded) + if (r.accountsAdded > 0) " (+${r.accountsAdded})" else ""
+    }
+
+    private fun runBackup(block: suspend () -> String) {
+        if (backupBusy) return
+        scope.launch {
+            backupBusy = true
+            backupMessage = ""
+            try {
+                backupMessage = block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("GoGauge", "backup failed", e)
+                backupMessage = "${e.message?.takeIf { it.isNotBlank() } ?: s.exportFailed}"
+            } finally {
+                backupBusy = false
             }
         }
     }
@@ -650,6 +733,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun changeLang(l: String) {
         lang = if (l == "en") "en" else "zh"
         prefs.edit().putString("lang", lang).apply()
+        // 小组件/磁贴/常驻通知的文案在数据组装时确定, 语言切换后立即重绘
+        io.github.yphyphyph.gogauge.widget.Updaters.dispatch(getApplication())
     }
 
     fun changeDarkMode(on: Boolean) {
