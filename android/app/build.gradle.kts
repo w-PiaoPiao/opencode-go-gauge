@@ -17,8 +17,8 @@ android {
         applicationId = "io.github.yphyphyph.gogauge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "2.2.0"
+        versionCode = 9
+        versionName = "2.2.0b"
         // instrumented 测试 (Keystore 加密往返等, 见 app/src/androidTest)
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -123,6 +123,9 @@ dependencies {
 
     // WorkManager (background sync)
     implementation("androidx.work:work-runtime-ktx:2.10.0")
+
+    // Glance (桌面小组件, v2.2.0b)
+    implementation("androidx.glance:glance-appwidget:1.1.1")
 
     // Charts (MPAndroidChart via JitPack)
     implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")

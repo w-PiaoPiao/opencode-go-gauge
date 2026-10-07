@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 单色通知小图标: 简易仪表盘 (半圆表盘 + 指针), 白色填充由系统着色 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,4C7.03,4 3,8.03 3,13c0,1.66 0.45,3.21 1.24,4.54L3.5,18.28C2.55,16.72 2,14.92 2,13 2,7.48 6.48,3 12,3s10,4.48 10,10c0,1.92 -0.55,3.72 -1.5,5.28l-0.74,-0.74C20.55,16.21 21,14.66 21,13c0,-4.97 -4.03,-9 -9,-9zM12,8c-0.55,0 -1,0.45 -1,1 0,0.28 0.11,0.53 0.29,0.71L9.5,14.5c-0.28,0.48 -0.11,1.09 0.37,1.37 0.48,0.28 1.09,0.11 1.37,-0.37l1.79,-4.79c0.18,-0.18 0.29,-0.43 0.29,-0.71 0,-0.55 -0.45,-1 -1,-1z" />
+</vector>

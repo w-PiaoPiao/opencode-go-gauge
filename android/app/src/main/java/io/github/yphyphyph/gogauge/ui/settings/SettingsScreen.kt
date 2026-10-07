@@ -1,6 +1,11 @@
 package io.github.yphyphyph.gogauge.ui.settings
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -219,6 +224,33 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                     )
                 },
             )
+            // 常驻通知 (v2.2.0b): 33+ 需运行时权限; 开关立即生效 (dispatch 内读最新设置)
+            val notifPermLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission(),
+            ) { granted ->
+                if (!granted) {
+                    vm.saveSettings(vm.settings.copy(persistentNotification = false))
+                    toast(s.notifPermissionDenied)
+                }
+            }
+            SetRow(
+                s.persistentNotif, s.persistentNotifDesc,
+                trailing = {
+                    Switch(
+                        checked = vm.settings.persistentNotification,
+                        onCheckedChange = { on ->
+                            vm.saveSettings(vm.settings.copy(persistentNotification = on))
+                            if (on && Build.VERSION.SDK_INT >= 33 &&
+                                context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                                PackageManager.PERMISSION_GRANTED
+                            ) {
+                                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            io.github.yphyphyph.gogauge.widget.Updaters.dispatch(context)
+                        },
+                    )
+                },
+            )
             SetRow(
                 s.currency, s.currencyDesc,
                 stacked = true,
@@ -258,6 +290,44 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                         "${s.lastSync} ${Fmt.dateTime(it)} (${sync.lastSyncStatus}) · $countText"
                     } ?: s.never
                 } ?: s.never,
+            )
+            // 导出 CSV (v2.2.0b, SAF — 系统文件选择器写目标位置, 无需存储权限)
+            val csvLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("text/csv"),
+            ) { uri -> uri?.let(vm::exportCsv) }
+            SetRow(
+                s.exportCsv, vm.backupMessage.ifEmpty { s.exportCsvDesc },
+                trailing = {
+                    TextButton(enabled = !vm.backupBusy, onClick = { csvLauncher.launch("gogauge-export.csv") }) {
+                        Text(if (vm.backupBusy) s.busyWorking else s.exportCsv, fontSize = 13.sp)
+                    }
+                },
+            )
+            // JSON 备份导出 (gzip; 不含凭证)
+            val backupExportLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("application/gzip"),
+            ) { uri -> uri?.let(vm::exportBackup) }
+            SetRow(
+                s.exportBackup, s.exportBackupDesc,
+                trailing = {
+                    TextButton(enabled = !vm.backupBusy, onClick = { backupExportLauncher.launch("gogauge-backup.json.gz") }) {
+                        Text(if (vm.backupBusy) s.busyWorking else s.exportBackup, fontSize = 13.sp)
+                    }
+                },
+            )
+            // 备份导入 (合并; 凭证不可迁移)
+            val backupImportLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument(),
+            ) { uri -> uri?.let(vm::importBackup) }
+            SetRow(
+                s.importBackup, s.importBackupDesc,
+                trailing = {
+                    TextButton(enabled = !vm.backupBusy, onClick = {
+                        backupImportLauncher.launch(arrayOf("application/gzip", "application/x-gzip", "application/octet-stream"))
+                    }) {
+                        Text(if (vm.backupBusy) s.busyWorking else s.importBackup, fontSize = 13.sp)
+                    }
+                },
             )
         }
 

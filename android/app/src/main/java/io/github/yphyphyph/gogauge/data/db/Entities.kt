@@ -115,3 +115,29 @@ data class SettingsEntity(
     @ColumnInfo(name = "payload") val payload: String = "{}",
     @ColumnInfo(name = "updated_at") val updatedAt: String = "",
 )
+
+/**
+ * 配额快照 — 最近一次成功拉取的各窗口已用百分比 + 周期边界 (v2.2.0b 新增, 桌面无此表)。
+ *
+ * 进程内配额缓存 (DashboardRepository.QuotaCache) 是 30s TTL 的内存槽, 小组件/磁贴
+ * 在 app 进程外渲染, 读不到它 —— 快照表是它们唯一的数据源。百分比存"已用"口径
+ * (与 QuotaWindow.used 一致), 剩余 = 100 - used。
+ */
+@Entity(tableName = "quota_snapshots")
+data class QuotaSnapshotEntity(
+    @PrimaryKey @ColumnInfo(name = "account_id") val accountId: Int,
+    @ColumnInfo(name = "provider") val provider: String = "opencode",
+    @ColumnInfo(name = "percent_5h") val percent5h: Double? = null,
+    @ColumnInfo(name = "percent_week") val percentWeek: Double? = null,
+    @ColumnInfo(name = "percent_month") val percentMonth: Double? = null,
+    /** 各窗口重置时刻 (ISO); opencode 月窗口取 access.endsAt, GOAT 取订阅 currentPeriodEnd。 */
+    @ColumnInfo(name = "reset_5h") val reset5h: String? = null,
+    @ColumnInfo(name = "reset_week") val resetWeek: String? = null,
+    @ColumnInfo(name = "reset_month") val resetMonth: String? = null,
+    /** GOAT 月度剩余额度 ($, 月池 × 剩余%); opencode 无金额口径为 null。 */
+    @ColumnInfo(name = "month_remaining_amount") val monthRemainingAmount: Double? = null,
+    /** 订阅计费周期起止 (ISO, GOAT 真实值); opencode 周期起点无接口, periodEnd 兜底存月重置时间。 */
+    @ColumnInfo(name = "period_start") val periodStart: String? = null,
+    @ColumnInfo(name = "period_end") val periodEnd: String? = null,
+    @ColumnInfo(name = "updated_at") val updatedAt: String = "",
+)

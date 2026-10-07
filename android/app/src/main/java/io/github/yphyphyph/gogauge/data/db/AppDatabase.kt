@@ -19,8 +19,9 @@ import java.time.Instant
         SyncStateEntity::class,
         SettingsEntity::class,
         UsageChartEntity::class,
+        QuotaSnapshotEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -29,6 +30,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun syncDao(): SyncDao
     abstract fun settingsDao(): SettingsDao
     abstract fun chartDao(): ChartDao
+    abstract fun quotaSnapshotDao(): QuotaSnapshotDao
 
     companion object {
         @Volatile
@@ -187,6 +189,34 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5 → v6 配额快照表 — v2.2.0b 新增 (桌面无此表, Android 专属)。
+         *
+         * 小组件/磁贴/常驻通知在 app 进程外渲染, 读不到进程内 30s TTL 配额缓存,
+         * 快照表持久化最近一次成功拉取的窗口数据作为它们的数据源。
+         * 空表迁移, 首次配额拉取成功后才有行。
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `quota_snapshots` (" +
+                        "`account_id` INTEGER NOT NULL, " +
+                        "`provider` TEXT NOT NULL, " +
+                        "`percent_5h` REAL, " +
+                        "`percent_week` REAL, " +
+                        "`percent_month` REAL, " +
+                        "`reset_5h` TEXT, " +
+                        "`reset_week` TEXT, " +
+                        "`reset_month` TEXT, " +
+                        "`month_remaining_amount` REAL, " +
+                        "`period_start` TEXT, " +
+                        "`period_end` TEXT, " +
+                        "`updated_at` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`account_id`))"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -194,7 +224,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "gousage.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build().also { instance = it }
             }
     }

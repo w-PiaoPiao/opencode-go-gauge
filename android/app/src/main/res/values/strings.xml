@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">GoGauge</string>
+    <!-- 磁贴 label / 小组件描述 (系统入口处用, 不随应用内语言切换) -->
+    <string name="tile_label">GoGauge Quota</string>
 </resources>

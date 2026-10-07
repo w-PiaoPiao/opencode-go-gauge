@@ -218,6 +218,8 @@ fun QuotaCard(
     resetText: String,
     accent: Color,
     accentEnd: Color? = null,
+    /** burn-rate 预测小字 (v2.2.0b); null 不渲染。 */
+    forecastText: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val shape = GgCardShape
@@ -286,6 +288,15 @@ fun QuotaCard(
                 resetText,
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = NumFontFamily,
+            )
+        }
+        if (forecastText != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                forecastText,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary,
                 fontFamily = NumFontFamily,
             )
         }

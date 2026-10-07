@@ -171,14 +171,8 @@ abstract class UsageDao {
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun totalsRaw(query: SupportSQLiteQuery): TotalsRow
 
-    suspend fun totals(
-        period: String,
-        accountId: Int,
-        cycleStart: String? = null,
-        excludeModels: Collection<String> = emptyList(),
-    ): Totals {
-        val (where, args) = buildWhere(period, accountId, cycleStart, excludeModels)
-        val row = totalsRaw(SimpleSQLiteQuery(totalsSql(where), args))
+    /** TotalsRow -> Totals 的公共映射 (totals / totalsBetween 共用)。 */
+    private fun toTotals(row: TotalsRow): Totals {
         val hit = row.cacheHitTokens
         val miss = row.uncachedInputTokens
         val hitRate = if (hit + miss > 0) hit.toDouble() / (hit + miss) * 100 else 0.0
@@ -195,6 +189,57 @@ abstract class UsageDao {
             hitRate = Math.round(hitRate * 100) / 100.0,
         )
     }
+
+    suspend fun totals(
+        period: String,
+        accountId: Int,
+        cycleStart: String? = null,
+        excludeModels: Collection<String> = emptyList(),
+    ): Totals {
+        val (where, args) = buildWhere(period, accountId, cycleStart, excludeModels)
+        val row = totalsRaw(SimpleSQLiteQuery(totalsSql(where), args))
+        return toTotals(row)
+    }
+
+    /**
+     * 任意本地日区间 [startLocalDate, endLocalDateExclusive) 的聚合 —
+     * 周期对比 (本周期 vs 上一周期 / 本周 vs 上周) 用; local_date 索引直查。
+     */
+    suspend fun totalsBetween(
+        startLocalDate: String,
+        endLocalDateExclusive: String,
+        accountId: Int,
+        excludeModels: Collection<String> = emptyList(),
+    ): Totals {
+        val (exClause, exArgs) = excludeClause(excludeModels)
+        val exAnd = if (exClause != null) " AND $exClause" else ""
+        val where = "WHERE account_id = ? AND local_date >= ? AND local_date < ?$exAnd"
+        val args = (listOf<Any>(accountId, startLocalDate, endLocalDateExclusive) + exArgs).toTypedArray()
+        val row = totalsRaw(SimpleSQLiteQuery(totalsSql(where), args))
+        return toTotals(row)
+    }
+
+    /** 近 N 小时消耗行 (5h 窗口速率预测的输入)。 */
+    data class RecentUsageRow(val cost: Double, val requests: Int)
+
+    /**
+     * 近 N 小时费用与请求数 — 两段式窗口过滤 (与 periodClause "5h" 同口径):
+     * local_date 先收敛到昨/今 (索引范围扫), substr(created_at,1,19) 精筛
+     * (SQLite <3.38 不解析 ISO 的 Z 后缀, 不能直接 datetime(created_at))。
+     */
+    @Query(
+        """
+        SELECT COALESCE(SUM(cost_usd), 0) AS cost, COALESCE(COUNT(*), 0) AS requests
+        FROM usage_records
+        WHERE account_id = :accountId
+          AND local_date >= date('now', 'localtime', '-1 day')
+          AND datetime(substr(created_at, 1, 19)) >= datetime('now', :windowArg)
+        """
+    )
+    abstract suspend fun recentUsage(accountId: Int, windowArg: String): RecentUsageRow
+
+    suspend fun recentCostUsd(accountId: Int, hours: Int): RecentUsageRow =
+        recentUsage(accountId, "-$hours hours")
 
     @RawQuery(observedEntities = [UsageRecordEntity::class])
     abstract suspend fun dailyStatsRaw(query: SupportSQLiteQuery): List<DailyStatRow>
@@ -465,6 +510,20 @@ abstract class UsageDao {
             " FROM usage_records WHERE account_id = :accountId"
     )
     abstract suspend fun recordBounds(accountId: Int): BoundsRow
+
+    // ------------------------------------------------------------------
+    // Export (v2.2.0b — CSV/JSON 备份的分页遍历)
+    // ------------------------------------------------------------------
+
+    /** 按时间升序分页导出 (BackupManager 流式写文件, 避免一次性载入全表)。 */
+    @Query(
+        "SELECT * FROM usage_records WHERE account_id = :accountId" +
+            " ORDER BY created_at ASC LIMIT :limit OFFSET :offset"
+    )
+    abstract suspend fun exportPage(accountId: Int, limit: Int, offset: Int): List<UsageRecordEntity>
+
+    @Query("SELECT COUNT(*) FROM usage_records WHERE account_id = :accountId")
+    abstract suspend fun countRecords(accountId: Int): Int
 
     // ------------------------------------------------------------------
     // Row projections
