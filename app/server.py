@@ -7,14 +7,15 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email import utils as email_utils
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, db
+from . import __version__, backup, db
 from .autostart import disable as _autostart_disable, enable as _autostart_enable
+from .forecast import forecast as forecast_forecast
 from .updater import RELEASE_PAGE_URL, check_update, download_update
 from .commandcode_api import (
     AuthError as CCAuthError,
@@ -177,6 +178,108 @@ def _record_monthly_reset(account_id: int, quota: dict[str, Any], provider: str 
                 break
     except Exception:  # noqa: BLE001 持久化失败不影响配额返回
         pass
+
+
+# ---------------------------------------------------------------------------
+# Burn-rate 预测 + 周期对比 (v2.2.0b — Android 端 DashboardRepository parity)
+# ---------------------------------------------------------------------------
+
+def _time_to_ms(raw: Optional[str]) -> Optional[int]:
+    """时间串 → epoch ms: 接受 ISO (reset_at) 与 UTC naive "yyyy-MM-dd HH:mm:ss" (period_bounds 存储)."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        pass
+    try:
+        dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def _build_forecast(active_id: int, quota: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """组装预测输入并计算; 配额未就绪返回 None (前端显示占位)."""
+    if not quota or not quota.get("success"):
+        return None
+    windows = quota.get("windows") or []
+
+    def win(label: str) -> Optional[dict[str, Any]]:
+        return next((x for x in windows if x.get("label") == label), None)
+
+    monthly, five_h, week = win("Monthly"), win("5h Rolling"), win("Weekly")
+
+    daily = db.daily_stats(14, active_id)
+    start_raw = db.monthly_cycle_start(active_id)
+    period_cost = float(db.totals("month", active_id).get("total_cost_usd") or 0)
+    recent_2h = db.recent_cost_usd(2, active_id)
+
+    # 周期终点: GOAT 真实周期终点, opencode 兜底月窗口重置时间 (Android 同口径)
+    _, period_end_raw = db.period_bounds(active_id)
+    if not period_end_raw:
+        period_end_raw = (monthly or {}).get("reset_at")
+    # 月剩余金额: GOAT 月窗口 unit="$" 时 = 月池 × 剩余%; opencode 走引擎换算
+    month_remaining_amount = None
+    if monthly and monthly.get("unit") == "$" and (monthly.get("total") or 0) > 0:
+        month_remaining_amount = round(
+            float(monthly["total"]) * float(monthly.get("remaining") or 0) / 100.0, 2
+        )
+
+    inp = {
+        "daily_costs": [{"date": d["date"], "cost_usd": d["total_cost_usd"]} for d in daily],
+        "period_start_ms": _time_to_ms(quota.get("period_start")),
+        "period_end_ms": _time_to_ms(period_end_raw),
+        "month_used_percent": monthly.get("used") if monthly else None,
+        "month_remaining_percent": monthly.get("remaining") if monthly else None,
+        "month_remaining_amount": month_remaining_amount,
+        "five_hour_cap_amount": (five_h or {}).get("total")
+        if five_h and five_h.get("unit") == "$" and (five_h.get("total") or 0) > 0 else None,
+        "week_cap_amount": (week or {}).get("total")
+        if week and week.get("unit") == "$" and (week.get("total") or 0) > 0 else None,
+        "five_hour_used_percent": five_h.get("used") if five_h else None,
+        "week_used_percent": week.get("used") if week else None,
+        "period_cost_usd": period_cost,
+        "recent_2h_cost": recent_2h,
+    }
+    return forecast_forecast(inp)
+
+
+def _period_comparison(active_id: int) -> list[dict[str, Any]]:
+    """周期对比: 本周 vs 上周 (日历周) + 本计费周期 vs 上一周期 (等长前驱)."""
+    out: list[dict[str, Any]] = []
+    today = date.today()
+    this_monday = today - timedelta(days=today.weekday())
+    out.append(
+        {
+            "key": "week",
+            "current": db.totals_between(
+                this_monday.isoformat(), (this_monday + timedelta(days=7)).isoformat(), active_id
+            ),
+            "previous": db.totals_between(
+                (this_monday - timedelta(days=7)).isoformat(), this_monday.isoformat(), active_id
+            ),
+        }
+    )
+    start_raw = db.monthly_cycle_start(active_id)
+    start_ms = _time_to_ms(start_raw) if start_raw else None
+    if start_ms:
+        _, end_raw = db.period_bounds(active_id)
+        end_ms = _time_to_ms(end_raw) or (start_ms + 30 * 86_400_000)
+        span = end_ms - start_ms if end_ms > start_ms else 30 * 86_400_000
+
+        def loc(ms: int) -> str:
+            return datetime.fromtimestamp(ms / 1000.0).strftime("%Y-%m-%d")
+
+        out.append(
+            {
+                "key": "period",
+                "current": db.totals_between(loc(start_ms), loc(start_ms + span), active_id),
+                "previous": db.totals_between(loc(start_ms - span), loc(start_ms), active_id),
+            }
+        )
+    return out
 
 
 def _ensure_quota_async(account_id: Optional[int] = None) -> None:
@@ -782,6 +885,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         totals_today = (
             totals_period if period == "today" else db.totals("today", active_id, exclude_models)
         )
+        # burn-rate 预测 + 周期对比 (v2.2.0b): 配额缓存未就绪时 forecast 为 null,
+        # 前端显示占位; 对比纯本地聚合, 代价低
         _json_response(
             handler,
             {
@@ -791,6 +896,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "accounts_total": db.count_accounts(),
                 "accounts_logged_in": db.count_logged_in_accounts(),
                 "quota": quota,
+                "forecast": _build_forecast(active_id, quota),
+                "comparison": _period_comparison(active_id) if token else [],
                 "totals": totals_period,
                 "today": totals_today,
                 "daily": db.daily_stats(7, active_id, exclude_models),  # 每日趋势固定显示近 7 天
@@ -1041,6 +1148,64 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "filter": {"days": days},
             },
         )
+        return
+
+    if route == "/api/heatmap" and method == "GET":
+        # 日历热力图 (v2.2.0b): 近 N 天逐日聚合 (默认 18 周), 统计页独立拉取
+        try:
+            days = max(7, min(int(query.get("days", ["126"])[0]), 365))
+        except ValueError:
+            days = 126
+        active_id = db.get_active_account_id()
+        _json_response(handler, {"days": db.daily_stats(days, active_id)})
+        return
+
+    if route == "/api/export/csv" and method == "POST":
+        try:
+            body = _read_json_body(handler)
+            path = str((body or {}).get("path") or "")
+        except Exception:  # noqa: BLE001
+            path = ""
+        if not path:
+            _json_response(handler, {"ok": False, "error": "缺少导出路径"}, 400)
+            return
+        try:
+            rows = backup.export_csv(path)
+            _json_response(handler, {"ok": True, "path": path, "rows": rows})
+        except Exception as exc:  # noqa: BLE001
+            _json_response(handler, {"ok": False, "error": str(exc)}, 500)
+        return
+
+    if route == "/api/backup/export" and method == "POST":
+        try:
+            body = _read_json_body(handler)
+            path = str((body or {}).get("path") or "")
+        except Exception:  # noqa: BLE001
+            path = ""
+        if not path:
+            _json_response(handler, {"ok": False, "error": "缺少导出路径"}, 400)
+            return
+        try:
+            n = backup.export_backup(path)
+            _json_response(handler, {"ok": True, "path": path, "records": n})
+        except Exception as exc:  # noqa: BLE001
+            _json_response(handler, {"ok": False, "error": str(exc)}, 500)
+        return
+
+    if route == "/api/backup/import" and method == "POST":
+        try:
+            body = _read_json_body(handler)
+            path = str((body or {}).get("path") or "")
+        except Exception:  # noqa: BLE001
+            path = ""
+        if not path:
+            _json_response(handler, {"ok": False, "error": "缺少备份文件路径"}, 400)
+            return
+        try:
+            result = backup.import_backup(path)
+            _json_response(handler, {"ok": True, **result})
+        except Exception as exc:  # noqa: BLE001
+            _json_response(handler, {"ok": False, "error": str(exc)}, 500)
         return
 
     if route == "/api/settings" and method == "GET":

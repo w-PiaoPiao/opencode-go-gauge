@@ -81,6 +81,11 @@
     <section class="page" id="page-stats" hidden>
       <div class="ph"><h2 class="ph-title" data-i18n="statsTitle">用量统计</h2><div class="ph-right"><div class="pill-row" id="stats-pills"><button class="pill" data-r="today" data-i18n="today">今天</button><button class="pill active" data-r="7d" data-i18n="d7">近7天</button><button class="pill" data-r="30d" data-i18n="d30">近30天</button><button class="pill" data-r="month" data-i18n="month">本月</button><button class="pill" data-r="all" data-i18n="all">全部</button></div></div></div>
       <div class="kpi-row kpi4" id="stats-total-cards"></div>
+      <div class="card" id="forecast-card" hidden>
+        <div class="card-h"><h3 data-i18n="fcTitleFull">预测与对比</h3><span class="hint" id="fc-degraded" hidden data-i18n="fcDegraded">数据积累中，预测仅供参考</span></div>
+        <div class="d6-grid" id="forecast-grid"></div>
+        <div id="comparison-block"></div>
+      </div>
       <div class="card detail6">
         <div class="card-h"><h3 data-i18n="tokenBreakdown">Token 构成</h3></div>
         <div class="d6-grid" id="stats-detail6"></div>
@@ -97,6 +102,10 @@
           <div class="card-h"><h3 data-i18n="usageTrend">用量趋势</h3><span class="hint" id="trend-hint">30 天</span></div>
           <div class="chart-box" style="min-height:240px"><canvas id="trend-chart"></canvas></div>
         </div>
+      </div>
+      <div class="card" id="heatmap-card" hidden>
+        <div class="card-h"><h3 data-i18n="heatmapTitle">日历热力图</h3><div class="seg" id="hm-dim"><button class="active" data-dim="cost" data-i18n="cost">成本</button><button data-dim="requests" data-i18n="totalRequests">总请求</button><button data-dim="tokens" data-i18n="totalTokens">总 TOKEN</button></div></div>
+        <div class="hm-body" id="heatmap-body"></div>
       </div>
     </section>
 
@@ -172,6 +181,9 @@
         <div class="card-h"><h3 data-i18n="setData">数据</h3></div>
         <div class="set-row"><div><div class="sl" data-i18n="dataDir">数据目录</div><div class="sd" id="set-datadir">—</div></div><div></div></div>
         <div class="set-row"><div><div class="sl" data-i18n="syncInfo">同步记录</div><div class="sd" id="set-sync-info">—</div></div><div></div></div>
+        <div class="set-row"><div><div class="sl" data-i18n="exportCsv">导出 CSV</div><div class="sd" id="set-export-desc" data-i18n="exportCsvDesc">用量明细导出为表格文件（时间/模型/Token/费用）</div></div><button class="btn" id="btn-export-csv" data-i18n="exportCsv">导出 CSV</button></div>
+        <div class="set-row"><div><div class="sl" data-i18n="exportBackup">导出 JSON 备份</div><div class="sd" data-i18n="exportBackupDesc">账号（不含凭证）与全部用量记录打包 (.json.gz)，与移动端互通</div></div><button class="btn" id="btn-export-backup" data-i18n="exportBackup">导出 JSON 备份</button></div>
+        <div class="set-row"><div><div class="sl" data-i18n="importBackup">导入备份</div><div class="sd" data-i18n="importBackupDesc">从 JSON 备份合并数据；凭证不可迁移，恢复后需重新登录</div></div><button class="btn btn-ghost" id="btn-import-backup" data-i18n="importBackup">导入备份</button></div>
       </div>
 
       <div class="card set">

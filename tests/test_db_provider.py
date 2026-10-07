@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -137,9 +138,14 @@ class TestAccountCRUD:
 
 class TestPeriodBounds:
     def test_record_and_read_period(self, tmp_db):
-        db.record_period_bounds(None, "2026-09-02T01:03:43.000Z", "2026-10-02T01:03:43.000Z")
-        start = db.monthly_cycle_start()
-        assert start == "2026-09-02 01:03:43"
+        # 动态构造覆盖当前时刻的周期: monthly_cycle_start 会对已过期的周期
+        # 顺延 (固定日期在周期跨过后断言会失效, 2026-10-07 曾踩过)
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(days=10)).strftime("%Y-%m-%dT01:03:43.000Z")
+        end = (now + timedelta(days=20)).strftime("%Y-%m-%dT01:03:43.000Z")
+        db.record_period_bounds(None, start, end)
+        got = db.monthly_cycle_start()
+        assert got == (now - timedelta(days=10)).strftime("%Y-%m-%d") + " 01:03:43"
 
     def test_period_from_ms(self, tmp_db):
         db.record_period_bounds(None, 1788366123616, 1788952323616)
