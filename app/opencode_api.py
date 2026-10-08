@@ -93,6 +93,8 @@ class QuotaResult:
     workspace_id: str
     success: bool
     updated_at: str
+    period_start: Optional[str] = None  # ISO, 订阅计费周期起点 (access.startsAt)
+    period_end: Optional[str] = None    # ISO, 订阅计费周期终点 (access.endsAt)
     windows: list[QuotaWindow] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -103,6 +105,10 @@ class QuotaResult:
             "success": self.success,
             "updated_at": self.updated_at,
         }
+        if self.period_start:
+            payload["period_start"] = self.period_start
+        if self.period_end:
+            payload["period_end"] = self.period_end
         if self.error:
             payload["error"] = self.error
         if self.windows:
@@ -443,6 +449,27 @@ def parse_go_status(payload: Any, now: Optional[datetime] = None) -> list[QuotaW
     return windows
 
 
+def parse_go_period(payload: Any) -> tuple[Optional[str], Optional[str]]:
+    """解析订阅计费周期起止 (access.startsAt / endsAt, ISO).
+
+    月度 meter 只有 resetsAt(下次重置), 周期起点必须取 access.startsAt —— Go 月度
+    周期实测按自然月 (10-08 → 11-08, 31 天), 用「下次重置 - 30 天」推算会落到未来,
+    「本周期」筛选随即变成空集.
+    """
+    if not isinstance(payload, dict):
+        return None, None
+    access = payload.get("access")
+    if not isinstance(access, dict):
+        return None, None
+    return _iso_or_none(access.get("startsAt")), _iso_or_none(access.get("endsAt"))
+
+
+def _iso_or_none(value: Any) -> Optional[str]:
+    """规范化为 ISO-Z; 无法解析时返回 None (_iso_from_text 原样透传的脏值挡在这里)."""
+    text = _iso_from_text(value)
+    return text if text.endswith("Z") and "T" in text else None
+
+
 def fetch_quota(token: str, workspace_hint: str = "Default") -> QuotaResult:
     """获取单个工作区的 Go 配额 (5h/weekly/monthly)."""
     now = datetime.now(timezone.utc)
@@ -462,9 +489,10 @@ def fetch_quota(token: str, workspace_hint: str = "Default") -> QuotaResult:
         windows = parse_go_status(payload, now)
         if not windows:
             raise OpenCodeAPIError("账号未订阅 OpenCode Go (接口无额度数据)")
+        period_start, period_end = parse_go_period(payload)
         return QuotaResult(
-            name=name, workspace_id=workspace_id, success=True,
-            updated_at=updated_at, windows=windows,
+            name=name, workspace_id=workspace_id, success=True, updated_at=updated_at,
+            period_start=period_start, period_end=period_end, windows=windows,
         )
     except Exception as exc:  # noqa: BLE001
         return QuotaResult(

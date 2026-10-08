@@ -117,3 +117,53 @@ def test_time_to_ms_naive_is_utc():
     assert _time_to_ms("") is None
     assert _time_to_ms(None) is None
     assert _time_to_ms("not-a-date") is None
+
+
+# ---------------------------------------------------------------------------
+# _record_cycle_bounds: 配额响应 → 周期边界落库 (「本周期」筛选起点的数据源)
+# ---------------------------------------------------------------------------
+
+
+def _iso(dt) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_record_cycle_bounds_prefers_real_period(tmp_db):
+    """响应带真实周期 (Go access.startsAt/endsAt) 时落库并优先于「重置 - 30 天」
+    回推 —— 31 天自然月下回推会得到未来起点, 「本周期」筛选恒为空."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(hours=12)
+    end = start + timedelta(days=31)
+    server._record_cycle_bounds(1, {
+        "period_start": _iso(start),
+        "period_end": _iso(end),
+        "windows": [{"label": "Monthly", "reset_at": _iso(end)}],
+    })
+    assert db.period_bounds(1) == (
+        start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    assert db.monthly_cycle_start(1) == start.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_record_cycle_bounds_without_period_keeps_reset(tmp_db):
+    """老响应无真实周期: 仍只记「下次重置」, 回推兜底路径可用."""
+    from datetime import timedelta
+
+    reset = datetime.now(timezone.utc) + timedelta(days=20)
+    server._record_cycle_bounds(1, {
+        "windows": [{"label": "Monthly", "reset_at": _iso(reset)}],
+    })
+    assert db.period_bounds(1) == (None, None)
+    assert db.monthly_cycle_start(1) is not None
+
+
+def test_record_cycle_bounds_garbage_never_raises(tmp_db):
+    """异常数据/空响应不得抛出 (配额返回不能被落库失败拖垮)."""
+    server._record_cycle_bounds(1, {})
+    server._record_cycle_bounds(1, {
+        "period_start": "x", "period_end": "y",
+        "windows": [{"label": "Monthly", "reset_at": "bad"}],
+    })
+    assert db.period_bounds(1) == (None, None)

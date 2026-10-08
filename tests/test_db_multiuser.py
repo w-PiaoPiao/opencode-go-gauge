@@ -353,6 +353,36 @@ def test_month_range_fallback_30d(tmp_db):
     assert db.totals("month")["request_count"] == db.totals("30d")["request_count"] == 1
 
 
+def test_month_range_real_period_not_empty(tmp_db):
+    """真实周期 (Go access.startsAt/endsAt, 31 天自然月) 下「本周期」筛选必须非空.
+
+    回归: 只靠「下次重置 - 30 天」推算时, 起点落在未来 (今晨 01:01 → 明天 01:01),
+    local_date >= 未来日期 把当天全部记录滤掉, 页面筛出 0 条.
+    """
+    import json as _json
+
+    db.insert_usage_records([_rec("u-today", created=_iso_utc(0)), _rec("u-out", created=_iso_utc(40))])
+    # 直改库注入真实周期: 起点 12 小时前 (今晨), 终点 31 天后
+    conn = db.get_db()
+    payload = _json.loads(conn.execute("SELECT payload FROM settings WHERE id=1").fetchone()["payload"])
+    payload["period_start:1"] = (datetime.now(timezone.utc) - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+    payload["period_end:1"] = (datetime.now(timezone.utc) + timedelta(days=31)).strftime("%Y-%m-%d %H:%M:%S")
+    payload["monthly_reset:1"] = _iso_utc(-31)  # 存量旧值: 单靠它回推给不出起点
+    conn.execute("UPDATE settings SET payload=? WHERE id=1", (_json.dumps(payload),))
+    conn.commit()
+    db._invalidate_payload_cache()
+    assert db.monthly_cycle_start() is not None
+    assert db.totals("month")["request_count"] == 1
+
+
+def test_month_range_reset_beyond_30d_not_empty(tmp_db):
+    """无真实周期且重置在 31 天后: 回退滚动 30 天, 而非未来起点导致的空集."""
+    db.insert_usage_records([_rec("u-today", created=_iso_utc(0)), _rec("u-out", created=_iso_utc(40))])
+    db.record_monthly_reset(None, _iso_utc(-31))  # 下次重置在 31 天后 (自然月)
+    assert db.monthly_cycle_start() is None
+    assert db.totals("month")["request_count"] == 1
+
+
 def test_month_range_period_without_end_falls_back(tmp_db):
     """有周期起点但终点缺失/非法 (手改库等异常数据): 无法顺延过期周期,
     回退 None 走 30 天滚动口径, 避免把上个周期拉进「本月」窗口."""

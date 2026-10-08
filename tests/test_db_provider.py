@@ -153,7 +153,35 @@ class TestPeriodBounds:
         assert start is not None
 
     def test_monthly_reset_fallback_when_no_period(self, tmp_db):
-        # 无真实周期时, opencode 的 monthly_reset 回推仍生效
-        db.record_monthly_reset(None, "2099-01-01T00:00:00Z")
+        # 无真实周期时, opencode 的 monthly_reset 回推仍生效 (重置在 30 天内)
+        now = datetime.now(timezone.utc)
+        db.record_monthly_reset(None, (now + timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         start = db.monthly_cycle_start()
         assert start is not None
+        assert datetime.strptime(start, "%Y-%m-%d %H:%M:%S") < now.replace(tzinfo=None)
+
+    def test_monthly_reset_beyond_30d_never_future_start(self, tmp_db):
+        """重置在 31 天后 (Go 自然月周期实测 10-08 → 11-08): 30 天回推仍落在未来,
+        必须回退 None 走滚动 30 天 —— 返回未来起点会让「本周期」筛选恒为空."""
+        now = datetime.now(timezone.utc)
+        db.record_monthly_reset(None, (now + timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        assert db.monthly_cycle_start() is None
+        # 30 天边界内仍按回推生效
+        db.record_monthly_reset(None, (now + timedelta(days=29)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        assert db.monthly_cycle_start() is not None
+
+    def test_real_period_beats_stale_monthly_reset(self, tmp_db):
+        """真实周期落库后优先于旧的 monthly_reset (31 天周期不被 30 天回推口径带偏)."""
+        now = datetime.now(timezone.utc)
+        # 存量旧值: 下次重置在 31 天后, 单靠回推给不出起点
+        db.record_monthly_reset(None, (now + timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        assert db.monthly_cycle_start() is None
+        # 接口给出真实周期 (startsAt/endsAt): 起点重回今晨
+        start = now - timedelta(hours=12)
+        end = start + timedelta(days=31)
+        db.record_period_bounds(
+            None,
+            start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        assert db.monthly_cycle_start() == start.strftime("%Y-%m-%d %H:%M:%S")
