@@ -259,7 +259,12 @@ class OpenCodeApi(private val client: OkHttpClient = defaultClient()) {
             if (windows.isEmpty()) {
                 throw OpenCodeApiException("账号未订阅 OpenCode Go (接口无额度数据)")
             }
-            QuotaResult(name, workspaceId, true, nowIso, windows = windows)
+            // 真实计费周期起止: 「本周期」筛选的起点数据源 (desktop fetch_quota parity)
+            val (periodStart, periodEnd) = QuotaParser.parseGoPeriod(payload)
+            QuotaResult(
+                name, workspaceId, true, nowIso, windows = windows,
+                periodStart = periodStart, periodEnd = periodEnd,
+            )
         } catch (e: CancellationException) {
             // 协程取消必须向上传播: 否则被取消的调用会继续跑完阻塞请求,
             // 并把"取消失败"当成一次配额错误写进缓存

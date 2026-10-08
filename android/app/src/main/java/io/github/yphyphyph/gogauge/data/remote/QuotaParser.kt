@@ -54,6 +54,25 @@ object QuotaParser {
         return maxOf(0L, (target - nowMillis) / 1000L).toInt()
     }
 
+    /** 规范 ISO-Z 值; [isoFromText] 解析失败时原样透传, 周期字段要挡掉这类脏值. */
+    private fun isoOrNull(raw: String): String? {
+        val text = isoFromText(raw)
+        return if (text.endsWith("Z") && text.contains("T")) text else null
+    }
+
+    /**
+     * 订阅计费周期起止 (``access.startsAt`` / ``endsAt``) — desktop ``parse_go_period`` parity.
+     *
+     * 月 meter 只有 resetsAt, 周期起点必须取 startsAt: Go 月度周期按自然月
+     * (实测 10-08 → 11-08 共 31 天), 「下次重置 - 30 天」回推会得到未来起点,
+     * 「本周期」筛选随即变成空集.
+     */
+    fun parseGoPeriod(payload: JsonElement?): Pair<String?, String?> {
+        val obj = payload as? JsonObject ?: return null to null
+        val access = obj["access"] as? JsonObject ?: return null to null
+        return isoOrNull(access["startsAt"].asText()) to isoOrNull(access["endsAt"].asText())
+    }
+
     /**
      * Parse quota windows from ``/console/api/go/status`` JSON.
      * 三个窗口按 5h/weekly/monthly 顺序; 缺少某 meter 或 limit<=0 时跳过该项。

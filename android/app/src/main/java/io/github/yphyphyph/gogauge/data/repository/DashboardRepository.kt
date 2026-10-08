@@ -285,8 +285,8 @@ class DashboardRepository(
                 null
             }
             if (accountId == activeAccountId()) _quota.value = target.data
-            // 配额拉取成功后持久化月度窗口的重置时间 (供「本月」筛选推算周期起点,
-            // desktop server._record_monthly_reset parity); 失败不影响配额返回.
+            // 配额拉取成功后持久化月度窗口的重置时间 (供「本周期」筛选推算周期起点,
+            // desktop server._record_cycle_bounds parity); 失败不影响配额返回.
             target.data?.takeIf { it.success }?.windows?.firstOrNull { it.label == "Monthly" }?.let { w ->
                 try {
                     db.settingsDao().saveMonthlyReset(accountId, formatResetUtc(w.resetAt))
@@ -294,8 +294,10 @@ class DashboardRepository(
                     android.util.Log.w("GoGauge", "saveMonthlyReset failed", e)
                 }
             }
-            // commandcode: 额外记录真实计费周期起止 (desktop record_period_bounds parity)
-            target.data?.takeIf { it.success && provider == PROVIDER_COMMANDCODE }?.let { q ->
+            // 真实计费周期起止一律落库 (GOAT subscriptions / Go access.startsAt·endsAt;
+            // desktop record_period_bounds parity): 只有「下次重置」时靠 "-30 天" 回推,
+            // 而 Go 月度周期按自然月 (实测 31 天) —— 回推得到未来起点, 筛选恒为空.
+            target.data?.takeIf { it.success }?.let { q ->
                 try {
                     db.settingsDao().savePeriodBounds(accountId, q.periodStart, q.periodEnd)
                 } catch (e: Exception) {
