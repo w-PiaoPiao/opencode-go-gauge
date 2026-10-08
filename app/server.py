@@ -160,18 +160,21 @@ def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str, pr
         return data
     slot["at"] = now
     slot["data"] = data
-    _record_monthly_reset(account_id, data, provider)
+    _record_cycle_bounds(account_id, data)
     return data
 
 
-def _record_monthly_reset(account_id: int, quota: dict[str, Any], provider: str = PROVIDER_OPENCODE) -> None:
-    """配额拉取成功后持久化月度窗口的重置/周期时间 (供「本月」筛选推算周期起点)."""
+def _record_cycle_bounds(account_id: int, quota: dict[str, Any]) -> None:
+    """配额拉取成功后持久化计费周期边界 (供「本周期」筛选取起点).
+
+    真实周期 (GOAT subscriptions / Go 的 access.startsAt·endsAt) 一律落库 —— 只有
+    「下次重置」的旧口径要靠回推推算, 而 Go 月度周期实测按自然月 (31 天), 回推
+    30 天会得到未来起点、「本周期」筛出 0 条. 两者都记录: 真实周期缺位时
+    (老接口/异常响应) 回推路径仍有新鲜的「下次重置」兜底.
+    """
     try:
-        if provider == PROVIDER_COMMANDCODE:
-            # commandcode 直接记录真实计费周期起止
-            if quota.get("period_start") and quota.get("period_end"):
-                db.record_period_bounds(account_id, quota["period_start"], quota["period_end"])
-            return
+        if quota.get("period_start") and quota.get("period_end"):
+            db.record_period_bounds(account_id, quota["period_start"], quota["period_end"])
         for window in quota.get("windows") or []:
             if window.get("label") == "Monthly" and window.get("reset_at"):
                 db.record_monthly_reset(account_id, window["reset_at"])

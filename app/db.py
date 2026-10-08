@@ -1503,9 +1503,10 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
         conn.commit()
         return current
 
-# 月度重置周期: OpenCode Go $10 月度套餐按 30 天滚动周期重置, 官方接口只暴露
-# 下次重置时间 (配额 HTML 的 resetInSec), 周期起点以 "下次重置 - 30 天" 推算;
-# 若记录的重置时刻已过去 (重置已发生而配额未刷新), 该时刻即本周期开始的精确边界.
+# 月度重置周期: 首选接口给出的真实周期起止 (Go 的 access.startsAt/endsAt →
+# record_period_bounds; GOAT 的 subscriptions 同); 只有拿不到真实起点时才退回
+# 「下次重置 - 30 天」推算 —— 该近似对 30 天滚动套餐准确, 对自然月周期
+# (实测 Go 为 10-08 → 11-08) 会偏差一天, 由 monthly_cycle_start 兜底回退.
 _MONTHLY_PERIOD_DAYS = 30
 
 
@@ -1561,7 +1562,7 @@ def _parse_utc_naive(value: str) -> Optional[str]:
 
 
 def record_monthly_reset(account_id: Optional[int], reset_at_utc: str) -> None:
-    """记录账号的下次月度重置时间, 供「本月」筛选推算当前周期起点."""
+    """记录账号的下次月度重置时间, 供「本周期」筛选推算当前周期起点."""
     aid = _resolve_account_id(account_id)
     if not aid or not reset_at_utc:
         return
@@ -1584,11 +1585,12 @@ def record_monthly_reset(account_id: Optional[int], reset_at_utc: str) -> None:
 
 
 def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
-    """当前月度重置周期起点 (UTC "YYYY-MM-DD HH:MM:SS"); 无任何周期记录时返回 None.
+    """当前计费周期起点 (UTC "YYYY-MM-DD HH:MM:SS"); 无任何周期记录时返回 None.
 
-    - commandcode 等记录过真实周期起点的账号: 直接取 period_start;
-    - opencode 无真实起点, 由下次重置时间回推 30 天;
-    - 周期已结束 (period_end < now) 时按老规则回退/返回 None 让调用方走 30 天滚动.
+    - 记录过真实周期起止的账号 (Go 的 access.startsAt / GOAT 的 subscriptions):
+      直接取 period_start, 周期已结束时按记录的跨度顺延;
+    - 只有「下次重置」的账号: 回推 30 天; 回推后仍不在过去 (真实周期 > 30 天,
+      如自然月 31 天) 则返回 None 让调用方走滚动 30 天 —— 绝不返回未来起点.
     """
     aid = _resolve_account_id(account_id)
     if not aid:
@@ -1636,6 +1638,11 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
         return None
     if reset > now:
         reset -= timedelta(days=_MONTHLY_PERIOD_DAYS)
+        # 回推 30 天仍在未来: 真实周期比 30 天长 (Go 月度实测按自然月, 10-08 →
+        # 11-08 共 31 天), 该假设推不出过去的起点, 只能回退 None 走滚动 30 天 ——
+        # 返回未来起点会让「本周期」窗口恒为空 (实测筛出 0 条).
+        if reset > now:
+            return None
     return reset.strftime("%Y-%m-%d %H:%M:%S")
 
 

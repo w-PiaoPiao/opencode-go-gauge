@@ -178,6 +178,42 @@ def test_parse_go_status_zero_limit_skipped():
     assert api.parse_go_status(payload, NOW) == []
 
 
+def test_parse_go_period_reads_access_bounds():
+    """订阅周期起止取 access.startsAt/endsAt —— 月 meter 只有 resetsAt, 周期起点
+    缺失时「本周期」筛选退回「重置 - 30 天」推算, 对自然月周期会算出未来起点."""
+    assert api.parse_go_period(GO_STATUS) == (
+        "2026-09-26T12:06:25Z", "2026-10-26T12:06:25Z",
+    )
+
+
+def test_parse_go_period_missing_fields():
+    assert api.parse_go_period({}) == (None, None)
+    assert api.parse_go_period(None) == (None, None)
+    assert api.parse_go_period({"access": {"startsAt": "2026-09-26T12:06:25.000Z"}}) == (
+        "2026-09-26T12:06:25Z", None,
+    )
+    assert api.parse_go_period({"access": {"startsAt": "not-a-date"}}) == (None, None)
+
+
+def test_quota_result_dict_carries_period():
+    """period_start/period_end 随 to_dict 出库, server._record_cycle_bounds 靠它落库."""
+    import datetime as _dt
+
+    result = api.QuotaResult(
+        name="Default", workspace_id="wrk", success=True,
+        updated_at="2026-09-26T13:00:00Z",
+        period_start="2026-09-26T12:06:25Z", period_end="2026-10-26T12:06:25Z",
+        windows=api.parse_go_status(GO_STATUS, NOW),
+    )
+    payload = result.to_dict()
+    assert payload["period_start"] == "2026-09-26T12:06:25Z"
+    assert payload["period_end"] == "2026-10-26T12:06:25Z"
+    assert _dt.datetime.fromisoformat(payload["period_start"].replace("Z", "+00:00"))
+    # 无周期时不出现该键 (前端/落库侧判空一致)
+    bare = api.QuotaResult(name="D", workspace_id="w", success=True, updated_at="x").to_dict()
+    assert "period_start" not in bare and "period_end" not in bare
+
+
 # ---------------------------------------------------------------------------
 # 明细解析
 # ---------------------------------------------------------------------------
