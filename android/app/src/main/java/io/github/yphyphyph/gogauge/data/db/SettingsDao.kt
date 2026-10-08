@@ -259,8 +259,12 @@ object MonthlyCycle {
         return try {
             val reset = java.time.LocalDateTime.parse(resetUtc, FMT)
             val now = java.time.LocalDateTime.parse(nowUtc, FMT)
-            val started = if (reset.isAfter(now)) reset.minusDays(PERIOD_DAYS.toLong()) else reset
-            started.format(FMT)
+            if (!reset.isAfter(now)) return reset.format(FMT)
+            val started = reset.minusDays(PERIOD_DAYS.toLong())
+            // 回推 30 天仍在未来: 真实周期比 30 天长 (Go 月度按自然月, 实测 31 天),
+            // 该假设推不出过去的起点 —— 返回未来起点会让「本周期」筛选恒为空,
+            // 回退 null 走滚动 30 天 (desktop db.monthly_cycle_start parity).
+            if (started.isAfter(now)) null else started.format(FMT)
         } catch (e: Exception) {
             null
         }

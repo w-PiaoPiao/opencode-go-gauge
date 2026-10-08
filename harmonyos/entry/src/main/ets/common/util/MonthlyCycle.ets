@@ -1,10 +1,10 @@
 /**
  * 月度重置周期策略 —— desktop db.monthly_cycle_start / android MonthlyCycle 的 ArkTS 移植。
  *
- * OpenCode Go $10 月度套餐按 30 天滚动周期重置, 官方接口只暴露下次重置时间, 周期起点
- * 以 "下次重置 - 30 天" 推算; 若记录的重置时刻已过去 (重置已发生而配额未刷新),
- * 该时刻即本周期开始的精确边界。无记录或格式异常时返回 null (调用方回退滚动 30 天)。
- * 时间统一为 UTC "yyyy-MM-dd HH:mm:ss" 字符串, 与持久化格式一致。
+ * 官方接口只暴露下次重置时间, 周期起点以 "下次重置 - 30 天" 推算; 若记录的重置时刻
+ * 已过去 (重置已发生而配额未刷新), 该时刻即本周期开始的精确边界。回推后仍不在过去
+ * (真实周期比 30 天长, Go 月度按自然月实测 31 天) 或格式异常时返回 null, 调用方回退
+ * 滚动 30 天 —— 绝不返回未来起点。时间统一为 UTC "yyyy-MM-dd HH:mm:ss", 与持久化一致。
  */
 export class MonthlyCycle {
   static readonly PERIOD_DAYS: number = 30
@@ -36,9 +36,15 @@ export class MonthlyCycle {
     if (reset === null) {
       return null
     }
-    const started = reset > nowMs
-      ? reset - MonthlyCycle.PERIOD_DAYS * MonthlyCycle.DAY_MS
-      : reset
+    if (reset <= nowMs) {
+      return MonthlyCycle.fmtUtc(reset)
+    }
+    const started = reset - MonthlyCycle.PERIOD_DAYS * MonthlyCycle.DAY_MS
+    // 回推 30 天仍在未来: 该假设推不出过去的起点, 未来起点会让「本周期」窗口恒为空
+    // (实测筛出 0 条) —— 回退 null 让调用方走滚动 30 天 (desktop parity)。
+    if (started > nowMs) {
+      return null
+    }
     return MonthlyCycle.fmtUtc(started)
   }
 }

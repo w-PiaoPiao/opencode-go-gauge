@@ -24,6 +24,15 @@ class MonthlyCycleTest {
     }
 
     @Test
+    fun `reset beyond 30 days - never returns a future start`() {
+        // Go 月度按自然月 (实测 10-08 → 11-08 = 31 天): reset-30 天仍落在未来,
+        // 未来起点会让「本周期」筛选恒为空 → 回退 null 走滚动 30 天.
+        assertNull(MonthlyCycle.start("2026-09-29 12:00:00", now))  // 重置在 31 天后
+        // 恰满 30 天: 起点 = now, 不算未来, 仍按回推返回.
+        assertEquals("2026-08-29 12:00:00", MonthlyCycle.start("2026-09-28 12:00:00", now))
+    }
+
+    @Test
     fun `null or blank reset falls back to null`() {
         assertNull(MonthlyCycle.start(null, now))
         assertNull(MonthlyCycle.start("", now))

@@ -2,6 +2,7 @@ package io.github.yphyphyph.gogauge.data.remote
 
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
@@ -115,5 +116,34 @@ class QuotaParserTest {
         assertTrue(
             QuotaParser.parseGoStatus(json.parseToJsonElement("[]"), nowMillis).isEmpty()
         )
+    }
+
+    @Test
+    fun `parseGoPeriod reads subscription bounds`() {
+        // 月 meter 只有 resetsAt: 「本周期」起点必须来自 access.startsAt
+        val (start, end) = QuotaParser.parseGoPeriod(goStatus)
+        assertEquals("2026-09-26T12:06:25Z", start)
+        assertEquals("2026-10-26T12:06:25Z", end)
+    }
+
+    @Test
+    fun `parseGoPeriod tolerates missing or malformed bounds`() {
+        val empty = QuotaParser.parseGoPeriod(json.parseToJsonElement("{}"))
+        assertNull(empty.first)
+        assertNull(empty.second)
+        assertNull(QuotaParser.parseGoPeriod(null).first)
+
+        val partial = QuotaParser.parseGoPeriod(
+            json.parseToJsonElement("""{"access": {"startsAt": "2026-09-26T12:06:25.000Z"}}""")
+        )
+        assertEquals("2026-09-26T12:06:25Z", partial.first)
+        assertNull(partial.second)
+
+        // isoFromText 解析失败原样透传的脏值必须被挡下 (写库前把好关)
+        val bad = QuotaParser.parseGoPeriod(
+            json.parseToJsonElement("""{"access": {"startsAt": "not-a-date", "endsAt": ""}}""")
+        )
+        assertNull(bad.first)
+        assertNull(bad.second)
     }
 }
