@@ -20,7 +20,7 @@ from typing import Optional
 
 import webview
 
-from . import __version__, db, server
+from . import __version__, db, https_ca, server
 from .auth import (
     BOOT_SETTLE_SEC,
     LoginWatcher,
@@ -858,6 +858,11 @@ def _destroy_all_windows() -> None:
 
 def main() -> None:
     global _quitting
+
+    # HTTPS 根证书兜底: 冻结包内 OpenSSL 只认构建机的编译期 CA 路径, 用户机
+    # 缺该路径时所有请求 CERTIFICATE_VERIFY_FAILED (见 app/https_ca.py).
+    # 必须早于任何网络操作 (配额拉取/同步/更新检查) 安装.
+    https_ca.install()
 
     # 单实例守卫: Windows 用命名互斥体, macOS 用 flock (源码运行均不限制).
     if _IS_WIN:
