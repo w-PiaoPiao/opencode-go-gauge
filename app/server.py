@@ -138,8 +138,15 @@ def _set_phase(phase: str, message: str = "") -> None:
 # 真实路径只来自用户在系统对话框里的选择 —— pywebview 的 pick_save_path /
 # pick_open_path 与 HTTP 服务同进程, 对话框选中时把路径登记进来, HTTP 侧只认
 # 登记过的路径. 前端契约不变 (仍回传路径字符串), 差别只在于路径必须经用户点头.
+#
+# 授权按**用途**分开: 保存对话框选中的路径只能作导出目标, 打开对话框选中的只能
+# 作导入来源. 否则用户为导入点过的那份文件, 在 TTL 内还能被当成导出目标覆写 ——
+# 用户点头的是"读它", 不是"覆盖它". 用途由发起对话框的 js_api 方法给定.
 
-_APPROVED_PATHS: dict[str, float] = {}
+APPROVAL_SAVE = "save"  # 系统保存对话框: /api/export/csv、/api/backup/export
+APPROVAL_OPEN = "open"  # 系统打开对话框: /api/backup/import
+
+_APPROVED_PATHS: dict[tuple[str, str], float] = {}
 _APPROVED_TTL_SEC = 300.0
 _approved_lock = threading.Lock()
 
@@ -148,30 +155,32 @@ def _real_path(path: str) -> str:
     return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
 
 
-def approve_path(path: str) -> None:
-    """登记用户在系统对话框中亲自选定的路径 (由 js_api 调用)."""
+def approve_path(path: str, purpose: str) -> None:
+    """登记用户在系统对话框中亲自选定的路径 (由 js_api 按用途调用)."""
     real = _real_path(path)
     now = time.time()
+    key = (purpose, real)
     with _approved_lock:
-        for key, exp in list(_APPROVED_PATHS.items()):
+        for old, exp in list(_APPROVED_PATHS.items()):
             if exp < now:
-                del _APPROVED_PATHS[key]
-        _APPROVED_PATHS[real] = now + _APPROVED_TTL_SEC
+                del _APPROVED_PATHS[old]
+        _APPROVED_PATHS[key] = now + _APPROVED_TTL_SEC
 
 
-def resolve_approved_path(raw: Any) -> Optional[str]:
-    """把请求里的路径解析为已登记路径; 未登记 / 已过期返回 None."""
+def resolve_approved_path(raw: Any, purpose: str) -> Optional[str]:
+    """按用途把请求路径解析为已登记路径; 未登记 / 用途不符 / 已过期返回 None."""
     if not raw:
         return None
     try:
         real = _real_path(raw)
     except (TypeError, ValueError):
         return None
+    key = (purpose, real)
     now = time.time()
     with _approved_lock:
-        exp = _APPROVED_PATHS.get(real)
+        exp = _APPROVED_PATHS.get(key)
         if exp is None or exp < now:
-            _APPROVED_PATHS.pop(real, None)
+            _APPROVED_PATHS.pop(key, None)
             return None
         return real
 
@@ -1118,7 +1127,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     if route == "/api/export/csv" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = resolve_approved_path((body or {}).get("path"))
+            path = resolve_approved_path((body or {}).get("path"), APPROVAL_SAVE)
         except Exception:  # noqa: BLE001
             path = None
         if not path:
@@ -1134,7 +1143,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     if route == "/api/backup/export" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = resolve_approved_path((body or {}).get("path"))
+            path = resolve_approved_path((body or {}).get("path"), APPROVAL_SAVE)
         except Exception:  # noqa: BLE001
             path = None
         if not path:
@@ -1150,7 +1159,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     if route == "/api/backup/import" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = resolve_approved_path((body or {}).get("path"))
+            path = resolve_approved_path((body or {}).get("path"), APPROVAL_OPEN)
         except Exception:  # noqa: BLE001
             path = None
         if not path:

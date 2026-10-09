@@ -756,10 +756,10 @@ class WindowApi:
                 picked = str(result[0]) if result else None
             else:
                 picked = str(result) if result else None
-            # 登记为用户亲自选定的路径: /api/export/* 只认登记过的路径, 避免本机
-            # 任意进程借本应用覆写任意文件 (confused deputy)
+            # 登记为用户亲自选定的保存路径: /api/export/* 只认登记过的路径, 避免
+            # 本机任意进程借本应用覆写任意文件 (confused deputy)
             if picked:
-                server.approve_path(picked)
+                server.approve_path(picked, server.APPROVAL_SAVE)
             return picked
         except Exception:  # noqa: BLE001
             return None
@@ -781,9 +781,10 @@ class WindowApi:
                 picked = str(result[0]) if result else None
             else:
                 picked = str(result) if result else None
-            # 同 pick_save_path: 只有用户在对话框里选过的文件才允许被导入
+            # 同 pick_save_path, 但用途是"打开": 这样登记的路径只能被导入读取,
+            # 不能被导出覆写 (用户点头的是读它, 不是覆盖它)
             if picked:
-                server.approve_path(picked)
+                server.approve_path(picked, server.APPROVAL_OPEN)
             return picked
         except Exception:  # noqa: BLE001
             return None
