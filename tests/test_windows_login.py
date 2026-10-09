@@ -510,11 +510,16 @@ def test_watcher_pulls_back_when_off_signin_entry(win_platform, monkeypatch):
     win = _FakeWin(core, url="https://commandcode.ai/")
     w = _drift_watcher(cm, core, win, monkeypatch)
     try:
-        ok = _wait_until(lambda: "about:blank" in core.navigations)
-        assert ok, "watcher 应检测到入口偏离并自动重置会话拉回登录页"
-        assert cm.delete_all_calls >= 1
+        # reset 是"驶离旧页 → 清 cookie → 清页面存储 → 回登录入口"的多步序列,
+        # 跑在监听线程上. 必须等整条走完 (最后一步落地) 再断言中间步骤 —— 观察到
+        # 前一步就断言后一步"已经发生"是竞态, 全量跑负载高时随机失败.
+        # 预算给整个序列 (单步各自带 COOKIE_PURGE_TIMEOUT, 逐步叠加).
+        ok = _wait_until(
+            lambda: auth.build_login_url("commandcode") in core.navigations, timeout=5.0
+        )
+        assert ok, f"watcher 应重置会话并拉回登录入口: {core.navigations}"
+        assert cm.delete_all_calls >= 1, "重置应清掉残留会话 cookie"
         assert core.navigations[0] == "about:blank", "先驶离旧页终止其 JS 再清 cookie"
-        assert core.navigations[-1] == auth.build_login_url("commandcode")
         assert w._entry_resets >= 1
         assert not w.done, "旧凭证不算登录成功, 监听继续等真正的新凭证"
     finally:
