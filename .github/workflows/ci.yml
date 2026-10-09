@@ -1,0 +1,54 @@
+# 桌面端 CI: PR / push 到 main 时跑 pytest.
+#
+# 此前仓库只有四个 release workflow, 全部只构建不测试 —— 约 3.5k 行 pytest 对
+# 发布没有任何约束力, tag 一打就发最后一次提交的内容. 本 workflow 补上这道闸.
+#
+# 只覆盖桌面端 (Python); Android (gradle) 与 HarmonyOS (hvigor) 另见各自 release
+# workflow, 未在此处纳入.
+#
+# Windows/macOS/Linux 三平台各跑一遍: 代码里有 sys.platform 分支 (登录 watcher 的
+# win32 / 非 win32 路径、凭证加密的 DPAPI / 钥匙串 / 明文), 只在一平台上跑会漏掉
+# 另外两条路径的回归.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 只跑测试, 不需要写 token; 也不把 token 落进 .git/config
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        # 只装 pytest: 被测模块 (db/server/auth/backup/updater/api) 除 auth.py 顶层
+        # 的 webview 外全是标准库, 而测试用空模块占位绕过 webview (见
+        # tests/test_auth_login.py). 装 pywebview/pystray 只会给 Linux runner 拖来
+        # GTK/X11 一类图形依赖, 徒增失败面.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
