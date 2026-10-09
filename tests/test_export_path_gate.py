@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import gzip
 import json
 import urllib.error
 import urllib.request
@@ -75,7 +76,7 @@ def test_backup_export_and_import_reject_unapproved_path(http, tmp_path):
 def test_approved_path_is_accepted(http, tmp_path):
     """用户在对话框里选过之后, 同一条路由正常工作."""
     target = tmp_path / "out.csv"
-    server.approve_path(str(target))
+    server.approve_path(str(target), server.APPROVAL_SAVE)
 
     body, status = _post(f"{http}/api/export/csv", {"path": str(target)})
 
@@ -83,13 +84,56 @@ def test_approved_path_is_accepted(http, tmp_path):
     assert body["ok"] is True
     assert target.exists()
 
+    # 同为保存授权: 备份导出也放行 (用途相同即互相可用, 与前端一致)
+    pack = tmp_path / "out.json.gz"
+    server.approve_path(str(pack), server.APPROVAL_SAVE)
+    body, status = _post(f"{http}/api/backup/export", {"path": str(pack)})
+    assert status == 200, body
+    assert body["ok"] is True
+
+
+def test_open_approval_imports(http, tmp_path):
+    """打开对话框登记过的路径能正常导入 —— 用途绑定不得误伤正常流程."""
+    src = tmp_path / "backup.json.gz"
+    with gzip.open(src, "wb") as fh:
+        fh.write(json.dumps({"app": "GoGauge", "accounts": [], "records": []}).encode("utf-8"))
+    server.approve_path(str(src), server.APPROVAL_OPEN)
+
+    body, status = _post(f"{http}/api/backup/import", {"path": str(src)})
+
+    assert status == 200, body
+    assert body["ok"] is True
+
+
+def test_approval_is_bound_to_purpose(http, tmp_path):
+    """授权按用途分开: 为导入 (打开对话框) 点过的文件不得被导出覆写.
+
+    用户点头的是"读这个文件", 不是"覆盖它"; 两种对话框的用途不能互相顶替.
+    """
+    picked = tmp_path / "picked.json.gz"
+    picked.write_text("IMPORT-SOURCE", encoding="utf-8")
+    server.approve_path(str(picked), server.APPROVAL_OPEN)
+
+    # 开放来源的授权: 导入放行, 导出 (csv / backup) 一律拒绝且不动文件
+    body, status = _post(f"{http}/api/backup/export", {"path": str(picked)})
+    assert status == 403 and body["ok"] is False
+    body, status = _post(f"{http}/api/export/csv", {"path": str(picked)})
+    assert status == 403 and body["ok"] is False
+    assert picked.read_text(encoding="utf-8") == "IMPORT-SOURCE"
+
+    # 反向: 保存对话框的授权不得被当成导入来源
+    target = tmp_path / "out.csv"
+    server.approve_path(str(target), server.APPROVAL_SAVE)
+    body, status = _post(f"{http}/api/backup/import", {"path": str(target)})
+    assert status == 403 and body["ok"] is False
+
 
 def test_approval_matches_normalized_path(http, tmp_path):
     """登记与请求可以写法不同 (分隔符/大小写/相对段), 归一化后视为同一条."""
     target = tmp_path / "sub" / "out.csv"
     target.parent.mkdir()
     target.write_text("x", encoding="utf-8")
-    server.approve_path(str(target))
+    server.approve_path(str(target), server.APPROVAL_SAVE)
 
     messy = str(tmp_path / "sub" / "." / "out.csv")
     body, status = _post(f"{http}/api/export/csv", {"path": messy})
@@ -107,14 +151,14 @@ def test_resolve_approved_path_rejects_expired(http, tmp_path):
     import time as _time
 
     target = tmp_path / "out.csv"
-    server.approve_path(str(target))
-    assert server.resolve_approved_path(str(target)) is not None
+    server.approve_path(str(target), server.APPROVAL_SAVE)
+    assert server.resolve_approved_path(str(target), server.APPROVAL_SAVE) is not None
 
     # 把登记的到期时间拨到过去, 模拟超过 TTL
     real = server._real_path(str(target))
     with server._approved_lock:
-        server._APPROVED_PATHS[real] = _time.time() - 1
-    assert server.resolve_approved_path(str(target)) is None
+        server._APPROVED_PATHS[(server.APPROVAL_SAVE, real)] = _time.time() - 1
+    assert server.resolve_approved_path(str(target), server.APPROVAL_SAVE) is None
 
 
 def test_read_json_body_rejects_negative_length():
