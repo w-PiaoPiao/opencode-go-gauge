@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,20 @@ def _write_file(tmp_path, data: bytes):
     path = tmp_path / "pkg.zip"
     path.write_bytes(data)
     return str(path)
+
+
+def _stub_payload(ext: str) -> bytes:
+    """按资产类型造一份能过结构自检的载荷 (exe 走 PE 头, zip 走 CRC).
+
+    下载收尾的结构自检是平台分支的 (updater._ASSET_EXT: win32 = .exe, 其余 .zip),
+    载荷写死一种就只在那一半平台上成立.
+    """
+    if ext == ".zip":
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("GoGauge.txt", "stub")
+        return buf.getvalue()
+    return b"MZ" + b"\x00" * 32
 
 
 def test_verify_digest_accepts_matching_sha256(tmp_path):
@@ -56,14 +72,19 @@ def test_verify_digest_rejects_malformed_hex(tmp_path, monkeypatch):
             updater._verify_digest(path, bad)
 
 
-def test_download_filename_tag_is_sanitized(tmp_path, monkeypatch):
+@pytest.mark.parametrize("ext", [".exe", ".zip"])
+def test_download_filename_tag_is_sanitized(tmp_path, monkeypatch, ext):
     """远端 tag 含路径分隔符/上跳时, 下载路径不得逃出 dest_dir.
 
     过去这个用例只断言 state == "error": 摘要缺失本就会 fail-closed, 与文件名
     无关; 即使把消毒整段删掉, 中间目录不存在导致 open() 抛 FileNotFoundError,
     断言照样成立. 这里给一份**合法**摘要让写入真正走完, 再断言落点.
+
+    两种资产类型都要跑: 载荷写死 PE 头只在 Windows 成立, Linux/macOS 上
+    _ASSET_EXT 是 .zip, 会在结构自检处撞 "File is not a zip file" (CI 上就是这么红的).
     """
-    payload = b"MZ" + b"\x00" * 32  # 模拟 exe, 走 PE 头自检分支
+    monkeypatch.setattr(updater, "_ASSET_EXT", ext)
+    payload = _stub_payload(ext)
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
 
     monkeypatch.setattr(
@@ -99,9 +120,10 @@ def test_download_filename_tag_is_sanitized(tmp_path, monkeypatch):
     written = tmp_path / Path(res["path"]).name
     assert Path(res["path"]).parent == tmp_path
     assert written.exists()
+    assert written.name == f"GoGauge-v1.0.2_.._.._evil{updater._PLATFORM_SUFFIX}{ext}"
     assert "/" not in written.name and "\\" not in written.name
-    # 没有逃逸到 dest_dir 之外
-    assert not (tmp_path.parent / "evil-macos-macos.exe").exists()
+    # 没有逃逸到 dest_dir 之外 (消毒失效时落点会是 ../evil<suffix><ext>)
+    assert not (tmp_path.parent / f"evil{updater._PLATFORM_SUFFIX}{ext}").exists()
     # .part 中间态不应残留
     assert not list(tmp_path.glob("*.part"))
 
