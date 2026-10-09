@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from email import utils as email_utils
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
@@ -15,7 +15,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__, backup, db
 from .autostart import disable as _autostart_disable, enable as _autostart_enable
-from .forecast import forecast as forecast_forecast
 from .updater import RELEASE_PAGE_URL, check_update, download_update
 from .commandcode_api import (
     AuthError as CCAuthError,
@@ -114,13 +113,67 @@ def _sync_progress_snapshot() -> dict[str, Any]:
 
 
 def _set_phase(phase: str, message: str = "") -> None:
-    # 只有用量同步参与 running 状态机. 配额刷新 (见 _ensure_quota_async) 是独立的
-    # 非阻塞后台线程, 刻意不改 _sync_state: 否则会与 sync_usage 的锁语义打架,
-    # 让 UI 误以为同步一直在跑.
+    # 只更新 phase/message, 刻意**不**碰 running.
+    #
+    # running 是同步的单飞闸门, 只能由 sync_usage 的进入/退出来置位与清零.
+    # 过去这里写 running = (phase == "usage"), 而 _sync_one_account 在账号失败时
+    # 会从 sync_usage 的账号循环内部回调 _set_phase("error") —— 闸门于是被中途
+    # 放开, 第二个 POST /api/sync 会被放行并另起一个线程, 两个线程并发写同一批
+    # 记录: 新增计数重复累加、增量判定失效, 并发写还可能撞 "database is locked".
+    #
+    # 配额刷新 (见 _ensure_quota_async) 是独立的非阻塞后台线程, 同样不该改这里.
     with _sync_lock:
         _sync_state["phase"] = phase
         _sync_state["message"] = message
-        _sync_state["running"] = phase == "usage"
+
+
+# ---------------------------------------------------------------------------
+# 导出/导入路径授权 (confused deputy 防护)
+# ---------------------------------------------------------------------------
+#
+# /api/export/csv、/api/backup/* 过去直接采用请求里的绝对路径写文件, 而本地 HTTP
+# 层没有任何鉴权 (只有 Host/Origin 回环校验). 于是同机任意进程可以 POST 一个路径,
+# 让本应用以**登录用户**的权限覆写任意可写文件 (已实测覆盖未选中的既有文件).
+#
+# 真实路径只来自用户在系统对话框里的选择 —— pywebview 的 pick_save_path /
+# pick_open_path 与 HTTP 服务同进程, 对话框选中时把路径登记进来, HTTP 侧只认
+# 登记过的路径. 前端契约不变 (仍回传路径字符串), 差别只在于路径必须经用户点头.
+
+_APPROVED_PATHS: dict[str, float] = {}
+_APPROVED_TTL_SEC = 300.0
+_approved_lock = threading.Lock()
+
+
+def _real_path(path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
+
+
+def approve_path(path: str) -> None:
+    """登记用户在系统对话框中亲自选定的路径 (由 js_api 调用)."""
+    real = _real_path(path)
+    now = time.time()
+    with _approved_lock:
+        for key, exp in list(_APPROVED_PATHS.items()):
+            if exp < now:
+                del _APPROVED_PATHS[key]
+        _APPROVED_PATHS[real] = now + _APPROVED_TTL_SEC
+
+
+def resolve_approved_path(raw: Any) -> Optional[str]:
+    """把请求里的路径解析为已登记路径; 未登记 / 已过期返回 None."""
+    if not raw:
+        return None
+    try:
+        real = _real_path(raw)
+    except (TypeError, ValueError):
+        return None
+    now = time.time()
+    with _approved_lock:
+        exp = _APPROVED_PATHS.get(real)
+        if exp is None or exp < now:
+            _APPROVED_PATHS.pop(real, None)
+            return None
+        return real
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +211,9 @@ def _fetch_quota_with_cache(account_id: int, token: str, workspace_hint: str, pr
     # 新槽并在 TTL 内被当成新凭证的配额返回
     if _quota_cache.get(account_id) is not slot:
         return data
-    slot["at"] = now
+    # 取**请求前**的 now 会让实际有效期变成 TTL + 本次网络耗时, 慢网下配额
+    # 比声明的 30s 更久不刷新; 取请求后的时刻才是"多久之后可再拉"的真实起点
+    slot["at"] = time.time()
     slot["data"] = data
     _record_cycle_bounds(account_id, data)
     return data
@@ -181,111 +236,6 @@ def _record_cycle_bounds(account_id: int, quota: dict[str, Any]) -> None:
                 break
     except Exception:  # noqa: BLE001 持久化失败不影响配额返回
         pass
-
-
-# ---------------------------------------------------------------------------
-# Burn-rate 预测 + 周期对比 (v2.2.0b — Android 端 DashboardRepository parity)
-# ---------------------------------------------------------------------------
-
-def _time_to_ms(raw: Optional[str]) -> Optional[int]:
-    """时间串 → epoch ms: 接受 ISO (reset_at) 与 UTC naive "yyyy-MM-dd HH:mm:ss" (period_bounds 存储).
-
-    naive 串一律按 UTC 补时区: fromisoformat 同样接受空格分隔格式, 若对解析出的
-    naive datetime 直接 .timestamp() 会按**本地时区**解释 —— 非 UTC 时区下
-    period_bounds 的周期终点被偏移数小时 (UTC+8 偏 8h), daily_budget 虚低、
-    周期对比窗口错位.
-    """
-    if not raw:
-        return None
-    text = str(raw).strip()
-    try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
-
-
-def _build_forecast(active_id: int, quota: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """组装预测输入并计算; 配额未就绪返回 None (前端显示占位)."""
-    if not quota or not quota.get("success"):
-        return None
-    windows = quota.get("windows") or []
-
-    def win(label: str) -> Optional[dict[str, Any]]:
-        return next((x for x in windows if x.get("label") == label), None)
-
-    monthly, five_h, week = win("Monthly"), win("5h Rolling"), win("Weekly")
-
-    daily = db.daily_stats(14, active_id)
-    period_cost = float(db.totals("month", active_id).get("total_cost_usd") or 0)
-    recent_2h = db.recent_cost_usd(2, active_id)
-
-    # 周期终点: GOAT 真实周期终点, opencode 兜底月窗口重置时间 (Android 同口径)
-    _, period_end_raw = db.period_bounds(active_id)
-    if not period_end_raw:
-        period_end_raw = (monthly or {}).get("reset_at")
-    # 月剩余金额: GOAT 月窗口 unit="$" 时 = 月池 × 剩余%; opencode 走引擎换算
-    month_remaining_amount = None
-    if monthly and monthly.get("unit") == "$" and (monthly.get("total") or 0) > 0:
-        month_remaining_amount = round(
-            float(monthly["total"]) * float(monthly.get("remaining") or 0) / 100.0, 2
-        )
-
-    inp = {
-        "daily_costs": [{"date": d["date"], "cost_usd": d["total_cost_usd"]} for d in daily],
-        "period_start_ms": _time_to_ms(quota.get("period_start")),
-        "period_end_ms": _time_to_ms(period_end_raw),
-        "month_used_percent": monthly.get("used") if monthly else None,
-        "month_remaining_percent": monthly.get("remaining") if monthly else None,
-        "month_remaining_amount": month_remaining_amount,
-        "five_hour_cap_amount": (five_h or {}).get("total")
-        if five_h and five_h.get("unit") == "$" and (five_h.get("total") or 0) > 0 else None,
-        "week_cap_amount": (week or {}).get("total")
-        if week and week.get("unit") == "$" and (week.get("total") or 0) > 0 else None,
-        "five_hour_used_percent": five_h.get("used") if five_h else None,
-        "week_used_percent": week.get("used") if week else None,
-        "period_cost_usd": period_cost,
-        "recent_2h_cost": recent_2h,
-    }
-    return forecast_forecast(inp)
-
-
-def _period_comparison(active_id: int) -> list[dict[str, Any]]:
-    """周期对比: 本周 vs 上周 (日历周) + 本计费周期 vs 上一周期 (等长前驱)."""
-    out: list[dict[str, Any]] = []
-    today = date.today()
-    this_monday = today - timedelta(days=today.weekday())
-    out.append(
-        {
-            "key": "week",
-            "current": db.totals_between(
-                this_monday.isoformat(), (this_monday + timedelta(days=7)).isoformat(), active_id
-            ),
-            "previous": db.totals_between(
-                (this_monday - timedelta(days=7)).isoformat(), this_monday.isoformat(), active_id
-            ),
-        }
-    )
-    start_raw = db.monthly_cycle_start(active_id)
-    start_ms = _time_to_ms(start_raw) if start_raw else None
-    if start_ms:
-        _, end_raw = db.period_bounds(active_id)
-        end_ms = _time_to_ms(end_raw) or (start_ms + 30 * 86_400_000)
-        span = end_ms - start_ms if end_ms > start_ms else 30 * 86_400_000
-
-        def loc(ms: int) -> str:
-            return datetime.fromtimestamp(ms / 1000.0).strftime("%Y-%m-%d")
-
-        out.append(
-            {
-                "key": "period",
-                "current": db.totals_between(loc(start_ms), loc(start_ms + span), active_id),
-                "previous": db.totals_between(loc(start_ms - span), loc(start_ms), active_id),
-            }
-        )
-    return out
 
 
 def _ensure_quota_async(account_id: Optional[int] = None) -> None:
@@ -717,8 +667,10 @@ _MAX_BODY_BYTES = 1 << 20  # 1 MiB: 本地接口请求体上限 (防异常声明
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
     """读取并解析 JSON 请求体, 失败抛 ValueError."""
     length = int(handler.headers.get("Content-Length") or 0)
-    if length > _MAX_BODY_BYTES:
-        raise ValueError("请求体过大")
+    # 必须一并挡掉负数: rfile.read(-1) 语义是"读到 EOF", 会一直阻塞到
+    # Handler.timeout (15s). ThreadingHTTPServer 下每个畸形请求白占一个线程.
+    if length < 0 or length > _MAX_BODY_BYTES:
+        raise ValueError("请求体大小非法")
     return json.loads(handler.rfile.read(length).decode("utf-8", errors="replace"))
 
 
@@ -891,8 +843,6 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         )
         # 近 7 天趋势是 30 天序列的后缀子集: 一次聚合切片复用, 省一条按天 GROUP BY
         daily30 = db.daily_stats(30, active_id, exclude_models)
-        # burn-rate 预测 + 周期对比 (v2.2.0b): 配额缓存未就绪时 forecast 为 null,
-        # 前端显示占位; 对比纯本地聚合, 代价低
         _json_response(
             handler,
             {
@@ -902,8 +852,6 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "accounts_total": db.count_accounts(),
                 "accounts_logged_in": db.count_logged_in_accounts(),
                 "quota": quota,
-                "forecast": _build_forecast(active_id, quota),
-                "comparison": _period_comparison(active_id) if token else [],
                 "totals": totals_period,
                 "today": totals_today,
                 "daily": daily30[-7:],  # 每日趋势固定显示近 7 天
@@ -1170,11 +1118,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     if route == "/api/export/csv" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = str((body or {}).get("path") or "")
+            path = resolve_approved_path((body or {}).get("path"))
         except Exception:  # noqa: BLE001
-            path = ""
+            path = None
         if not path:
-            _json_response(handler, {"ok": False, "error": "缺少导出路径"}, 400)
+            _json_response(handler, {"ok": False, "error": "导出路径未授权, 请重新选择保存位置"}, 403)
             return
         try:
             rows = backup.export_csv(path)
@@ -1186,11 +1134,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     if route == "/api/backup/export" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = str((body or {}).get("path") or "")
+            path = resolve_approved_path((body or {}).get("path"))
         except Exception:  # noqa: BLE001
-            path = ""
+            path = None
         if not path:
-            _json_response(handler, {"ok": False, "error": "缺少导出路径"}, 400)
+            _json_response(handler, {"ok": False, "error": "导出路径未授权, 请重新选择保存位置"}, 403)
             return
         try:
             n = backup.export_backup(path)
@@ -1202,11 +1150,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     if route == "/api/backup/import" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = str((body or {}).get("path") or "")
+            path = resolve_approved_path((body or {}).get("path"))
         except Exception:  # noqa: BLE001
-            path = ""
+            path = None
         if not path:
-            _json_response(handler, {"ok": False, "error": "缺少备份文件路径"}, 400)
+            _json_response(handler, {"ok": False, "error": "备份路径未授权, 请重新选择文件"}, 403)
             return
         try:
             result = backup.import_backup(path)

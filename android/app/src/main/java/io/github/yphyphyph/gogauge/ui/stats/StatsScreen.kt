@@ -112,7 +112,6 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
         val d = vm.dashboard
         if (d != null) {
             StatsTotalGrid(d.totals, vm)
-            ForecastCard(vm)
 
             // token breakdown 2x3
             GgCard {
@@ -296,128 +295,6 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
         modifier = Modifier.align(Alignment.TopCenter),
     )
     }
-}
-/**
- * 预测卡 (v2.2.0b burn-rate) — 与统计页构成网格同语言的编辑式砖块 + 周期对比区。
- * forecast 为 null (配额未就绪) 时整卡不渲染; 各项缺失以 "—" 占位。
- */
-@Composable
-private fun ForecastCard(vm: MainViewModel) {
-    val s = vm.s
-    val f = vm.forecast ?: return
-    val usdCny = vm.dashboard?.usdCny ?: 7.2
-    val monthRunOut = f.monthDaysLeft?.let { d ->
-        val date = java.time.LocalDate.now().plusDays(Math.ceil(d).toLong())
-        "%d/%d".format(date.monthValue, date.dayOfMonth)
-    }
-    val fiveH = f.fiveHourExhaustInMin?.let { min ->
-        // >300 分钟 = 到重置也打不满, 直接给结论
-        if (min <= 300) Fmt.dur(min * 60, s.dUnit, s.hUnit, s.mUnit, s.soon) else s.fcNeverFull
-    }
-    GgCard {
-        CardHeader(
-            s.fcTitleFull,
-            trailing = { if (f.degraded) Hint(s.fcDegraded) },
-        )
-        EditorialGrid(
-            cells = listOf(
-                EditorialCell(
-                    s.fcDailyBudget,
-                    f.dailyBudgetUsd?.let { Fmt.money(it, vm.currency, usdCny) } ?: "—",
-                    "${s.fcRemaining} ${f.monthRemainingUsd?.let { Fmt.money(it, vm.currency, usdCny) } ?: "—"}",
-                    Accent.amber,
-                ),
-                EditorialCell(
-                    s.fcMonthRunOut,
-                    monthRunOut ?: "—",
-                    f.monthDaysLeft?.let { "~${Math.ceil(it).toLong()} ${s.dUnit}" } ?: s.fcNotEnough,
-                    Accent.violet,
-                ),
-                EditorialCell(
-                    s.fcProjectedPeriod,
-                    f.projectedPeriodCostUsd?.let { Fmt.money(it, vm.currency, usdCny) } ?: "—",
-                    s.fcByRecentRate,
-                    Accent.blue,
-                ),
-                EditorialCell(
-                    s.fcFiveHourFull,
-                    fiveH ?: "—",
-                    s.fcByRecentRate,
-                    Accent.slate,
-                ),
-                EditorialCell(
-                    s.fcWeekLeft,
-                    f.weekDaysLeft?.let { "~${Fmt.dur((it * 86400).toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon)}" } ?: "—",
-                    s.fcByRecentRate,
-                    Accent.green,
-                ),
-            ),
-            modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
-        )
-        // ---- 周期对比 (本周 vs 上周 / 本周期 vs 上一周期) ----
-        val cmp = vm.periodComparison
-        if (!cmp.isNullOrEmpty()) {
-            HorizontalDivider()
-            cmp.forEach { c -> CompareSection(c, vm) }
-            Spacer(Modifier.height(6.dp))
-        }
-    }
-}
-
-/** 一组周期对比: 当前区间、上一区间与三指标环比。 */
-@Composable
-private fun CompareSection(c: io.github.yphyphyph.gogauge.data.repository.DashboardRepository.PeriodCompare, vm: MainViewModel) {
-    val s = vm.s
-    val usdCny = vm.dashboard?.usdCny ?: 7.2
-    val label = if (c.key == "week") s.weekThis else s.periodThis
-    val prevLabel = if (c.key == "week") s.weekLast else s.periodLast
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-    ) {
-        Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(
-            metricsLine(c.current, vm.currency, usdCny),
-            fontSize = 13.sp,
-            fontFamily = NumFontFamily,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(prevLabel, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                metricsLine(c.previous, vm.currency, usdCny),
-                fontSize = 13.sp,
-                fontFamily = NumFontFamily,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            Spacer(Modifier.width(8.dp))
-            // 环比: 费用上升=红 下降=绿; 请求/Token 用中性色 (涨跌无好坏)
-            deltaPct(c.current.totalCostUsd, c.previous.totalCostUsd)?.let {
-                Text(it, fontSize = 11.sp, fontFamily = NumFontFamily, color = if (it.startsWith("↑")) MaterialTheme.colorScheme.error else Accent.green)
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            deltaPct(c.current.requestCount.toDouble(), c.previous.requestCount.toDouble())?.let {
-                Text("${s.totalRequests} $it", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            deltaPct(c.current.totalTokens.toDouble(), c.previous.totalTokens.toDouble())?.let {
-                Text("${s.totalTokens} $it", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-}
-
-private fun metricsLine(t: Totals, currency: String, usdCny: Double): String =
-    "${Fmt.money(t.totalCostUsd, currency, usdCny)} · ${Fmt.int(t.requestCount)} · ${Fmt.tokens(t.totalTokens)}"
-
-/** 环比箭头: prev<=0 且 cur>0 视为新增 ("↑new"); 两者皆 0 不显示。 */
-private fun deltaPct(cur: Double, prev: Double): String? {
-    if (prev <= 0.0) return if (cur > 0.0) "↑new" else null
-    val pct = (cur - prev) / prev * 100
-    if (Math.abs(pct) < 0.5) return "±0%"
-    val arrow = if (pct > 0) "↑" else "↓"
-    return "$arrow${Math.abs(Math.round(pct))}%"
 }
 
 @Composable

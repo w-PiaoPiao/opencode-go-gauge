@@ -121,24 +121,37 @@ def test_insert_usage_records_counts_only_new_ids(two_accounts):
     assert dup == 1
 
 
-def test_insert_usage_records_reassigns_owner_on_conflict(two_accounts):
-    """桌面端 UPSERT 语义: 冲突时 account_id 取 excluded (后写覆盖归属).
+def test_insert_usage_records_scopes_identity_to_account(two_accounts):
+    """同号 usg_id 在不同账号下各存一行, 不再互相夺走归属.
 
-    注意与 Android 的差异: Android 的 insertUsageRecords 刻意保留原归属
-    (existingOwnership)。两边都在各自平台自洽 —— usg_id 是服务端按请求生成的
-    全局唯一值, 正常数据流下同一 id 不会落进两个账号, 因此该分支只在异常数据
-    下触发. 此用例锁定桌面端行为, 防止今后无意改动.
+    历史: 主键曾是 usg_id 全局唯一, upsert 写作
+    ON CONFLICT(usg_id) DO UPDATE ... account_id = excluded.account_id, 于是后同步
+    的账号会把先同步账号的行改归自己 —— 前者用量凭空减少, 后者摊上不属于自己的
+    记录. 曾假定 usg_id 由服务端全局生成、不会跨账号撞号, 该假定不成立
+    (不同账号的 provider id 空间可重叠, 备份导入也会重放他人 id).
+    唯一键现为 (account_id, usg_id); 数据搬运与迁移见 test_usage_record_identity.py.
     """
     a1 = db.add_account("tok1", "ws1", switch=True, provider=db.PROVIDER_OPENCODE)
     a2 = db.add_account("tok2", "ws2", switch=False, provider=db.PROVIDER_OPENCODE)
 
     db.insert_usage_records([_record("shared")], a1)
-    db.insert_usage_records([_record("shared")], a2)
+    assert db.insert_usage_records([_record("shared")], a2) == 1  # 对 a2 算新增
 
-    row = db.get_db().execute(
-        "SELECT account_id FROM usage_records WHERE usg_id = 'shared'"
-    ).fetchone()
-    assert row["account_id"] == a2
+    owners = [
+        r["account_id"]
+        for r in db.get_db().execute(
+            "SELECT account_id FROM usage_records WHERE usg_id = 'shared'"
+        ).fetchall()
+    ]
+    assert sorted(owners) == sorted([a1, a2])
+
+    # 同一账号内重复写仍是幂等更新, 不会多出一行
+    assert db.insert_usage_records([_record("shared")], a1) == 0
+    assert db.get_db().execute(
+        "SELECT COUNT(*) AS c FROM usage_records"
+        " WHERE account_id = ? AND usg_id = 'shared'",
+        (a1,),
+    ).fetchone()["c"] == 1
 
 
 def test_period_filter_uses_local_date(two_accounts):

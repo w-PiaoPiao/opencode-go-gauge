@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -388,7 +389,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS usage_records (
-              usg_id TEXT PRIMARY KEY,
+              usg_id TEXT NOT NULL,
               created_at TEXT NOT NULL,
               model TEXT NOT NULL,
               provider TEXT,
@@ -598,6 +599,76 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               ON usage_charts(account_id, synced_at, requests);
             """
         )
+        conn.commit()
+
+        # 迁移 8: usage_records 主键由 usg_id 改为账号内唯一 (account_id, usg_id).
+        #
+        # 原形状 usg_id TEXT PRIMARY KEY 是全局唯一, 而 usg_id 只是 provider 侧的
+        # 记录 id —— 不同账号的 id 空间一旦重叠, upsert 的
+        # ON CONFLICT(usg_id) DO UPDATE ... account_id = excluded.account_id
+        # 就会把先同步账号的行改归后同步者: 前者用量凭空减少, 后者摊上不属于自己的
+        # 记录. 备份导入走同一条 upsert, 同样中招. 改为账号内唯一即可根治.
+        # SQLite 不支持直接改主键, 只能重建表; 旧形状下 usg_id 已全局唯一,
+        # 故 (account_id, usg_id) 天然唯一, 搬运无需去重.
+        pk_names = [
+            row["name"]
+            for row in sorted(
+                conn.execute("PRAGMA table_info(usage_records)").fetchall(),
+                key=lambda r: r["pk"],
+            )
+            if row["pk"]
+        ]
+        if pk_names == ["usg_id"]:
+            conn.executescript(
+                """
+                ALTER TABLE usage_records RENAME TO usage_records_legacy;
+                -- 必须先显式删: 上面建表脚本里的 CREATE UNIQUE INDEX IF NOT EXISTS 已把
+                -- 该名字建在旧表上, 而 RENAME 会把索引一并带过去并沿用原名. 若不删,
+                -- 下面的 IF NOT EXISTS 会因重名跳过建索引, 新表最终没有任何唯一约束,
+                -- 之后每条 ON CONFLICT(account_id, usg_id) 都会报错.
+                DROP INDEX IF EXISTS idx_usage_account_usgid;
+                CREATE TABLE usage_records (
+                  usg_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  model TEXT NOT NULL,
+                  provider TEXT,
+                  input_tokens INTEGER NOT NULL,
+                  output_tokens INTEGER NOT NULL,
+                  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                  cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0,
+                  cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+                  cost_raw INTEGER NOT NULL,
+                  cost_usd REAL NOT NULL,
+                  key_id TEXT,
+                  session_id TEXT,
+                  plan TEXT,
+                  synced_at TEXT NOT NULL,
+                  account_id INTEGER NOT NULL DEFAULT 1,
+                  local_date TEXT
+                );
+                CREATE UNIQUE INDEX idx_usage_account_usgid
+                  ON usage_records(account_id, usg_id);
+                INSERT INTO usage_records (
+                  usg_id, created_at, model, provider, input_tokens, output_tokens,
+                  reasoning_tokens, cache_read_tokens, cache_write_5m_tokens,
+                  cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id,
+                  plan, synced_at, account_id, local_date)
+                SELECT usg_id, created_at, model, provider, input_tokens, output_tokens,
+                       reasoning_tokens, cache_read_tokens, cache_write_5m_tokens,
+                       cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id,
+                       plan, synced_at, account_id, local_date FROM usage_records_legacy;
+                DROP TABLE usage_records_legacy;
+                """
+            )
+        else:
+            # 已是新形状 (新建库 / 上一轮已迁移): 补建唯一索引兜底.
+            # 必须放在迁移 2 之后 —— account_id 列是迁移 2 才补上的, 旧库在此之前
+            # 建索引会 "no such column: account_id". 新库表定义里已带 account_id.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_account_usgid"
+                " ON usage_records(account_id, usg_id)"
+            )
         conn.commit()
 
     # 迁移 4: opencode.ai 2026-09 改版后旧会话 Cookie (auth=…) 已失效,
@@ -843,16 +914,6 @@ def get_token() -> str:
     return get_account_credentials(aid)[0]
 
 
-def get_workspace_hint() -> str:
-    aid = get_active_account_id()
-    if not aid:
-        return "Default"
-    row = get_db().execute(
-        "SELECT workspace_id, resolved_workspace_id FROM accounts WHERE id = ?", (aid,)
-    ).fetchone()
-    if row is None:
-        return "Default"
-    return row["resolved_workspace_id"] or row["workspace_id"] or "Default"
 
 
 def get_account_credentials(account_id: int) -> tuple[str, str, str]:
@@ -900,12 +961,6 @@ def list_accounts_by_provider(provider: str) -> list[dict[str, Any]]:
     return [_account_dict(r) for r in rows]
 
 
-def count_logged_in_provider(provider: str) -> int:
-    row = get_db().execute(
-        "SELECT COUNT(*) AS c FROM accounts WHERE provider = ? AND TRIM(token) != ''",
-        (provider,),
-    ).fetchone()
-    return int(row["c"])
 
 
 def add_account(
@@ -1079,7 +1134,7 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id, plan, synced_at,"
         " account_id, local_date)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date(?, 'localtime'))"
-        " ON CONFLICT(usg_id) DO UPDATE SET"
+        " ON CONFLICT(account_id, usg_id) DO UPDATE SET"
         " created_at = excluded.created_at, model = excluded.model,"
         " provider = excluded.provider,"
         " input_tokens = excluded.input_tokens,"
@@ -1090,46 +1145,57 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " cache_write_1h_tokens = excluded.cache_write_1h_tokens,"
         " cost_raw = excluded.cost_raw, cost_usd = excluded.cost_usd,"
         " key_id = excluded.key_id, session_id = excluded.session_id, plan = excluded.plan,"
-        " account_id = excluded.account_id, synced_at = excluded.synced_at,"
+        " synced_at = excluded.synced_at,"
         " local_date = excluded.local_date"
     )
     inserted = 0
     try:
         conn.execute("BEGIN")
-        rows = [
-            (
-                rec["usg_id"], rec["created_at"], rec["model"],
-                rec.get("provider") or acct_provider or PROVIDER_OPENCODE,
-                rec["input_tokens"], rec["output_tokens"], rec["reasoning_tokens"],
-                rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
-                rec["cache_write_1h_tokens"], rec["cost_raw"], rec["cost_usd"],
-                rec.get("key_id"), rec.get("session_id"), rec.get("plan"),
-                synced_at,
-                # 行级 account_id 优先 (备份导入逐行 remap); 未带时整批归属
-                rec.get("account_id") or aid,
-                # local_date 由 SQLite 按本地时区从 created_at 派生 (末位绑定)
-                rec["created_at"],
-            )
-            for rec in records
-        ]
-        # 新增数 = 批内去重后不在库中的 usg_id 数 (与旧逐条实现的计数语义一致:
-        # 批内重复的 id 只有首次计入).
-        ids = {r[0] for r in rows}
-        existing: set[str] = set()
-        id_list = list(ids)
-        # SQLITE_MAX_VARIABLE_NUMBER 老版本为 999 — 分片查询避免超限
-        for start in range(0, len(id_list), 500):
-            chunk = id_list[start:start + 500]
-            placeholders = ",".join("?" * len(chunk))
-            existing.update(
-                row["usg_id"]
-                for row in conn.execute(
-                    f"SELECT usg_id FROM usage_records WHERE usg_id IN ({placeholders})", chunk
+        # 行级 account_id 优先 (备份导入逐行 remap); 未带时整批归属 aid.
+        # 判重与计数都以每行**自己的**归属为准 —— 唯一键是 (account_id, usg_id),
+        # 用批级 aid 统一判重会把别的账号下已存在的同号 id 漏判成新增.
+        row_account: list[int] = []
+        rows: list[tuple] = []
+        for rec in records:
+            owner = rec.get("account_id") or aid
+            row_account.append(owner)
+            rows.append(
+                (
+                    rec["usg_id"], rec["created_at"], rec["model"],
+                    rec.get("provider") or acct_provider or PROVIDER_OPENCODE,
+                    rec["input_tokens"], rec["output_tokens"], rec["reasoning_tokens"],
+                    rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
+                    rec["cache_write_1h_tokens"], rec["cost_raw"], rec["cost_usd"],
+                    rec.get("key_id"), rec.get("session_id"), rec.get("plan"),
+                    synced_at,
+                    owner,
+                    # local_date 由 SQLite 按本地时区从 created_at 派生 (末位绑定)
+                    rec["created_at"],
                 )
             )
+        # 新增数 = 批内去重后不在库中的 (account_id, usg_id) 对数
+        # (批内重复的同一 id 只有首次计入).
+        pairs = {(row_account[i], r[0]) for i, r in enumerate(rows)}
+        by_account: dict[int, list[str]] = {}
+        for acct_id, usg_id in pairs:
+            by_account.setdefault(acct_id, []).append(usg_id)
+        existing: set[tuple[int, str]] = set()
+        # SQLITE_MAX_VARIABLE_NUMBER 老版本为 999 — 分片查询避免超限
+        for acct_id, acct_ids in by_account.items():
+            for start in range(0, len(acct_ids), 500):
+                chunk = acct_ids[start:start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                existing.update(
+                    (acct_id, row["usg_id"])
+                    for row in conn.execute(
+                        f"SELECT usg_id FROM usage_records"
+                        f" WHERE account_id = ? AND usg_id IN ({placeholders})",
+                        [acct_id, *chunk],
+                    )
+                )
         conn.executemany(stmt, rows)
         conn.commit()
-        inserted = len(ids - existing)
+        inserted = len(pairs - existing)
     except Exception:
         conn.rollback()
         raise
@@ -1716,7 +1782,7 @@ def _period_where(
     return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
-_NUM_DAYS_RE = __import__("re").compile(r"^(\d+)d$")
+_NUM_DAYS_RE = re.compile(r"^(\d+)d$")
 
 
 # ---------------------------------------------------------------------------
@@ -2135,101 +2201,8 @@ def totals(
 
 
 # ---------------------------------------------------------------------------
-# v2.2.0b: 预测/周期对比/导出 (Android 端 UsageDao 扩展的桌面 parity)
+# 导出 (Android 端 UsageDao 扩展的桌面 parity)
 # ---------------------------------------------------------------------------
-
-
-def recent_cost_usd(hours: int = 2, account_id: Optional[int] = None) -> float:
-    """近 N 小时已耗 $ (5h 窗口速率预测的输入).
-
-    两段式过滤 (与 _period_where "5h" 同口径): local_date 先收敛到昨/今走索引,
-    substr(created_at,1,19) 精筛 (不依赖 SQLite 版本对 ISO Z 后缀的解析差异,
-    与 Android 端 UsageDao.recentUsage 逐字对齐).
-    """
-    aid = _resolve_account_id(account_id)
-    row = get_db().execute(
-        """
-        SELECT COALESCE(SUM(cost_usd), 0) AS c
-        FROM usage_records
-        WHERE account_id = ?
-          AND local_date >= date('now', 'localtime', '-1 day')
-          AND datetime(substr(created_at, 1, 19)) >= datetime('now', ?)
-        """,
-        (aid, f"-{max(1, hours)} hours"),
-    ).fetchone()
-    return float(row["c"] or 0) if row else 0.0
-
-
-def totals_between(
-    start_local_date: str,
-    end_local_date_exclusive: str,
-    account_id: Optional[int] = None,
-    exclude_models: Optional[list[str]] = None,
-) -> dict[str, Any]:
-    """任意本地日区间 [start, end) 的聚合 (周期对比用), 输出与 totals() 同形.
-
-    两种数据源都按 local_date 索引直查 (charts 的 local_date 物化列同样可用).
-    """
-    aid = _resolve_account_id(account_id)
-    ex_sql, ex_params = _exclude_clause(exclude_models)
-    ex_and = f" AND {ex_sql}" if ex_sql else ""
-    params: list[Any] = [start_local_date, end_local_date_exclusive, *ex_params]
-    if _use_charts_stats(aid):
-        row = get_db().execute(
-            f"""
-            SELECT SUM(requests) AS request_count,
-                   0 AS session_count,
-                   SUM(tokens_in) AS total_input_tokens,
-                   SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
-                   0 AS total_reasoning_tokens,
-                   SUM(cache_read_tokens) AS cache_hit_tokens,
-                   SUM(cache_creation_tokens) AS cache_write_tokens,
-                   SUM(tokens_out) AS total_output_tokens,
-                   SUM(total_cost) AS total_cost_usd
-            FROM usage_charts
-            WHERE account_id = ? AND local_date >= ? AND local_date < ?{ex_and}
-            """,
-            [aid, *params],
-        ).fetchone()
-    else:
-        row = get_db().execute(
-            f"""
-            SELECT COUNT(*) AS request_count,
-                   COUNT(DISTINCT CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id END) AS session_count,
-                   SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
-                   SUM(input_tokens) AS uncached_input_tokens,
-                   SUM(reasoning_tokens) AS total_reasoning_tokens,
-                   SUM(cache_read_tokens) AS cache_hit_tokens,
-                   SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS cache_write_tokens,
-                   SUM(output_tokens) AS total_output_tokens,
-                   SUM(cost_usd) AS total_cost_usd
-            FROM usage_records
-            WHERE account_id = ? AND local_date >= ? AND local_date < ?{ex_and}
-            """,
-            [aid, *params],
-        ).fetchone()
-    if row is None or row["request_count"] is None:
-        return {
-            "request_count": 0, "session_count": 0, "total_input_tokens": 0,
-            "uncached_input_tokens": 0, "total_reasoning_tokens": 0,
-            "cache_hit_tokens": 0, "cache_write_tokens": 0,
-            "total_output_tokens": 0, "total_cost_usd": 0.0, "hit_rate": 0.0,
-        }
-    hit = int(row["cache_hit_tokens"] or 0)
-    miss = int(row["uncached_input_tokens"] or 0)
-    hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
-    return {
-        "request_count": int(row["request_count"] or 0),
-        "session_count": int(row["session_count"] or 0),
-        "total_input_tokens": int(row["total_input_tokens"] or 0),
-        "uncached_input_tokens": miss,
-        "total_reasoning_tokens": int(row["total_reasoning_tokens"] or 0),
-        "cache_hit_tokens": hit,
-        "cache_write_tokens": int(row["cache_write_tokens"] or 0),
-        "total_output_tokens": int(row["total_output_tokens"] or 0),
-        "total_cost_usd": round(float(row["total_cost_usd"] or 0), 6),
-        "hit_rate": round(hit_rate, 2),
-    }
 
 
 def export_page(
@@ -2240,7 +2213,11 @@ def export_page(
     """按时间升序分页导出明细 (BackupManager 流式写文件用)."""
     aid = _resolve_account_id(account_id)
     rows = get_db().execute(
-        "SELECT * FROM usage_records WHERE account_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+        # usg_id 追加为次序键: created_at 不唯一 (毫秒精度 + 批量同步一次插多条),
+        # 只按它排序时并列行的相对次序在两次查询间不保证稳定, OFFSET 分页会漏行/重行,
+        # 表现为备份静默丢记录. (created_at, usg_id) 在单账号内是全序.
+        "SELECT * FROM usage_records WHERE account_id = ?"
+        " ORDER BY created_at ASC, usg_id ASC LIMIT ? OFFSET ?",
         (aid, max(1, limit), max(0, offset)),
     ).fetchall()
     return [dict(r) for r in rows]

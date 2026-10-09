@@ -1,8 +1,6 @@
 /* GoGauge - 4 页 (首页/用量统计/设置/关于) + 双主题 + 中英国际化 */
 "use strict";
-
 const $ = (id) => document.getElementById(id);
-
 /* ================= 国际化 ================= */
 const I18N = {
   zh: {
@@ -24,12 +22,10 @@ const I18N = {
     autostart: "开机自启", autostartDesc: "登录系统时自动启动并驻留菜单栏",
     downloading: "下载中…", updateReady: "新版本已下载到「下载」文件夹", downloadFailed: "下载失败", openReleasePage: "打开发布页", autostartFail: "开机自启设置失败",
     colTime: "时间", colModel: "模型", colInput: "输入", colOutput: "输出",
-    colReasoning: "推理", colCacheRead: "缓存读", colCost: "费用", colPlan: "PLAN",
-    prev: "上一页", next: "下一页",
-    settingsTitle: "设置", setAccount: "用量账户", accountCard: "用量账户", setLoginState: "登录状态",
-    setWorkspace: "工作区", setLoginMethod: "登录方式",
+    colReasoning: "推理", colCacheRead: "缓存读", colCost: "费用",     prev: "上一页", next: "下一页",
+    settingsTitle: "设置",  accountCard: "用量账户",      setLoginMethod: "登录方式",
     loginMethodDesc: "内置浏览器 (WebView2) 打开 opencode.ai 控制台登录页，自动回填",
-    relogin: "重新登录", setLogout: "退出登录", logoutDesc: "清除本地 token 与缓存数据", logout: "退出登录",
+    relogin: "重新登录",   logout: "退出登录",
     setAutoSync: "自动同步", autoSync: "自动增量同步", autoSyncDesc: "按间隔拉取最新用量记录",
     syncInterval: "同步间隔", syncIntervalDesc: "多久自动同步一次",
     min1: "1 分钟", min5: "5 分钟", min15: "15 分钟", min30: "30 分钟",
@@ -46,10 +42,9 @@ const I18N = {
     aboutFeatures: "功能", feat1: "配额窗口实时监控（滚动 5 小时 / 每周 / 每月）",
     feat2: "今日用量与 24 小时趋势", feat3: "各模型 Token 消耗排行与用量趋势",
     feat4: "详细使用记录分页浏览（10 条/页）", feat5: "自动同步数据，无需手动刷新",
-    aboutTech: "技术栈", aboutLinks: "链接", aboutThanks: "致谢", thanksText: "数据提供",
+     aboutLinks: "链接", aboutThanks: "致谢", thanksText: "数据提供",
     pageFoot: "{version} · GoGauge · 数据仅保存在本地 · 数据提供 OpenCode",
-    loginTitle: "连接 OpenCode Go",
-    welcomeDesc: "本地优先的 OpenCode Go 用量仪表盘 — 配额窗口、Token 构成、模型排行、使用记录，打开即见。",
+        welcomeDesc: "本地优先的 OpenCode Go 用量仪表盘 — 配额窗口、Token 构成、模型排行、使用记录，打开即见。",
     welcomeFeat1: "配额实时监控（5 小时 / 每周 / 每月）",
     welcomeFeat2: "Token 全维度统计与 24 小时趋势",
     welcomeFeat3: "数据仅保存在本机，安全私密",
@@ -64,20 +59,15 @@ const I18N = {
     currentRange: "当前范围", avgPer: "均", perReq: "/次", dedup: "去重 sessionID",
     noData: "暂无记录", loadFailed: "加载失败", totalN: "共", items: "条",
     pageOf: "第", ofPages: "页",
-    loggedIn: "已登录", notLoggedIn: "未登录", connected: "已连接", notConnected: "未连接",
-    lastSync: "上次同步", records: "条记录", updatedAt: "更新于",
+    loggedIn: "已登录", notLoggedIn: "未登录",      lastSync: "上次同步", records: "条记录", updatedAt: "更新于",
     justNow: "刚刚", minAgo: "分钟前", hrAgo: "小时前", dayAgo: "天前", never: "从未同步",
-    day: "天", hour: "小时", minute: "分钟", soon: "即将重置",
+       soon: "即将重置",
     dUnit: "天", hUnit: "小时", mUnit: "分钟",
     confirm: "确认", cancel: "取消", ok: "确定",
     fullSyncConfirm: "将重新拉取历史记录（按同步范围），确定开始？", startSync: "开始同步",
-    reloginConfirm: "将清除本地数据并打开控制台登录页重新登录，确定？", goLogin: "去登录",
-    logoutConfirm: "退出将清除本地 token 与全部缓存数据，确定退出？", quit: "退出",
-    quotaFail: "配额获取失败", retryTip: "点击右上角刷新重试",
+              quotaFail: "配额获取失败", retryTip: "点击右上角刷新重试",
     syncIntervalSet: "同步间隔已设为", syncRangeUpdated: "同步范围已更新，下次全量同步生效",
-    trendHint: "30 天", totalTokenHint: "含缓存命中",
-    setUsers: "用户管理", addUser: "添加 OpenCode 账号", addGoatUser: "添加 GOAT 账号", addUserTip: "登录新的 OpenCode Go 账号并保存到本机",
-    provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
+    trendHint: "30 天",     setUsers: "用户管理", addUser: "添加 OpenCode 账号", addGoatUser: "添加 GOAT 账号",     provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
     goatLoginNote: "打开 Command Code 登录页，完成后自动回填会话",
     goatLoginWin: "打开内置登录窗口",
     goatLoginOr: "或",
@@ -97,22 +87,14 @@ const I18N = {
     deleteUserConfirm: "确定删除用户「{name}」？其本地用量数据与同步记录将一并清除，且无法恢复。",
     userDeleted: "用户已删除", userRenamed: "已重命名", switchedAccount: "已切换账号",
     noUsers: "暂无账号，点击右上角「添加用户」登录",
-    setToCurrent: "设为当前", loggedOut: "已退出登录",
+     loggedOut: "已退出登录",
     logoutUserConfirm: "将退出「{name}」并清除其本地用量数据与同步记录，确定？",
-    reloginConfirmNew: "将打开控制台登录页重新登录当前账号，确定？",
-    fcTitleFull: "预测与对比", fcDailyBudget: "今日可用预算", fcMonthRunOut: "月度额度预计用尽",
-    fcProjectedPeriod: "预计整周期总耗", fcFiveHourFull: "5h 窗口预计打满", fcWeekLeft: "周窗口还能用",
-    fcByRecentRate: "按近期速率", fcNeverFull: "按当前速率到重置也不会打满",
-    fcDegraded: "数据积累中，预测仅供参考", fcNotEnough: "数据不足", fcRemaining: "剩余",
-    fcMonthLine: "按近期速率 ~%1 用尽", fcWeekLine: "按近期速率 ~%1 后用完", fc5hLine: "按当前速率 ~%1 后打满",
-    weekThis: "本周", weekLast: "上周", periodThis: "本周期", periodLast: "上一周期",
-    heatmapTitle: "日历热力图", heatmapNoData: "本地暂无历史数据", fewer: "少", more: "多",
+        heatmapTitle: "日历热力图", heatmapNoData: "本地暂无历史数据", fewer: "少", more: "多",
     exportCsv: "导出 CSV", exportCsvDesc: "用量明细导出为表格文件（时间/模型/Token/费用）",
     exportBackup: "导出 JSON 备份", exportBackupDesc: "账号（不含凭证）与全部用量记录打包 (.json.gz)，与移动端互通",
     importBackup: "导入备份", importBackupDesc: "从 JSON 备份合并数据；凭证不可迁移，恢复后需重新登录",
     exportDone: "已导出", exportFailed: "导出失败", importDone: "导入完成，新增 %1 条记录",
-    needDesktopApp: "需要在桌面客户端中使用", busyWorking: "处理中…",
-  },
+    needDesktopApp: "需要在桌面客户端中使用",   },
   en: {
     syncing: "Syncing", themeDark: "Dark", themeLight: "Light", refresh: "Refresh",
     homeTitle: "Usage Overview", today: "Today", d7: "7 Days", d30: "30 Days", month: "This Cycle", all: "All",
@@ -132,12 +114,10 @@ const I18N = {
     autostart: "Launch at Login", autostartDesc: "Start automatically and stay in the menu bar when you log in",
     downloading: "Downloading…", updateReady: "New version saved to Downloads", downloadFailed: "Download failed", openReleasePage: "Open Releases Page", autostartFail: "Failed to update launch-at-login",
     colTime: "Time", colModel: "Model", colInput: "Input", colOutput: "Output",
-    colReasoning: "Reasoning", colCacheRead: "Cache Read", colCost: "Cost", colPlan: "PLAN",
-    prev: "Prev", next: "Next",
-    settingsTitle: "Settings", setAccount: "Usage Accounts", accountCard: "Usage Accounts", setLoginState: "Login Status",
-    setWorkspace: "Workspace", setLoginMethod: "Login Method",
+    colReasoning: "Reasoning", colCacheRead: "Cache Read", colCost: "Cost",     prev: "Prev", next: "Next",
+    settingsTitle: "Settings",  accountCard: "Usage Accounts",      setLoginMethod: "Login Method",
     loginMethodDesc: "Built-in browser (WebView2) opens the opencode.ai console sign-in page and auto-captures",
-    relogin: "Re-login", setLogout: "Logout", logoutDesc: "Clear local token and cached data", logout: "Logout",
+    relogin: "Re-login",   logout: "Logout",
     setAutoSync: "Auto Sync", autoSync: "Auto incremental sync", autoSyncDesc: "Fetch latest usage records at interval",
     syncInterval: "Sync Interval", syncIntervalDesc: "How often to auto sync",
     min1: "1 min", min5: "5 min", min15: "15 min", min30: "30 min",
@@ -154,10 +134,9 @@ const I18N = {
     aboutFeatures: "Features", feat1: "Quota window monitoring (5h rolling / weekly / monthly)",
     feat2: "Today's usage with 24-hour trend", feat3: "Per-model token ranking and usage trend",
     feat4: "Paginated usage records (10 per page)", feat5: "Auto sync — no manual refresh needed",
-    aboutTech: "Tech Stack", aboutLinks: "Links", aboutThanks: "Thanks", thanksText: "Data provided by",
+     aboutLinks: "Links", aboutThanks: "Thanks", thanksText: "Data provided by",
     pageFoot: "{version} · GoGauge · Local-only data · Data by OpenCode",
-    loginTitle: "Connect OpenCode Go",
-    welcomeDesc: "A local-first OpenCode Go usage dashboard — quota windows, token breakdown, model ranking and usage records in one place.",
+        welcomeDesc: "A local-first OpenCode Go usage dashboard — quota windows, token breakdown, model ranking and usage records in one place.",
     welcomeFeat1: "Real-time quota monitoring (5h / weekly / monthly)",
     welcomeFeat2: "Full token stats with 24-hour trend",
     welcomeFeat3: "All data stays on your machine — private & safe",
@@ -172,20 +151,15 @@ const I18N = {
     currentRange: "current range", avgPer: "avg", perReq: "/req", dedup: "dedup sessionID",
     noData: "No records", loadFailed: "Failed to load", totalN: "Total", items: "records",
     pageOf: "Page", ofPages: "of",
-    loggedIn: "Logged in", notLoggedIn: "Not logged in", connected: "Connected", notConnected: "Not connected",
-    lastSync: "Last sync", records: "records", updatedAt: "Updated",
+    loggedIn: "Logged in", notLoggedIn: "Not logged in",      lastSync: "Last sync", records: "records", updatedAt: "Updated",
     justNow: "just now", minAgo: "min ago", hrAgo: "hr ago", dayAgo: "d ago", never: "Never synced",
-    day: "d", hour: "h", minute: "m", soon: "resets soon",
+       soon: "resets soon",
     dUnit: "d", hUnit: "h", mUnit: "m",
     confirm: "Confirm", cancel: "Cancel", ok: "OK",
     fullSyncConfirm: "This will re-fetch all history records (per sync range). Continue?", startSync: "Start Sync",
-    reloginConfirm: "This will clear local data and open the console sign-in page. Continue?", goLogin: "Go Login",
-    logoutConfirm: "This will clear local token and all cached data. Continue?", quit: "Logout",
-    quotaFail: "Quota fetch failed", retryTip: "Click refresh in top bar to retry",
+              quotaFail: "Quota fetch failed", retryTip: "Click refresh in top bar to retry",
     syncIntervalSet: "Sync interval set to", syncRangeUpdated: "Sync range updated, takes effect on next full sync",
-    trendHint: "30 days", totalTokenHint: "incl. cache hits",
-    setUsers: "User Management", addUser: "Add OpenCode account", addGoatUser: "Add GOAT account", addUserTip: "Sign in with another OpenCode Go account",
-    provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
+    trendHint: "30 days",     setUsers: "User Management", addUser: "Add OpenCode account", addGoatUser: "Add GOAT account",     provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
     goatLoginNote: "Opens Command Code sign-in; session is captured automatically",
     goatLoginWin: "Open built-in login window",
     goatLoginOr: "or",
@@ -205,26 +179,17 @@ const I18N = {
     deleteUserConfirm: "Delete user \"{name}\"? Their local usage data and sync history will be removed permanently.",
     userDeleted: "User deleted", userRenamed: "Renamed", switchedAccount: "Account switched",
     noUsers: "No accounts yet — click \"Add User\" to sign in",
-    setToCurrent: "Make Active", loggedOut: "Signed out",
+     loggedOut: "Signed out",
     logoutUserConfirm: "Sign out \"{name}\" and remove their local usage data and sync history?",
-    reloginConfirmNew: "This opens the console sign-in page to re-login the current account. Continue?",
-    fcTitleFull: "Forecast & Comparison", fcDailyBudget: "Today's budget", fcMonthRunOut: "Monthly quota runs out",
-    fcProjectedPeriod: "Projected period cost", fcFiveHourFull: "5h window fills in", fcWeekLeft: "Week window lasts",
-    fcByRecentRate: "At recent pace", fcNeverFull: "At this pace it won't fill before reset",
-    fcDegraded: "Collecting data — forecast is rough", fcNotEnough: "Not enough data", fcRemaining: "remaining",
-    fcMonthLine: "At recent pace, runs out ~%1", fcWeekLine: "At recent pace, used up in ~%1", fc5hLine: "At this pace, fills in ~%1",
-    weekThis: "This week", weekLast: "Last week", periodThis: "This period", periodLast: "Previous period",
-    heatmapTitle: "Daily Heatmap", heatmapNoData: "No local history yet", fewer: "less", more: "more",
+        heatmapTitle: "Daily Heatmap", heatmapNoData: "No local history yet", fewer: "less", more: "more",
     exportCsv: "Export CSV", exportCsvDesc: "Export usage records as a spreadsheet (time/model/tokens/cost)",
     exportBackup: "Export JSON Backup", exportBackupDesc: "Pack accounts (no tokens) and all usage records (.json.gz), interchangeable with mobile",
     importBackup: "Import Backup", importBackupDesc: "Merge data from a JSON backup; tokens can't migrate — re-login after restore",
     exportDone: "Exported", exportFailed: "Export failed", importDone: "Imported, %1 new records",
-    needDesktopApp: "Available in the desktop client only", busyWorking: "Working…",
-  },
+    needDesktopApp: "Available in the desktop client only",   },
 };
 let lang = "zh";
 function t(key) { return (I18N[lang] && I18N[lang][key]) || I18N.zh[key] || key; }
-
 let state = {
   page: "home",
   range: "today",
@@ -244,9 +209,7 @@ let state = {
   sessions: { page: 1, pageSize: 7, total: 0 },
   settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true },
 };
-
 const COLOR = { input: "#4f8ef7", output: "#22c55e", reasoning: "#a78bfa", cache: "#06b6d4", cost: "#d97706" };
-
 /* 图表动画由设置 chart_animation 控制 (默认关闭: 低配设备上每次刷新重建
    动画要在 N100 级小主机/软件渲染的 WebView 里重合成上百帧, 是掉帧大头).
    关闭用 false; 开启必须还原"出厂默认对象"而非 true —— Chart.js 的
@@ -259,8 +222,12 @@ function applyChartAnimation(on) {
   Chart.defaults.animation = on ? CHART_ANIM_DEFAULTS : false;
 }
 const QUOTA_LABEL = { "5h Rolling": () => t("rolling"), "Weekly": () => t("weekly"), "Monthly": () => t("monthly") };
-const PLAN_BADGE = { lite: "GO", sub: "GO", byok: "BYOK" };
-
+/* 窗口标签来自远端配额 API, 属不可信输入. 未命中已知键时回退原值, 必须先转义
+   再进 innerHTML —— 否则任意窗口名都能注入标签破坏版式 (与全文其余转义口径一致). */
+function quotaLabel(label) {
+  const known = QUOTA_LABEL[label];
+  return known ? known() : escapeHtml(label);
+}
 /* ---------------- 格式化 ---------------- */
 function fmtTokens(n) {
   n = Number(n) || 0;
@@ -309,7 +276,6 @@ function fmtRelative(iso) {
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
-
 /* ---------------- API ---------------- */
 const API_TIMEOUT_MS = 15000;  // 本地服务异常时避免永久"加载中"
 async function api(path, opts = {}) {
@@ -330,7 +296,6 @@ async function api(path, opts = {}) {
     clearTimeout(timer);
   }
 }
-
 /* ---------------- 语言切换 ---------------- */
 function applyLang(l) {
   lang = l === "en" ? "en" : "zh";
@@ -359,7 +324,6 @@ function applyLang(l) {
     loadSessions().catch(() => {});  // 会话表含 t("unassigned") 等动态文案, 也要重渲染
   }
 }
-
 /* ---------------- 弹框 / Toast ---------------- */
 function showModal({ title = t("confirm"), message = "", okText = t("ok"), cancelText = t("cancel"), danger = false, onOk }) {
   const overlay = $("modal-overlay");
@@ -392,7 +356,6 @@ function toast(msg, type = "ok") {
   wrap.appendChild(el);
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, 3200);
 }
-
 /* ---------------- 标题栏 ---------------- */
 // macOS 使用原生标题栏 + 左上角红黄绿交通灯; 隐藏自定义窗口控制按钮.
 function isMac() {
@@ -413,7 +376,6 @@ function bindTitlebar() {
   $("tb-min").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.minimize(); });
   $("tb-close").addEventListener("click", async () => { const a = await pywebviewApi(); if (a) a.close(); });
   $("tb-theme").addEventListener("click", () => applyDarkMode(document.documentElement.dataset.theme !== "dark"));
-
   /* 标题栏拖动 (自实现, 替代 pywebview easy_drag):
      easy_drag 的 JS 用 clientX 记起点、screenX 算增量 (DPI 缩放下两坐标系
      不同源), 后端 move() 再乘一次缩放, 高 DPI 屏幕拖动会漂移抽动.
@@ -456,7 +418,6 @@ function bindTitlebar() {
     flushDrag();  // 释放残留增量, 避免窗口停在半路
   });
 }
-
 /* ---------------- 主题 / 货币 ---------------- */
 function applyDarkMode(on) {
   state.darkMode = on;
@@ -481,7 +442,6 @@ function applyCurrency(cur) {
   loadRecords().catch(() => {});
   if (state.page === "overview") loadOverview(true).catch(() => {});  // 总览页费用随货币即时换算
 }
-
 /* ---------------- 页面路由 ---------------- */
 function switchPage(page) {
   state.page = page;
@@ -494,7 +454,6 @@ function switchPage(page) {
   if (page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
   if (page === "settings") renderSettings();
 }
-
 /* ---------------- 骨架屏 ---------------- */
 function renderSkeletons() {
   const sBlock = `<div class="ub skeleton"><div class="sk-line w40"></div><div class="sk-line w20 lg"></div><div class="sk-bar"></div><div class="sk-line w60"></div></div>`;
@@ -507,7 +466,6 @@ function renderSkeletons() {
   if (!$("stats-total-cards").innerHTML) $("stats-total-cards").innerHTML = sKpi.repeat(4);
   if (!$("stats-detail6").innerHTML) $("stats-detail6").innerHTML = `<div class="tc skeleton"><div class="sk-line w40"></div><div class="sk-line w50 lg"></div><div class="sk-line w30"></div></div>`.repeat(6);
 }
-
 /* ---------------- 数据加载 ---------------- */
 let loadSeq = 0;
 /* dashboard 查询串: 统计页携带模型排除项 (环形图图例点击 → 全局联动), 其他页不带 */
@@ -537,7 +495,6 @@ async function loadDashboard(quiet = false) {
   }
 }
 function showLoading(show) { $("top-loading").hidden = !show; }
-
 /* ---------------- 首页: 用量块 ---------------- */
 function renderUsageBlocks(quota) {
   const row = $("usage-blocks");
@@ -554,17 +511,15 @@ function renderUsageBlocks(quota) {
     return;
   }
   if (state.quotaRetryTimer) { clearTimeout(state.quotaRetryTimer); state.quotaRetryTimer = null; }
-  const fc = state.data ? state.data.forecast : null;
   const blocks = [];
   for (const w of quota.windows || []) {
     const used = Number(w.used) || 0;
     blocks.push({
       cls: w.label === "5h Rolling" ? "c-rolling" : w.label === "Weekly" ? "c-week" : "c-month",
-      label: (QUOTA_LABEL[w.label] || (() => w.label))(),
+      label: quotaLabel(w.label),
       used: used,
       remaining: (Number(w.remaining) || 0).toFixed(0) + "%",
       reset: `${t("resetsIn")} ${fmtDur(w.reset_in_sec)}`,
-      forecast: forecastLine(w.label, fc),
     });
   }
   row.innerHTML = blocks.map((b) => `
@@ -572,33 +527,8 @@ function renderUsageBlocks(quota) {
       <div class="ub-head"><span class="ub-l">${b.label}</span><span class="ub-rem">${t("remaining")} ${b.remaining}</span></div>
       <div class="ub-bar"><div class="ub-bar-fill" style="width:${b.used}%"></div></div>
       <div class="ub-meta"><span>${t("used")} ${b.used.toFixed(0)}%</span><span>${b.reset}</span></div>
-      ${b.forecast ? `<div class="ub-fc">${b.forecast}</div>` : ""}
     </div>`).join("");
 }
-
-/* 每窗口预测小字 (v2.2.0b) — 与 Android HomeScreen.forecastLine 同口径 */
-function forecastLine(label, fc) {
-  if (!fc) return "";
-  const dateStr = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
-  if (label === "5h Rolling") {
-    const min = fc.five_hour_exhaust_in_min;
-    if (min == null) return "";
-    return min <= 300 ? t("fc5hLine").replace("%1", fmtDur(min * 60)) : t("fcNeverFull");
-  }
-  if (label === "Weekly") {
-    return fc.week_days_left != null
-      ? t("fcWeekLine").replace("%1", fmtDur(fc.week_days_left * 86400))
-      : "";
-  }
-  if (label === "Monthly") {
-    if (fc.month_days_left == null) return "";
-    const d = new Date();
-    d.setDate(d.getDate() + Math.ceil(fc.month_days_left));
-    return t("fcMonthLine").replace("%1", dateStr(d));
-  }
-  return "";
-}
-
 /* ---------------- 首页: 用量概览 6 格 ---------------- */
 function renderOverview(totals) {
   const totalTokens = totals.total_input_tokens + totals.total_output_tokens + totals.total_reasoning_tokens;
@@ -613,7 +543,6 @@ function renderOverview(totals) {
   $("overview-grid").innerHTML = cards.map((c) => `
     <div class="card kpi ${c.cls}"><div class="kpi-l">${c.l}</div><div class="kpi-v">${c.v}</div><div class="kpi-s">${c.s}</div></div>`).join("");
 }
-
 /* ---------------- 首页: 今日趋势 24h ---------------- */
 let cToday = null;
 function chartToday(trend) {
@@ -643,7 +572,6 @@ function chartToday(trend) {
   });
   cToday.resize();
 }
-
 /* ---------------- 统计页: 4 总卡 + 6 明细 ---------------- */
 function renderStatsTotal(totals) {
   const totalTokens = totals.total_input_tokens + totals.total_output_tokens + totals.total_reasoning_tokens;
@@ -669,67 +597,7 @@ function renderDetail6(totals) {
   $("stats-detail6").innerHTML = cards.map((c) => `
     <div class="tc"><div class="tc-l">${c.l}</div><div class="tc-v">${c.v}</div><div class="tc-s">${c.s}</div></div>`).join("");
 }
-
-/* ---------------- 统计页: 预测与对比 + 日历热力图 (v2.2.0b, Android parity) ---------------- */
-function renderForecastCard(data) {
-  const card = $("forecast-card");
-  if (!card) return;
-  const fc = data.forecast;
-  const cmp = data.comparison || [];
-  if (!fc && !cmp.length) { card.hidden = true; return; }
-  card.hidden = false;
-  $("fc-degraded").hidden = !(fc && fc.degraded);
-  const dash = "—";
-  const cells = fc ? [
-    { l: t("fcDailyBudget"), v: fc.daily_budget_usd != null ? fmtMoney(fc.daily_budget_usd) : dash, s: `${t("fcRemaining")} ${fc.month_remaining_usd != null ? fmtMoney(fc.month_remaining_usd) : dash}` },
-    { l: t("fcMonthRunOut"), v: fc.month_days_left != null ? monthRunOutDate(fc.month_days_left) : dash, s: fc.month_days_left != null ? `~${Math.ceil(fc.month_days_left)} ${t("dUnit")}` : t("fcNotEnough") },
-    { l: t("fcProjectedPeriod"), v: fc.projected_period_cost_usd != null ? fmtMoney(fc.projected_period_cost_usd) : dash, s: t("fcByRecentRate") },
-    { l: t("fcFiveHourFull"), v: fc.five_hour_exhaust_in_min != null ? (fc.five_hour_exhaust_in_min <= 300 ? fmtDur(fc.five_hour_exhaust_in_min * 60) : t("fcNeverFull")) : dash, s: t("fcByRecentRate") },
-    { l: t("fcWeekLeft"), v: fc.week_days_left != null ? `~${fmtDur(fc.week_days_left * 86400)}` : dash, s: t("fcByRecentRate") },
-  ] : [];
-  $("forecast-grid").innerHTML = cells.map((c) => `
-    <div class="tc"><div class="tc-l">${c.l}</div><div class="tc-v">${c.v}</div><div class="tc-s">${c.s}</div></div>`).join("");
-  renderComparisonBlock(cmp);
-}
-
-function monthRunOutDate(daysLeft) {
-  const d = new Date();
-  d.setDate(d.getDate() + Math.ceil(daysLeft));
-  return `${d.getMonth() + 1}/${d.getDate()}`;
-}
-
-function renderComparisonBlock(cmp) {
-  const box = $("comparison-block");
-  if (!box) return;
-  if (!cmp.length) { box.innerHTML = ""; return; }
-  box.innerHTML = cmp.map((c) => {
-    const label = c.key === "week" ? t("weekThis") : t("periodThis");
-    const prevLabel = c.key === "week" ? t("weekLast") : t("periodLast");
-    const line = (x) => `${fmtMoney(x.total_cost_usd)} · ${fmtInt(x.request_count)} · ${fmtTokens(x.total_input_tokens + x.total_output_tokens + x.total_reasoning_tokens)}`;
-    const delta = deltaPct(c.current.total_cost_usd, c.previous.total_cost_usd);
-    const reqDelta = deltaPct(c.current.request_count, c.previous.request_count);
-    const tokDelta = deltaPct(c.current.total_input_tokens + c.current.total_output_tokens + c.current.total_reasoning_tokens,
-      c.previous.total_input_tokens + c.previous.total_output_tokens + c.previous.total_reasoning_tokens);
-    return `
-      <div class="cmp">
-        <div class="cmp-label">${label}</div>
-        <div class="cmp-line">${line(c.current)}</div>
-        <div class="cmp-label">${prevLabel}</div>
-        <div class="cmp-row"><span class="cmp-line">${line(c.previous)}</span><span class="cmp-delta ${delta && delta.startsWith("↑") ? "up" : "down"}">${delta || ""}</span></div>
-        <div class="cmp-sub">${reqDelta ? `${t("totalRequests")} ${reqDelta}` : ""}${reqDelta && tokDelta ? " · " : ""}${tokDelta ? `${t("totalTokens")} ${tokDelta}` : ""}</div>
-      </div>`;
-  }).join("");
-}
-
-/* 环比箭头: prev<=0 且 cur>0 视为新增; 两者皆 0 不显示 (与 Android deltaPct 同口径) */
-function deltaPct(cur, prev) {
-  cur = Number(cur) || 0; prev = Number(prev) || 0;
-  if (prev <= 0) return cur > 0 ? "↑new" : "";
-  const pct = (cur - prev) / prev * 100;
-  if (Math.abs(pct) < 0.5) return "±0%";
-  return `${pct > 0 ? "↑" : "↓"}${Math.abs(Math.round(pct))}%`;
-}
-
+/* ---------------- 统计页: 日历热力图 (Android parity) ---------------- */
 /* 热力图数据按账号缓存: 切指标不重拉, 切到统计页/换账号时重新加载 */
 let heatmapDays = [];
 let heatmapSeq = 0;
@@ -743,12 +611,18 @@ async function loadHeatmap() {
   } catch (e) { /* 统计页非关键块: 静默 */ }
 }
 function renderHeatmap() {
+  const card = $("heatmap-card");
   const body = $("heatmap-body");
   if (!body) return;
   if (!heatmapDays.length || !heatmapDays.some((d) => d.request_count > 0)) {
+    // 无历史数据: 保持隐藏, 只在有内容时才占位 (否则统计页顶部凭空多一张空卡)
+    if (card) card.hidden = true;
     body.innerHTML = `<div class="hint" style="padding:12px 16px">${t("heatmapNoData")}</div>`;
     return;
   }
+  // 卡片初始为 hidden, 数据到位后才显示 —— 否则永远不可见 (整卡连带
+  // renderHeatmap/loadHeatmap/#hm-dim 全部成了不可达代码)
+  if (card) card.hidden = false;
   const metric = state.heatmapDim;
   const val = (d) => metric === "cost" ? (d.total_cost_usd || 0)
     : metric === "requests" ? (d.request_count || 0)
@@ -770,7 +644,6 @@ function renderHeatmap() {
   html += `<span>${t("more")}</span></div>`;
   body.innerHTML = html;
 }
-
 /* ---------------- 统计页: 模型用量 ---------------- */
 let cModel = null;
 /* 图例点击 = 全页排除/恢复该模型 (顶部总卡 / Token 构成 / 排行 / 趋势一起变).
@@ -852,7 +725,6 @@ function chartModel(models) {
     <span class="mr-val" title="${escapeHtml(fmtInt(getVal(m)))}">${fmt(getVal(m))}</span></div>`).join("")
     : `<div class="mr-empty">${t("noData")}</div>`;
 }
-
 /* ---------------- 统计页: 用量趋势 ---------------- */
 let cTrend = null;
 function chartTrend(trend) {
@@ -893,7 +765,6 @@ function chartTrend(trend) {
   });
   cTrend.resize();
 }
-
 /* ---------------- 会话用量 ---------------- */
 let sesSeq = 0;
 async function loadSessions() {
@@ -941,7 +812,6 @@ function shortId(id) {
   const tail = s.slice(-6);
   return `${head}…${tail}`;
 }
-
 /* ---------------- 使用记录 ---------------- */
 let recSeq = 0;
 async function loadRecords() {
@@ -984,7 +854,6 @@ async function loadRecords() {
     if (seq === recSeq) body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
-
 /* ---------------- 模型图标 ---------------- */
 function modelIcon(m) {
   const s = String(m || "").toLowerCase();
@@ -997,7 +866,6 @@ function modelIcon(m) {
   const themed = dark && ["gpt", "grok", "mimo"].includes(name) ? `${name}-color` : name;
   return `<img src="icons/${themed}.svg" alt="${escapeHtml(m)}" title="${escapeHtml(m)}" style="width:16px;height:16px">`;
 }
-
 /* ---------------- 组装 ---------------- */
 function renderAll(data) {
   state.data = data;
@@ -1011,7 +879,6 @@ function renderAll(data) {
   if (statsVisible) {
     renderStatsTotal(data.totals);
     renderDetail6(data.totals);
-    renderForecastCard(data);
     chartModel(data.models);
     chartTrend(data.trend);
     $("trend-hint").textContent = t("trendHint");
@@ -1041,7 +908,6 @@ function maskWs(data) {
   const ws = data?.quota?.workspace_id || "";
   return ws.length > 12 ? ws.slice(0, 8) + "…" : ws;
 }
-
 /* ---------------- 同步 ---------------- */
 async function startSync(mode) {
   $("tb-refresh").disabled = true;
@@ -1089,19 +955,16 @@ function renderSettingsSyncProgress(progress) {
   $("set-sync-progress-desc").textContent = `${phase} · ${t("pageOf")} ${progress.page + 1}`;
   $("set-sync-progress-val").textContent = `${t("totalN")} ${fmtInt(progress.inserted)}`;
 }
-
 /* ---------------- 账户总览面板 (多账户聚合) ---------------- */
 let ovSeq = 0;
 let cOvTrendChart = null;
 const OV_COLORS = ["#7c5cf6", "#4f8ef7", "#22c55e", "#d97706", "#06b6d4", "#ec4899"];
-
 /* 开关控制侧边栏入口显隐; 关闭时若停留在总览页则退回首页 */
 function applyOverviewPanel(show) {
   const btn = document.getElementById("side-overview");
   if (btn) btn.hidden = !show;
   if (!show && state.page === "overview") switchPage("home");
 }
-
 async function loadOverview(quiet = false) {
   const seq = ++ovSeq;
   if (!quiet) {
@@ -1122,7 +985,6 @@ async function loadOverview(quiet = false) {
     if (!quiet) toast(e.message || t("loadFailed"), "err");
   }
 }
-
 function renderAccountOverview(data) {
   const accounts = (data.accounts || []).map((a, i) => ({ ...a, color: OV_COLORS[i % OV_COLORS.length] }));
   // ---- 顶部汇总: 今日合计 ----
@@ -1143,16 +1005,13 @@ function renderAccountOverview(data) {
   ];
   $("ov-summary-cards").innerHTML = cards.map((c) => `
     <div class="card kpi ${c.cls}"><div class="kpi-l">${c.l}</div><div class="kpi-v">${c.v}</div></div>`).join("");
-
   // ---- 7 日费用趋势对比 ----
   chartOvTrend(accounts);
-
   // ---- 账号卡片 ----
   $("ov-accounts").innerHTML = accounts.length
     ? accounts.map((a) => renderAccountCard(a)).join("")
     : `<div class="card ov-acc"><div class="ov-quota-empty">${t("noUsers")}</div></div>`;
 }
-
 function renderAccountCard(a) {
   // 配额三窗口: 有缓存时展示, 缓存未就绪 (后台刷新中) 显示占位
   let quotaHtml;
@@ -1161,7 +1020,7 @@ function renderAccountCard(a) {
       const used = Number(w.used) || 0;
       const cls = w.label === "5h Rolling" ? "c-rolling" : w.label === "Weekly" ? "c-week" : "c-month";
       return `<div class="ub ${cls} ov-ub">
-        <div class="ub-head"><span class="ub-l">${(QUOTA_LABEL[w.label] || (() => w.label))()}</span><span class="ub-rem">${t("remaining")} ${(Number(w.remaining) || 0).toFixed(0)}%</span></div>
+        <div class="ub-head"><span class="ub-l">${quotaLabel(w.label)}</span><span class="ub-rem">${t("remaining")} ${(Number(w.remaining) || 0).toFixed(0)}%</span></div>
         <div class="ub-bar"><div class="ub-bar-fill" style="width:${used}%"></div></div>
         <div class="ub-meta"><span>${t("used")} ${used.toFixed(0)}%</span><span>${t("resetsIn")} ${fmtDur(w.reset_in_sec)}</span></div>
       </div>`;
@@ -1188,7 +1047,6 @@ function renderAccountCard(a) {
     </div>
   </div>`;
 }
-
 /* 24h 迷你趋势: 纯 SVG 折线 (无 Chart 实例, 轻量随卡片渲染) */
 function sparklineSvg(values, color) {
   const w = 120, h = 30, n = values.length;
@@ -1201,7 +1059,6 @@ function sparklineSvg(values, color) {
     <polyline points="0,${h} ${pts.join(" ")} ${w},${h}" fill="${color}" opacity="0.12" stroke="none"/>
   </svg>`;
 }
-
 /* 7 日费用对比: 全部账号合计为 总费用/请求/Token 三条线, 与用量趋势样式一致 */
 function chartOvTrend(accounts) {
   const canvas = $("ov-trend-chart");
@@ -1249,7 +1106,6 @@ function chartOvTrend(accounts) {
   });
   cOvTrendChart.resize();
 }
-
 /* ---------------- 设置页 ---------------- */
 async function renderSettings() {
   try {
@@ -1280,14 +1136,11 @@ function syncSettingsPills() {
   document.querySelectorAll("#set-interval-pills .pill").forEach((b) => b.classList.toggle("active", Number(b.dataset.v) === Number(s.sync_interval_sec)));
   document.querySelectorAll("#set-window-pills .pill").forEach((b) => b.classList.toggle("active", (s.window_days == null ? "all" : String(s.window_days)) === b.dataset.v));
 }
-
 /* ---------------- 多用户: 顶栏切换器 ---------------- */
-
 /* 登录流程期间的账户变化监视: 登录窗是独立窗口, 成功后的跨窗口通知
    (load_url 同URL跳过 / evaluate_js 时序) 均不可靠, 用短轮询兜底保证
    账户列表/顶栏计数即时刷新. 5 分钟无变化自动停止. */
 let loginWatchTimer = null;
-
 /* 统一登录入口: mode = add (新增账号) / relogin (重登当前); provider = opencode / commandcode */
 async function startLogin(mode, provider) {
   startLoginWatch();
@@ -1301,7 +1154,6 @@ async function startLogin(mode, provider) {
     toast(prov === "commandcode" ? t("goatLoginNote") : t("loginNote"));
   } catch (e) { toast(e.message || t("loadFailed"), "err"); }
 }
-
 /* 登录对话框 (opencode / commandcode 通用): 内置登录窗 / 系统浏览器打开 /
    手动粘贴会话 Cookie (内置 WebView 白屏或被 Cloudflare 质询时的兜底) */
 function showLoginDialog(mode, provider) {
@@ -1368,7 +1220,6 @@ function showLoginDialog(mode, provider) {
     }
   };
 }
-
 /* 兼容旧入口: GOAT 添加账号对话框 */
 function showGoatLoginDialog() {
   showLoginDialog("add", "commandcode");
@@ -1420,7 +1271,6 @@ function resetRecordFilters() {
   state.sessions.page = 1;
   state.excludedModels.clear();  // 新账号模型集不同: 旧的排除项一并清掉
 }
-
 let menuSeq = 0;  // 用户菜单开关序号: 丢弃迟到的过期 /api/accounts 响应
 async function toggleUserMenu(force) {
   const menu = $("user-menu");
@@ -1470,7 +1320,6 @@ function renderUserMenu(accounts, activeId) {
   const mg = $("um-manage");
   if (mg) mg.addEventListener("click", () => { toggleUserMenu(false); switchPage("settings"); });
 }
-
 /* ---------------- 多用户: 设置页列表 ---------------- */
 async function fetchAccounts() {
   const r = await api("/api/accounts");
@@ -1594,7 +1443,6 @@ async function onUserRowAction(id, act) {
     });
   }
 }
-
 /* ---------------- 登录状态 ---------------- */
 let loginPollTimer = null;
 function showLoginOverlay(show) {
@@ -1630,7 +1478,6 @@ async function checkState() {
     await loadDashboard();
   } catch (e) { console.error("state check failed", e); }
 }
-
 /* 登录成功通知 (后端 evaluate_js 触发, 见 main.on_login_success):
    就地刷新数据/顶栏/账户列表, 不依赖整页重载 (同 URL load_url 可能被跳过) */
 window.gousageOnLoginSuccess = async function () {
@@ -1642,11 +1489,9 @@ window.gousageOnLoginSuccess = async function () {
   if (state.page === "settings") renderSettings().catch(() => {});
   else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
 };
-
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
   document.querySelectorAll(".side-item").forEach((btn) => btn.addEventListener("click", () => switchPage(btn.dataset.page)));
-
   document.querySelectorAll("#home-pills .pill").forEach((b) => b.addEventListener("click", () => {
     document.querySelectorAll("#home-pills .pill").forEach((x) => x.classList.remove("active"));
     b.classList.add("active"); state.range = b.dataset.r; loadDashboard();
@@ -1668,7 +1513,6 @@ function bindEvents() {
     b.classList.add("active"); state.heatmapDim = b.dataset.dim;
     renderHeatmap();
   });
-
   // ---- 导出/导入 (v2.2.0b): pywebview 系统对话框选路径, 后端写文件 ----
   async function pickSave(defaultName) {
     const a = await pywebviewApi();
@@ -1711,7 +1555,6 @@ function bindEvents() {
   $("ses-prev").addEventListener("click", () => { if (state.sessions.page > 1) { state.sessions.page--; loadSessions(); } });
   $("ses-next").addEventListener("click", () => { if (sesPageMax() >= state.sessions.page + 1) { state.sessions.page++; loadSessions(); } });
   $("rec-model-filter").addEventListener("change", (e) => { state.records.model = e.target.value; state.records.page = 1; loadRecords(); });
-
   // 半自动更新: 后台下载新版本 zip 到 ~/Downloads, 完成后 Finder 定位;
   // 失败兜底打开 Releases 页手动下载.
   async function downloadUpdateFlow(desc) {
@@ -1738,7 +1581,6 @@ function bindEvents() {
       });
     }
   }
-
   // 检查更新: 有新版 -> 弹窗 -> 应用内下载 zip 并在 Finder 定位
   $("btn-check-update").addEventListener("click", async () => {
     const btn = $("btn-check-update");
@@ -1770,7 +1612,6 @@ function bindEvents() {
       btn.textContent = prevText;
     }
   });
-
   document.querySelectorAll("#set-interval-pills .pill").forEach((b) => b.addEventListener("click", async () => {
     await api("/api/settings", { method: "PUT", body: JSON.stringify({ sync_interval_sec: Number(b.dataset.v) }) });
     state.settings = await api("/api/settings");
@@ -1811,7 +1652,6 @@ function bindEvents() {
     rerenderCharts();
   });
   // 账户操作已合并进「OpenCode 账户」卡片内的账号行 (relogin/logout 为行级动作)
-
   // 多用户: 顶栏切换器 + 设置页账户列表
   $("tb-login").addEventListener("click", () => toggleUserMenu());
   document.addEventListener("click", (e) => {
@@ -1835,7 +1675,6 @@ function bindEvents() {
   });
   bindTitlebar();
 }
-
 /* ---------------- 自动同步 ---------------- */
 let autoSyncTimer = null;
 function restartAutoSync() {
@@ -1848,7 +1687,6 @@ function restartAutoSync() {
     if (!prog || !prog.running) startSync("incremental");
   }, sec);
 }
-
 /* ---------------- 图表辅助 ---------------- */
 function cssVar(name) {
   return getComputedStyle(document.body).getPropertyValue(name).trim() || "#8a94a8";
@@ -1861,7 +1699,6 @@ function rerenderCharts() {
     chartTrend(state.data.trend);
   }
 }
-
 /* 窗口尺寸变化: 长防抖(250ms)后执行一次轻量 chart.resize()
    (只处理可见页图表 — hidden 页面容器尺寸为 0, resize() 会死循环卡死) */
 function safeResize(chart) {
@@ -1881,7 +1718,6 @@ window.addEventListener("resize", () => {
     if (!document.getElementById("page-overview").hidden) safeResize(cOvTrendChart);
   }, 250);
 });
-
 /* ---------------- 启动 ---------------- */
 let APP_VERSION = "";  // 后端版本号 (app/__init__.py), 唯一版本源
 (async function init() {

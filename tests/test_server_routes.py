@@ -100,26 +100,6 @@ def test_path_traversal_rejected(http):
 
 
 # ---------------------------------------------------------------------------
-# _time_to_ms: UTC naive (period_bounds 存储格式) 必须按 UTC 解释
-# ---------------------------------------------------------------------------
-
-
-def test_time_to_ms_naive_is_utc():
-    """回归: naive 串此前先命中 fromisoformat、.timestamp() 按本地时区解释,
-    非 UTC 时区下周期终点偏移数小时 (UTC+8 偏 8h), daily_budget 虚低、
-    周期对比窗口错位. 钉死语义: 空格分隔 naive 与同刻 ISO+Z 必须等值."""
-    from app.server import _time_to_ms
-
-    expected = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
-    assert _time_to_ms("2026-01-01 00:00:00") == expected
-    assert _time_to_ms("2026-01-01T00:00:00Z") == expected
-    assert _time_to_ms("2026-01-01T00:00:00+00:00") == expected
-    assert _time_to_ms("") is None
-    assert _time_to_ms(None) is None
-    assert _time_to_ms("not-a-date") is None
-
-
-# ---------------------------------------------------------------------------
 # _record_cycle_bounds: 配额响应 → 周期边界落库 (「本周期」筛选起点的数据源)
 # ---------------------------------------------------------------------------
 

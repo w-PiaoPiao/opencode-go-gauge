@@ -309,6 +309,17 @@ def _verify_digest(path: str, digest: str) -> None:
         raise RuntimeError(f"下载包校验失败 (SHA-256 不匹配): {actual[:16]}…")
 
 
+def _safe_tag(tag: str) -> str:
+    """远端 tag → 可安全拼进文件名的片段.
+
+    tag 来自远端 API, 仅做白名单字符过滤后再拼路径: _TAG_RE 的尾部
+    (?:[-+].*)? 允许 "/" 与 "..", 直接拼接可写到 dest_dir 之外.
+    抽成具名函数是为了能被测试直接断言 —— 过去这段只内联在 download_update 里,
+    测试只好把同一行正则抄一遍, 抄错也照样绿.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(tag)).strip(".") or "update"
+
+
 def download_update(dest_dir: str) -> dict[str, Any]:
     """检查更新并下载新版本 zip 到 dest_dir (调用方放后台线程执行).
 
@@ -331,31 +342,41 @@ def download_update(dest_dir: str) -> dict[str, Any]:
         os.makedirs(dest_dir, exist_ok=True)
         # tag 来自远端 API, 仅做白名单字符过滤后再拼路径: _TAG_RE 的尾部
         # (?:[-+].*)? 允许 "/" 与 "..", 直接拼接可写到 dest_dir 之外.
-        safe_tag = re.sub(r"[^A-Za-z0-9._-]", "_", result["latest"]).strip(".") or "update"
+        safe_tag = _safe_tag(result["latest"])
         dest = os.path.join(dest_dir, f"GoGauge-{safe_tag}{_PLATFORM_SUFFIX}{_ASSET_EXT}")
+        part = dest + ".part"
         req = urllib.request.Request(
             url, headers={"User-Agent": f"GoGauge/{__version__}"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            with open(dest + ".part", "wb") as fh:
-                while True:
-                    chunk = resp.read(256 * 1024)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-        # 完整性校验: 优先比对 GitHub 官方 SHA-256 摘要 (HTTPS 之外的供应链防线),
-        # release 未提供摘要时退回 zip CRC / exe PE 头自检, 防半截/损坏文件被直接安装
-        _verify_digest(dest + ".part", digest)
-        if _ASSET_EXT == ".zip":
-            import zipfile
-            with zipfile.ZipFile(dest + ".part") as zf:
-                bad = zf.testzip()
-                if bad is not None:
-                    raise RuntimeError(f"下载包损坏 (CRC 校验失败): {bad}")
-        else:
-            with open(dest + ".part", "rb") as fh:
-                if fh.read(2) != b"MZ":
-                    raise RuntimeError("下载包损坏 (非有效的 Windows 可执行文件)")
-        os.replace(dest + ".part", dest)  # .part 中间态防半截文件
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                with open(part, "wb") as fh:
+                    while True:
+                        chunk = resp.read(256 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+            # 完整性校验: 优先比对 GitHub 官方 SHA-256 摘要 (HTTPS 之外的供应链防线),
+            # release 未提供摘要时退回 zip CRC / exe PE 头自检, 防半截/损坏文件被直接安装
+            _verify_digest(part, digest)
+            if _ASSET_EXT == ".zip":
+                import zipfile
+                with zipfile.ZipFile(part) as zf:
+                    bad = zf.testzip()
+                    if bad is not None:
+                        raise RuntimeError(f"下载包损坏 (CRC 校验失败): {bad}")
+            else:
+                with open(part, "rb") as fh:
+                    if fh.read(2) != b"MZ":
+                        raise RuntimeError("下载包损坏 (非有效的 Windows 可执行文件)")
+            os.replace(part, dest)  # .part 中间态防半截文件
+        except Exception:
+            # 失败不留残骸: 否则校验不通过/网络中断会在下载目录堆一串
+            # GoGauge-<tag>-*.zip.part, 用户没要过也再没人会用
+            try:
+                os.unlink(part)
+            except OSError:
+                pass
+            raise
         result["state"] = "done"
         result["path"] = dest
         return result
