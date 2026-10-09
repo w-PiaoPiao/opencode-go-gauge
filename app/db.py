@@ -622,10 +622,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             conn.executescript(
                 """
                 ALTER TABLE usage_records RENAME TO usage_records_legacy;
-                -- 必须先显式删: 上面建表脚本里的 CREATE UNIQUE INDEX IF NOT EXISTS 已把
-                -- 该名字建在旧表上, 而 RENAME 会把索引一并带过去并沿用原名. 若不删,
-                -- 下面的 IF NOT EXISTS 会因重名跳过建索引, 新表最终没有任何唯一约束,
-                -- 之后每条 ON CONFLICT(account_id, usg_id) 都会报错.
+                -- RENAME 会把旧表上的索引一并带走并沿用原名, 所以下面不带
+                -- IF NOT EXISTS 的 CREATE UNIQUE INDEX 一旦撞上同名索引就会
+                -- 直接报错中断迁移 —— 显式删掉这个名字给新表让路 (旧形状下该
+                -- 索引本不该存在, 属防御: 同库被多版本代码交替打开过时会留下).
                 DROP INDEX IF EXISTS idx_usage_account_usgid;
                 CREATE TABLE usage_records (
                   usg_id TEXT NOT NULL,
@@ -659,6 +659,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                        cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id,
                        plan, synced_at, account_id, local_date FROM usage_records_legacy;
                 DROP TABLE usage_records_legacy;
+                -- 旧表的其余索引跟着 RENAME 过来, 又随上面这行 DROP TABLE 一起
+                -- 消失 (索引属于旧表), 必须就地重建: 迁移 2/6 的 IF NOT EXISTS
+                -- 补建要等到下次启动才跑, 不重建则升级后的**首个进程**全程退化成
+                -- 全表扫描 (dashboard 一次刷新 6 条周期聚合).
+                CREATE INDEX IF NOT EXISTS idx_usage_time
+                  ON usage_records(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_usage_account_time
+                  ON usage_records(account_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_usage_account_localdate
+                  ON usage_records(account_id, local_date);
+                CREATE INDEX IF NOT EXISTS idx_usage_account_model
+                  ON usage_records(account_id, model);
                 """
             )
         else:

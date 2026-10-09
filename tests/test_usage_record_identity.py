@@ -113,6 +113,12 @@ def test_migration_rebuilds_legacy_global_pk(tmp_db):
           account_id INTEGER NOT NULL DEFAULT 1,
           local_date TEXT
         );
+        -- 夹具必须带上真实旧库的索引: 重建表时它们会随旧表一起消失,
+        -- 不写在这里就永远测不出"迁移把索引弄丢"这一路 (见下方索引断言)
+        CREATE INDEX idx_usage_time ON usage_records(created_at DESC);
+        CREATE INDEX idx_usage_account_time ON usage_records(account_id, created_at DESC);
+        CREATE INDEX idx_usage_account_localdate ON usage_records(account_id, local_date);
+        CREATE INDEX idx_usage_account_model ON usage_records(account_id, model);
         INSERT INTO accounts (id, name, workspace_id, token, created_at, updated_at)
           VALUES (1, 'A', 'ws-A', 'enc:v2:x', '2026-01-01', '2026-01-01'),
                  (2, 'B', 'ws-B', 'enc:v2:y', '2026-01-01', '2026-01-01');
@@ -142,3 +148,21 @@ def test_migration_rebuilds_legacy_global_pk(tmp_db):
         for r in db.get_db().execute("SELECT id, token FROM accounts").fetchall()
     }
     assert tokens == {1: "enc:v2:x", 2: "enc:v2:y"}
+
+    # 重建表不得弄丢旧库的索引: 索引跟随 RENAME 挂在旧表上, 又随 DROP TABLE
+    # 一起消失; 迁移 2/6 的补建要到下次启动才生效, 所以必须在迁移里就地重建
+    # —— 否则升级后的首个进程一直跑全表扫描.
+    indexes = {
+        r["name"]
+        for r in db.get_db().execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='index' AND tbl_name='usage_records'"
+        ).fetchall()
+    }
+    assert {
+        "idx_usage_account_usgid",
+        "idx_usage_time",
+        "idx_usage_account_time",
+        "idx_usage_account_localdate",
+        "idx_usage_account_model",
+    } <= indexes, f"迁移后缺少索引: {indexes}"
