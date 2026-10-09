@@ -140,7 +140,6 @@ fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) 
                         resetText = "${s.resetsIn} ${Fmt.dur(w.resetInSec.toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon)}",
                         accent = accent,
                         accentEnd = accentEnd,
-                        forecastText = forecastLine(w.label, vm.forecast, s),
                     )
                 }
             }
@@ -294,28 +293,6 @@ private fun quotaLabel(label: String, s: Strings): String = when (label) {
     else -> label
 }
 
-/**
- * 每窗口预测小字 (v2.2.0b burn-rate) — 月窗口显示预计用尽日, 5h 显示打满时刻,
- * 周窗口显示剩余可用天数。预测缺失 (配额未就绪/数据不足) 返回 null 不渲染。
- */
-private fun forecastLine(label: String, f: io.github.yphyphyph.gogauge.domain.ForecastEngine.Forecast?, s: Strings): String? {
-    if (f == null) return null
-    return when (label) {
-        "5h Rolling" -> f.fiveHourExhaustInMin?.let { min ->
-            // >300 分钟 = 按当前速率到重置也打不满, 换提示语
-            if (min <= 300) s.fc5hLine.format(Fmt.dur(min * 60, s.dUnit, s.hUnit, s.mUnit, s.soon))
-            else s.fcNeverFull
-        }
-        "Weekly" -> f.weekDaysLeft?.let { d ->
-            s.fcWeekLine.format(Fmt.dur((d * 86400).toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon))
-        }
-        "Monthly" -> f.monthDaysLeft?.let { d ->
-            val runOut = java.time.LocalDate.now().plusDays(Math.ceil(d).toLong())
-            s.fcMonthLine.format("%d/%d".format(runOut.monthValue, runOut.dayOfMonth))
-        }
-        else -> null
-    }
-}
 
 @Composable
 private fun QuotaSkeleton() {

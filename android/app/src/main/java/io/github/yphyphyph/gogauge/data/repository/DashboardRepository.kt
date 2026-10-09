@@ -9,7 +9,6 @@ import io.github.yphyphyph.gogauge.data.model.DashboardData
 import io.github.yphyphyph.gogauge.data.model.PageResult
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
 import io.github.yphyphyph.gogauge.data.model.QuotaWindow
-import io.github.yphyphyph.gogauge.domain.ForecastEngine
 import io.github.yphyphyph.gogauge.data.model.SessionStat
 import io.github.yphyphyph.gogauge.data.model.SyncProgress
 import io.github.yphyphyph.gogauge.data.model.SyncState
@@ -133,9 +132,6 @@ class DashboardRepository(
 
         /** 一次性维护标记: 旧版 local_date=NULL 回填已完成 (见 backfillLegacyLocalDatesIfNeeded)。 */
         private const val FLAG_LOCAL_DATE_BACKFILL = "maintenance_local_date_backfill_v1"
-
-        /** 预测日均耗的采样天数。 */
-        private const val FORECAST_AVG_DAYS = 14
 
         /** 热力图窗口 (18 周)。 */
         private const val HEATMAP_DAYS = 126
@@ -517,64 +513,6 @@ class DashboardRepository(
         return AccountsOverviewData(accounts = list, usdCny = usdCny())
     }
 
-    // ------------------------------------------------------------------
-    // Period comparison (v2.2.0b — 本周 vs 上周 / 本周期 vs 上一周期)
-    // ------------------------------------------------------------------
-
-    /** 一组对比: 标签键 ("week"/"period") + 当前区间与上一区间的聚合。 */
-    data class PeriodCompare(val key: String, val current: Totals, val previous: Totals)
-
-    /**
-     * 周期对比数据 — 日历周 (周一为界) + 月度计费周期 (GOAT 真实跨度,
-     * opencode 30 天滚动)。周期起点缺失时只返回周对比。
-     */
-    suspend fun periodComparison(): List<PeriodCompare> {
-        val aid = activeAccountId()
-        if (aid == 0) return emptyList()
-        val out = mutableListOf<PeriodCompare>()
-
-        val today = java.time.LocalDate.now()
-        val thisMonday = today.with(java.time.DayOfWeek.MONDAY)
-        out += PeriodCompare(
-            "week",
-            usageDao.totalsBetween(thisMonday.toString(), thisMonday.plusDays(7).toString(), aid),
-            usageDao.totalsBetween(thisMonday.minusDays(7).toString(), thisMonday.toString(), aid),
-        )
-
-        val bounds = db.settingsDao().getPeriodBounds(aid)
-        val cycleStartUtc = MonthlyCycle.startWithPeriod(
-            bounds.first, bounds.second,
-            db.settingsDao().getMonthlyReset(aid), System.currentTimeMillis(),
-        )
-        if (cycleStartUtc != null) {
-            val startMs = utcNaiveToMs(cycleStartUtc) ?: return out
-            val endMs = bounds.second?.let { MonthlyCycle.normalize(it) }?.let { utcNaiveToMs(it) }
-                ?: (startMs + MonthlyCycle.PERIOD_DAYS * 86_400_000L)
-            val spanMs = (endMs - startMs).takeIf { it > 0 }
-                ?: MonthlyCycle.PERIOD_DAYS * 86_400_000L
-            // 当前周期到今天为止 (endMs 可能在未来), 上周期取等长前驱
-            val startLocal = localDateOf(startMs)
-            out += PeriodCompare(
-                "period",
-                usageDao.totalsBetween(startLocal, localDateOf(startMs + spanMs), aid),
-                usageDao.totalsBetween(localDateOf(startMs - spanMs), startLocal, aid),
-            )
-        }
-        return out
-    }
-
-    /** UTC "yyyy-MM-dd HH:mm:ss" (MonthlyCycle 存储格式) -> epoch ms。 */
-    private fun utcNaiveToMs(raw: String): Long? = try {
-        java.time.LocalDateTime.parse(raw, java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-            .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-    } catch (e: Exception) {
-        null
-    }
-
-    /** epoch ms -> 本地日 "yyyy-MM-dd" (local_date 列口径)。 */
-    private fun localDateOf(ms: Long): String =
-        java.time.Instant.ofEpochMilli(ms).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
-
     /** 日历热力图数据 (v2.2.0b) — 近 18 周逐日聚合, chartsFirst 口径与统计页一致。 */
     suspend fun heatmapDaily(): List<io.github.yphyphyph.gogauge.data.model.DailyStat> {
         val aid = activeAccountId()
@@ -584,59 +522,6 @@ class DashboardRepository(
         } else {
             usageDao.dailyStats(HEATMAP_DAYS, aid)
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Burn-rate forecast (v2.2.0b — 活跃账号视角, 纯本地计算)
-    // ------------------------------------------------------------------
-
-    /**
-     * 组装预测输入并计算 — 配额未就绪 (刚切账号/首次进入) 返回 null, UI 显示占位。
-     * 口径与 loadDashboard 一致: commandcode 且 charts 就绪时逐日/周期聚合走 usage_charts。
-     */
-    suspend fun buildForecast(): ForecastEngine.Forecast? {
-        val aid = activeAccountId()
-        val q = _quota.value?.takeIf { it.success } ?: return null
-        val provider = syncDao.getAccountProvider(aid)
-        val chartsFirst = provider == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null
-
-        val daily = if (chartsFirst) chartDao.dailyStats(FORECAST_AVG_DAYS, aid)
-        else usageDao.dailyStats(FORECAST_AVG_DAYS, aid)
-        val dailyCosts = daily.map { ForecastEngine.DayCost(it.date, it.totalCostUsd) }
-
-        // 本周期已耗 $ (与「本月」筛选同口径)
-        val bounds = db.settingsDao().getPeriodBounds(aid)
-        val cycleStart = MonthlyCycle.startWithPeriod(
-            bounds.first, bounds.second,
-            db.settingsDao().getMonthlyReset(aid), System.currentTimeMillis(),
-        )
-        val periodCost = (if (chartsFirst) chartDao.totals("month", aid, cycleStart)
-        else usageDao.totals("month", aid, cycleStart)).totalCostUsd
-        // 近 2h 速率样本: GOAT 明细仅保留 24h, 覆盖近 2h 足够
-        val recent2h = usageDao.recentCostUsd(aid, 2).cost
-
-        fun window(label: String): QuotaWindow? = q.windows.firstOrNull { it.label == label }
-        val monthly = window("Monthly")
-        val fiveHour = window("5h Rolling")
-        val week = window("Weekly")
-
-        val input = ForecastEngine.Input(
-            dailyCosts = dailyCosts,
-            periodStartMs = q.periodStart?.let { parseIsoInstant(it)?.toEpochMilli() },
-            periodEndMs = (q.periodEnd ?: monthly?.resetAt)?.let { parseIsoInstant(it)?.toEpochMilli() },
-            monthUsedPercent = monthly?.used,
-            monthRemainingPercent = monthly?.remaining,
-            monthRemainingAmount = monthly
-                ?.takeIf { it.unit == "$" && it.total > 0 }
-                ?.let { Math.round(it.total * it.remaining / 100.0 * 100) / 100.0 },
-            fiveHourCapAmount = fiveHour?.takeIf { it.unit == "$" && it.total > 0 }?.total,
-            weekCapAmount = week?.takeIf { it.unit == "$" && it.total > 0 }?.total,
-            fiveHourUsedPercent = fiveHour?.used,
-            weekUsedPercent = week?.used,
-            periodCostUsd = periodCost,
-            recent2hCost = recent2h,
-        )
-        return ForecastEngine.forecast(input)
     }
 
     // ------------------------------------------------------------------

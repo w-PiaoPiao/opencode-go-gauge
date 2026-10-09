@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -56,14 +57,27 @@ def test_verify_digest_rejects_malformed_hex(tmp_path, monkeypatch):
 
 
 def test_download_filename_tag_is_sanitized(tmp_path, monkeypatch):
-    """远端 tag 含路径分隔符/上跳时, 下载路径不得逃出 dest_dir."""
+    """远端 tag 含路径分隔符/上跳时, 下载路径不得逃出 dest_dir.
+
+    过去这个用例只断言 state == "error": 摘要缺失本就会 fail-closed, 与文件名
+    无关; 即使把消毒整段删掉, 中间目录不存在导致 open() 抛 FileNotFoundError,
+    断言照样成立. 这里给一份**合法**摘要让写入真正走完, 再断言落点.
+    """
+    payload = b"MZ" + b"\x00" * 32  # 模拟 exe, 走 PE 头自检分支
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+
     monkeypatch.setattr(
         updater, "check_update",
-        lambda: {"has_update": True, "latest": "v1.0.2/../../evil-macos"},
+        lambda: {"has_update": True, "latest": "v1.0.2/../../evil"},
     )
-    monkeypatch.setattr(updater, "fetch_asset_info", lambda tag: ("https://x/y.zip", ""))
+    monkeypatch.setattr(updater, "fetch_asset_info", lambda tag: ("https://x/y.zip", digest))
 
     class _Resp:
+        # 读一次给内容, 之后返回 EOF —— 必须如此: 下载循环靠 read() 返回空串收尾,
+        # 每次都给内容会无限循环
+        def __init__(self):
+            self._sent = False
+
         def __enter__(self):
             return self
 
@@ -71,21 +85,68 @@ def test_download_filename_tag_is_sanitized(tmp_path, monkeypatch):
             return False
 
         def read(self, _n):
-            return b""
+            if self._sent:
+                return b""
+            self._sent = True
+            return payload
 
     monkeypatch.setattr(updater.urllib.request, "urlopen", lambda *a, **k: _Resp())
 
     res = updater.download_update(str(tmp_path))
-    # 摘要缺失 -> 被 fail-closed 拦下, 不会落盘
+
+    assert res["state"] == "done", res
+    # 落点必须在 dest_dir 内, 且不得出现任何分隔符残留
+    written = tmp_path / Path(res["path"]).name
+    assert Path(res["path"]).parent == tmp_path
+    assert written.exists()
+    assert "/" not in written.name and "\\" not in written.name
+    # 没有逃逸到 dest_dir 之外
+    assert not (tmp_path.parent / "evil-macos-macos.exe").exists()
+    # .part 中间态不应残留
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_failed_download_leaves_no_partial_file(tmp_path, monkeypatch):
+    """下载/校验失败不留 .part 残骸 (下载目录会堆一串用户没要过的文件)."""
+    monkeypatch.setattr(
+        updater, "check_update",
+        lambda: {"has_update": True, "latest": "v9.9.9"},
+    )
+    # 摘要合法但内容不是 PE —— 会在结构自检处失败
+    monkeypatch.setattr(
+        updater, "fetch_asset_info",
+        lambda tag: ("https://x/y.zip", "sha256:" + "0" * 64),
+    )
+
+    class _Resp:
+        def __init__(self):
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, _n):
+            if self._sent:
+                return b""
+            self._sent = True
+            return b"not-an-exe"
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", lambda *a, **k: _Resp())
+
+    res = updater.download_update(str(tmp_path))
+
     assert res["state"] == "error"
-    assert not (tmp_path.parent / "evil-macos-macos.zip").exists()
+    assert list(tmp_path.glob("*")) == [], f"残留文件: {list(tmp_path.glob('*'))}"
 
 
 def test_sanitized_name_contains_no_separators():
-    """直接验证消毒逻辑: 过滤后只保留白名单字符."""
-    import re as _re
-
-    for raw in ("v1.0.2/../../evil-macos", "v1.0.2", "v2.1.0c-macos", ".."):
-        safe = _re.sub(r"[^A-Za-z0-9._-]", "_", raw).strip(".") or "update"
+    """直接验证消毒逻辑: 过滤后只保留白名单字符 (调用生产代码, 非抄一遍正则)."""
+    for raw in ("v1.0.2/../../evil-macos", "v1.0.2", "v2.1.0c-macos", "..", "a/b\\c"):
+        safe = updater._safe_tag(raw)
         assert "/" not in safe and "\\" not in safe
         assert not safe.startswith("..")
+    assert updater._safe_tag("..") == "update"
+    assert updater._safe_tag("v2.1.0c-macos") == "v2.1.0c-macos"

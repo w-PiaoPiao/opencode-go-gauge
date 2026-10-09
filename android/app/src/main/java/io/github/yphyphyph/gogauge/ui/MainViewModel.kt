@@ -80,16 +80,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var dashboard by mutableStateOf<DashboardData?>(null)
         private set
-    /**
-     * Burn-rate 预测 (v2.2.0b) — 随 dashboard 重载联动刷新; 配额未就绪时为 null。
-     */
-    var forecast by mutableStateOf<io.github.yphyphyph.gogauge.domain.ForecastEngine.Forecast?>(null)
-        private set
-
-    /** 周期对比 (本周 vs 上周 / 本周期 vs 上一周期) — 与 forecast 同步加载。 */
-    var periodComparison by mutableStateOf<List<DashboardRepository.PeriodCompare>?>(null)
-        private set
-
     /** 日历热力图逐日数据 (近 18 周)。 */
     var heatmapDays by mutableStateOf<List<io.github.yphyphyph.gogauge.data.model.DailyStat>>(emptyList())
         private set
@@ -398,7 +388,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (seq != dashSeq) return@launch // 丢弃过期响应, 防口径串写
                 dashboard = data
                 dashboardVersion++
-                loadForecast()
+                loadHeatmap()
             } catch (e: CancellationException) {
                 throw e // viewModelScope 取消时正常退出, 不当加载失败记录
             } catch (e: Exception) {
@@ -407,23 +397,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Burn-rate 预测 + 周期对比 + 热力图数据重算 (配额未就绪 → forecast 置 null, UI 显示占位)。 */
-    private fun loadForecast() {
+    /** 日历热力图数据重算 (随 dashboard 重载联动刷新)。 */
+    private fun loadHeatmap() {
         scope.launch {
             try {
-                forecast = repo.buildForecast()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                android.util.Log.e("GoGauge", "loadForecast failed", e)
-            }
-            try {
-                periodComparison = repo.periodComparison()
                 heatmapDays = repo.heatmapDaily()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("GoGauge", "loadComparison failed", e)
+                android.util.Log.e("GoGauge", "loadHeatmap failed", e)
             }
         }
     }

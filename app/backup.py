@@ -117,15 +117,39 @@ def export_backup(path: str) -> int:
     return len(records)
 
 
+MAX_IMPORT_BYTES = 512 * 1024 * 1024  # 解压后 512 MiB 上限 (见 _read_gzip_capped)
+
+
+def _read_gzip_capped(path: str, limit: int = MAX_IMPORT_BYTES) -> bytes:
+    """读取 gzip 内容并对**解压后**体积设上限.
+
+    gzip.open().read() 是无界的: 归档声明的压缩体积只有几 MB, 展开可达数 GB,
+    直接把进程 OOM 掉 (MemoryError 还没被捕获). 这里分块读, 越限即中止.
+    """
+    with gzip.open(path, "rb") as fh:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise ValueError(
+                    f"备份文件解压后超过 {limit // (1024 * 1024)} MiB, 已中止导入"
+                )
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def import_backup(path: str) -> dict[str, Any]:
     """导入 gzip JSON 备份并合并.
 
-    - 记录按 usg_id 幂等 upsert (insert_usage_records 内部已处理);
+    - 记录按 (account_id, usg_id) 幂等 upsert (insert_usage_records 内部已处理);
     - 账号按 (provider, workspace_id) 去重, 已存在则记录映射到现有账号,
-      否则重建空 token 占位行 (凭证不可迁移, 需重新登录) 并恢复备份中的名称。
+      否则重建空 token 占位行 (凭证不可迁移, 需重新登录) 并恢复备份中的名称.
     """
-    with gzip.open(path, "rb") as fh:
-        body = json.loads(fh.read().decode("utf-8"))
+    body = json.loads(_read_gzip_capped(path).decode("utf-8"))
     if not isinstance(body, dict) or body.get("app") != "GoGauge":
         raise ValueError("不是有效的 GoGauge 备份文件")
     accounts = body.get("accounts") or []

@@ -645,7 +645,7 @@ class TrayIcon:
             _tray_ready = True
             return True
         except Exception as exc:  # noqa: BLE001
-            print(f"[tray] 托盘启动失败: {exc}", flush=True)
+            _mlog(f"[tray] 托盘启动失败: {exc}")
             _tray_ready = False
             return False
 
@@ -753,8 +753,14 @@ class WindowApi:
             result = win.create_file_dialog(webview.SAVE_DIALOG, save_filename=default_name)
             # pywebview 各后端返回 list/tuple/str 不一, 统一取第一个非空项
             if isinstance(result, (list, tuple)):
-                return str(result[0]) if result else None
-            return str(result) if result else None
+                picked = str(result[0]) if result else None
+            else:
+                picked = str(result) if result else None
+            # 登记为用户亲自选定的路径: /api/export/* 只认登记过的路径, 避免本机
+            # 任意进程借本应用覆写任意文件 (confused deputy)
+            if picked:
+                server.approve_path(picked)
+            return picked
         except Exception:  # noqa: BLE001
             return None
 
@@ -772,8 +778,13 @@ class WindowApi:
                 file_types=("GoGauge 备份 (*.json.gz;*.gz)", "所有文件 (*.*)"),
             )
             if isinstance(result, (list, tuple)):
-                return str(result[0]) if result else None
-            return str(result) if result else None
+                picked = str(result[0]) if result else None
+            else:
+                picked = str(result) if result else None
+            # 同 pick_save_path: 只有用户在对话框里选过的文件才允许被导入
+            if picked:
+                server.approve_path(picked)
+            return picked
         except Exception:  # noqa: BLE001
             return None
 
@@ -1161,7 +1172,7 @@ def main() -> None:
         try:
             lw.show()
         except Exception as exc:  # noqa: BLE001 窗口可能被用户手动关闭, 重建
-            print(f"[main] login window reopen: {exc}", flush=True)
+            _mlog(f"[main] login window reopen: {exc}")
             _recreate_login_window(provider)
             return
         _start_watcher(lw, provider)

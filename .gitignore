@@ -13,6 +13,7 @@ tests/evidence/
 .pytest_cache/
 .venv/
 venv/
+.venv-build/
 
 # 编辑器 / AI 工具
 .vscode/
