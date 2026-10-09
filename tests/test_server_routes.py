@@ -147,3 +147,32 @@ def test_record_cycle_bounds_garbage_never_raises(tmp_db):
         "windows": [{"label": "Monthly", "reset_at": "bad"}],
     })
     assert db.period_bounds(1) == (None, None)
+
+
+def test_attach_forecast_annotates_windows_without_mutating_cache():
+    """dashboard 的 quota 窗口带打满预测字段, 且缓存对象 (接口原始形状) 不被污染."""
+    quota = {
+        "success": True,
+        "period_start": "2026-10-08T00:00:00Z",
+        "period_end": "2026-11-08T00:00:00Z",
+        "windows": [
+            {"label": "5h Rolling", "used": 42.0, "reset_in_sec": 12000},
+            {"label": "Weekly", "used": 20.0, "reset_in_sec": 518400},
+            {"label": "Monthly", "used": 3.0, "reset_in_sec": 2592000},
+        ],
+    }
+    out = server._attach_forecast(quota)
+    assert out["windows"][0]["forecast"] == {"state": "fill", "sec": 8286}
+    assert out["windows"][1]["forecast"] == {"state": "fill", "sec": 4 * 86400}
+    assert out["windows"][2]["forecast"] == {"state": "no_fill"}
+    assert out is not quota
+    assert all("forecast" not in w for w in quota["windows"])
+
+
+def test_attach_forecast_passthrough_when_unavailable():
+    """失败/空窗口的配额原样返回, 不给前端制造半截字段."""
+    assert server._attach_forecast(None) is None
+    failed = {"success": False, "error": "x", "windows": []}
+    assert server._attach_forecast(failed) is failed
+    no_windows = {"success": True}
+    assert server._attach_forecast(no_windows) is no_windows

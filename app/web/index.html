@@ -85,7 +85,7 @@
         <div class="card-h"><h3 data-i18n="tokenBreakdown">Token 构成</h3></div>
         <div class="d6-grid" id="stats-detail6"></div>
       </div>
-      <div class="two-col">
+      <div class="two-col" id="stats-main-row">
         <div class="card model-rank">
           <div class="card-h"><h3 data-i18n="modelUsage">模型用量</h3><div class="seg" id="mr-dim"><button class="active" data-dim="input" data-i18n="input">输入</button><button data-dim="output" data-i18n="output">输出</button><button data-dim="cost" data-i18n="cost">成本</button></div></div>
           <div class="mr-body">
@@ -98,9 +98,15 @@
           <div class="chart-box" style="min-height:240px"><canvas id="trend-chart"></canvas></div>
         </div>
       </div>
-      <div class="card" id="heatmap-card" hidden>
-        <div class="card-h"><h3 data-i18n="heatmapTitle">日历热力图</h3><div class="seg" id="hm-dim"><button class="active" data-dim="cost" data-i18n="cost">成本</button><button data-dim="requests" data-i18n="totalRequests">总请求</button><button data-dim="tokens" data-i18n="totalTokens">总 TOKEN</button></div></div>
-        <div class="hm-body" id="heatmap-body"></div>
+      <div class="two-col" id="heatmap-row" hidden>
+        <div class="card" id="heatmap-card">
+          <div class="card-h"><h3 data-i18n="heatmapTitle">日历热力图</h3><div class="seg" id="hm-dim"><button class="active" data-dim="cost" data-i18n="cost">成本</button><button data-dim="requests" data-i18n="totalRequests">总请求</button><button data-dim="tokens" data-i18n="totalTokens">总 TOKEN</button></div></div>
+          <div class="hm-body" id="heatmap-body"></div>
+        </div>
+        <div class="card model-trend-card">
+          <div class="card-h"><h3 data-i18n="mtTitle">模型用量趋势</h3><span class="hint" data-i18n="trendHint">30 天</span></div>
+          <div class="chart-box" style="min-height:170px"><canvas id="mt-chart"></canvas></div>
+        </div>
       </div>
     </section>
 

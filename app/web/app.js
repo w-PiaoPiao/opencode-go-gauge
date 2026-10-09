@@ -10,6 +10,7 @@ const I18N = {
     todayTrend: "今日趋势", hours24: "24 小时",
     statsTitle: "用量统计", tokenBreakdown: "Token 构成",
     modelUsage: "模型用量", input: "输入", output: "输出", cost: "成本",
+    mtTitle: "模型用量趋势",
     usageTrend: "用量趋势", usageRecords: "使用记录", allModels: "全部模型",
     recordsPage: "使用记录",
     sessionUsage: "会话用量", colSession: "会话", colKey: "Key 名称", colLastUsed: "最后使用", colRequests: "请求/Token", unassigned: "未归属",
@@ -53,6 +54,7 @@ const I18N = {
     quitApp: "退出应用",
     rolling: "滚动用量", weekly: "每周用量", monthly: "每月用量",
     remaining: "剩余", used: "已用", resetsIn: "重置于",
+    fcExhaust: "预计耗尽于 %1", fcNeverFull: "预计不会打满",
     hitRate: "缓存命中率", hitAmount: "缓存命中量", totalTokens: "总 TOKEN 消耗",
     totalRequests: "总请求", totalCost: "总费用", sessions: "会话数",
     hit: "命中", miss: "未命中", pctOfInput: "占输入", inclCache: "含缓存命中",
@@ -102,6 +104,7 @@ const I18N = {
     todayTrend: "Today's Trend", hours24: "24 Hours",
     statsTitle: "Usage Stats", tokenBreakdown: "Token Breakdown",
     modelUsage: "Model Usage", input: "Input", output: "Output", cost: "Cost",
+    mtTitle: "Model Usage Trend",
     usageTrend: "Usage Trend", usageRecords: "Usage Records", allModels: "All Models",
     recordsPage: "Records",
     sessionUsage: "Session Usage", colSession: "Session", colKey: "Key Name", colLastUsed: "Last Used", colRequests: "Requests/Token", unassigned: "Unassigned",
@@ -145,6 +148,7 @@ const I18N = {
     quitApp: "Quit App",
     rolling: "Rolling Usage", weekly: "Weekly Usage", monthly: "Monthly Usage",
     remaining: "Remaining", used: "Used", resetsIn: "Resets in",
+    fcExhaust: "Runs out in %1", fcNeverFull: "Won't fill before reset",
     hitRate: "Cache Hit Rate", hitAmount: "Cache Hits", totalTokens: "Total Tokens",
     totalRequests: "Requests", totalCost: "Total Cost", sessions: "Sessions",
     hit: "hit", miss: "missed", pctOfInput: "of input", inclCache: "incl. cache hits",
@@ -210,6 +214,12 @@ let state = {
   settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true },
 };
 const COLOR = { input: "#4f8ef7", output: "#22c55e", reasoning: "#a78bfa", cache: "#06b6d4", cost: "#d97706" };
+/* 模型环形图 / 堆叠趋势图共享配色: 同一模型在两图中同色 (第 6 槽粉红为扩展位) */
+const MODEL_PALETTE = [COLOR.input, COLOR.output, COLOR.reasoning, COLOR.cache, COLOR.cost, "#ec4899"];
+/* 模型在当前维度 (输入/输出/成本) 的取值口径 —— 环形图与堆叠图共用, 保证排序同源 */
+function modelDimValue(m, dim) {
+  return dim === "input" ? m.total_input_tokens : dim === "output" ? m.total_output_tokens : m.total_cost_usd;
+}
 /* 图表动画由设置 chart_animation 控制 (默认关闭: 低配设备上每次刷新重建
    动画要在 N100 级小主机/软件渲染的 WebView 里重合成上百帧, 是掉帧大头).
    关闭用 false; 开启必须还原"出厂默认对象"而非 true —— Chart.js 的
@@ -449,7 +459,10 @@ function switchPage(page) {
   $("page-" + page).hidden = false;
   document.querySelectorAll(".side-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (page === "home" || page === "stats") loadDashboard();
-  if (page === "stats") loadHeatmap().catch(() => {});  // 热力图独立端点: 不随 dashboard 每次刷新重拉
+  if (page === "stats") {  // 热力图/模型趋势为独立端点: 不随 dashboard 每次刷新重拉
+    loadHeatmap().catch(() => {});
+    loadModelTrend().catch(() => {});
+  }
   if (page === "overview") loadOverview().catch(() => {});
   if (page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
   if (page === "settings") renderSettings();
@@ -520,14 +533,24 @@ function renderUsageBlocks(quota) {
       used: used,
       remaining: (Number(w.remaining) || 0).toFixed(0) + "%",
       reset: `${t("resetsIn")} ${fmtDur(w.reset_in_sec)}`,
+      fc: forecastText(w.forecast),
     });
   }
   row.innerHTML = blocks.map((b) => `
     <div class="ub ${b.cls}">
       <div class="ub-head"><span class="ub-l">${b.label}</span><span class="ub-rem">${t("remaining")} ${b.remaining}</span></div>
       <div class="ub-bar"><div class="ub-bar-fill" style="width:${b.used}%"></div></div>
-      <div class="ub-meta"><span>${t("used")} ${b.used.toFixed(0)}%</span><span>${b.reset}</span></div>
+      <div class="ub-meta"><span>${t("used")} ${b.used.toFixed(0)}%${b.fc}</span><span>${b.reset}</span></div>
     </div>`).join("");
+}
+/* 配额条预测小字 (后端 app/forecast.py): 会打满 →「预计耗尽于 X」, 按当前速率
+   重置前用不完 →「预计不会打满」; 样本不足/已打满 (forecast 为 null) → 不显示.
+   格式与「重置于」同用 fmtDur, 数值与显示同源可直比 */
+function forecastText(fc) {
+  if (!fc) return "";
+  if (fc.state === "fill") return ` · <span class="ub-fc">${t("fcExhaust").replace("%1", fmtDur(fc.sec))}</span>`;
+  if (fc.state === "no_fill") return ` · <span class="ub-fc">${t("fcNeverFull")}</span>`;
+  return "";
 }
 /* ---------------- 首页: 用量概览 6 格 ---------------- */
 function renderOverview(totals) {
@@ -611,18 +634,18 @@ async function loadHeatmap() {
   } catch (e) { /* 统计页非关键块: 静默 */ }
 }
 function renderHeatmap() {
-  const card = $("heatmap-card");
+  const row = $("heatmap-row");
   const body = $("heatmap-body");
   if (!body) return;
   if (!heatmapDays.length || !heatmapDays.some((d) => d.request_count > 0)) {
-    // 无历史数据: 保持隐藏, 只在有内容时才占位 (否则统计页顶部凭空多一张空卡)
-    if (card) card.hidden = true;
+    // 无历史数据: 整行 (热力图 + 模型用量趋势) 保持隐藏, 只在有内容时才占位
+    if (row) row.hidden = true;
     body.innerHTML = `<div class="hint" style="padding:12px 16px">${t("heatmapNoData")}</div>`;
     return;
   }
-  // 卡片初始为 hidden, 数据到位后才显示 —— 否则永远不可见 (整卡连带
-  // renderHeatmap/loadHeatmap/#hm-dim 全部成了不可达代码)
-  if (card) card.hidden = false;
+  // 整行初始为 hidden, 数据到位后才显示 —— 否则永远不可见 (整行连带
+  // chartModelTrend/loadModelTrend/#hm-dim 全部成了不可达代码)
+  if (row) row.hidden = false;
   const metric = state.heatmapDim;
   const val = (d) => metric === "cost" ? (d.total_cost_usd || 0)
     : metric === "requests" ? (d.request_count || 0)
@@ -671,6 +694,7 @@ function toggleModelExclusion(model) {
 function chartModel(models) {
   const canvas = $("mr-chart");
   if (cModel) cModel.destroy();
+  chartModelTrend(models);  // 联动: 同维度 / 同排除集 / 同色序 (空数据也走这里清图)
   if (!models || !models.length) {
     cModel = null;
     $("mr-list").innerHTML = `<div class="mr-empty">${t("noData")}</div>`;
@@ -679,12 +703,12 @@ function chartModel(models) {
   const dim = state.modelDim;
   // 输入维度取「含缓存命中的总输入」(未命中 + 缓存命中): 缓存命中通常占绝大多数,
   // 只算未命中会让排行与环形图数值严重偏低 (对应 model_stats.total_input_tokens)
-  const getVal = (m) => (dim === "input" ? m.total_input_tokens : dim === "output" ? m.total_output_tokens : m.total_cost_usd);
+  const getVal = (m) => modelDimValue(m, dim);
   // 金额只在成本维度出现; 输入/输出显示 Token 数 (fmtTokens 自带 B/M/k 简写)
   const fmt = dim === "cost" ? (v) => fmtMoney(v) : fmtTokens;
   const sorted = [...models].sort((a, b) => getVal(b) - getVal(a));
   const top = sorted.slice(0, 6);
-  const palette = [COLOR.input, COLOR.output, COLOR.reasoning, COLOR.cache, COLOR.cost, "#ec4899"];
+  const palette = MODEL_PALETTE;
   cModel = new Chart(canvas, {
     type: "doughnut",
     data: {
@@ -724,6 +748,71 @@ function chartModel(models) {
     <span class="mr-sub">${fmtInt(m.request_count)} · ${t("hitRate")} ${m.hit_rate}%</span>
     <span class="mr-val" title="${escapeHtml(fmtInt(getVal(m)))}">${fmt(getVal(m))}</span></div>`).join("")
     : `<div class="mr-empty">${t("noData")}</div>`;
+}
+/* ---------------- 统计页: 模型用量趋势 (堆叠柱) ---------------- */
+/* 环形图是「分布 Now」, 这里是「分布随时间」: 同维度 / 同排除集 / 同色序联动.
+   数据独立端点 (/api/model_trend), 切到统计页时拉取, 不随 dashboard 每次刷新重拉 */
+let cModelTrend = null;
+let modelTrendData = null;  // {days: [...], series: [{model, input[], output[], cost[]}]}
+let modelTrendSeq = 0;
+async function loadModelTrend() {
+  const seq = ++modelTrendSeq;
+  try {
+    const r = await api("/api/model_trend?days=30");
+    if (seq !== modelTrendSeq) return;
+    modelTrendData = { days: r.days || [], series: r.series || [] };
+    chartModelTrend(state.data ? state.data.models : []);
+  } catch (e) { /* 统计页非关键块: 静默 */ }
+}
+function chartModelTrend(rangeModels) {
+  const canvas = $("mt-chart");
+  if (!canvas) return;
+  if (cModelTrend) { cModelTrend.destroy(); cModelTrend = null; }
+  if (!modelTrendData || !modelTrendData.days.length) return;
+  const dim = state.modelDim;
+  const fmtV = dim === "cost" ? (v) => fmtMoney(v) : (v) => fmtTokens(v);
+  // 模型集取本图自身 30 天口径 —— 环形图跟随页签 range (近 7 天可能只有 2 个
+  // 模型), 直接套用会漏掉 30 天里其他有量的模型; 排序以环形图当前顺序为
+  // 配色基准 (两图同模型同色), 环形图没有的模型按自身用量续后。排除集即时过滤
+  const order = new Map();
+  [...(rangeModels || [])]
+    .filter((m) => !state.excludedModels.has(m.model))
+    .sort((a, b) => modelDimValue(b, dim) - modelDimValue(a, dim))
+    .forEach((m, i) => order.set(m.model, i));
+  const ranked = modelTrendData.series
+    .filter((s) => !state.excludedModels.has(s.model))
+    .map((s) => ({ s, total: (s[dim] || []).reduce((a, b) => a + b, 0) }))
+    .filter((x) => x.total > 0)
+    .sort((a, b) => {
+      const oa = order.has(a.s.model) ? order.get(a.s.model) : Infinity;
+      const ob = order.has(b.s.model) ? order.get(b.s.model) : Infinity;
+      return oa !== ob ? oa - ob : b.total - a.total;
+    })
+    .slice(0, 6);
+  const labels = modelTrendData.days.map((d) => d.slice(5));  // MM-DD
+  const datasets = ranked.map((x, i) => ({
+    label: x.s.model,
+    data: x.s[dim] || labels.map(() => 0),
+    backgroundColor: MODEL_PALETTE[i],
+    stack: "s", borderRadius: 2, barPercentage: 0.9, categoryPercentage: 0.9,
+  }));
+  cModelTrend = new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: false, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 7, boxHeight: 7, font: { size: 10 }, color: cssVar("--text3"), padding: 7 } },
+        tooltip: { callbacks: { label: (it) => ` ${it.dataset.label}: ${fmtV(it.parsed.y)}` } },
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { color: cssVar("--text3"), font: { size: 10 }, maxTicksLimit: 8 } },
+        y: { stacked: true, grid: { color: cssVar("--grid") }, ticks: { color: cssVar("--text3"), font: { size: 10 }, maxTicksLimit: 4, callback: (v) => fmtV(v) } },
+      },
+    },
+  });
+  cModelTrend.resize();
 }
 /* ---------------- 统计页: 用量趋势 ---------------- */
 let cTrend = null;
@@ -1713,6 +1802,7 @@ window.addEventListener("resize", () => {
     if (!document.getElementById("page-home").hidden) safeResize(cToday);
     if (!document.getElementById("page-stats").hidden) {
       safeResize(cModel);
+      safeResize(cModelTrend);
       safeResize(cTrend);
     }
     if (!document.getElementById("page-overview").hidden) safeResize(cOvTrendChart);

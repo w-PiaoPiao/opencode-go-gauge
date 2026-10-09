@@ -2096,6 +2096,82 @@ def daily_stats(
     return result
 
 
+def model_daily_stats(
+    days: int = 30,
+    account_id: Optional[int] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """近 N 天「日 × 模型」用量 (统计页模型堆叠趋势图数据源).
+
+    返回 {"days": [连续日期...], "series": [{"model", "input", "output", "cost"}]},
+    每个序列与 days 等长、缺日补 0 (与 daily_stats 同一连续日期口径);
+    始终返回全量模型 —— top 截取与排序由调用侧按当前维度决定 (换维度顺序会变).
+    """
+    days = max(1, min(days, 365))
+    aid = _resolve_account_id(account_id)
+    ex_sql, ex_params = _exclude_clause(exclude_models)
+    ex_and = f" AND {ex_sql}" if ex_sql else ""
+    if _use_charts_stats(aid):
+        rows = get_db().execute(
+            f"""
+            SELECT local_date AS date, model,
+                   SUM(tokens_in) AS input_tokens,
+                   SUM(tokens_out) AS output_tokens,
+                   SUM(total_cost) AS cost_usd
+            FROM usage_charts
+            WHERE account_id = ?
+              AND local_date >= date('now', 'localtime', ?){ex_and}
+            GROUP BY local_date, model
+            """,
+            (aid, f"-{days} days", *ex_params),
+        ).fetchall()
+    else:
+        rows = get_db().execute(
+            f"""
+            SELECT local_date AS date, model,
+                   SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(cost_usd) AS cost_usd
+            FROM usage_records
+            WHERE account_id = ?
+              AND local_date >= date('now', 'localtime', ?){ex_and}
+            GROUP BY local_date, model
+            """,
+            (aid, f"-{days} days", *ex_params),
+        ).fetchall()
+    bounds = get_db().execute(
+        "SELECT date('now', 'localtime', ?) AS start_date, date('now', 'localtime') AS end_date",
+        (f"-{days} days",),
+    ).fetchone()
+    day_list: list[str] = []
+    cur = datetime.strptime(bounds["start_date"], "%Y-%m-%d").date()
+    end = datetime.strptime(bounds["end_date"], "%Y-%m-%d").date()
+    while cur <= end:
+        day_list.append(cur.isoformat())
+        cur += timedelta(days=1)
+    idx = {d: i for i, d in enumerate(day_list)}
+    series: dict[str, dict[str, list[Any]]] = {}
+    for r in rows:
+        i = idx.get(r["date"])
+        if i is None:  # 边界外的行 (时区/手工改库): 不参与
+            continue
+        model = str(r["model"] or "unknown")
+        s = series.get(model)
+        if s is None:
+            s = series[model] = {
+                "input": [0] * len(day_list),
+                "output": [0] * len(day_list),
+                "cost": [0.0] * len(day_list),
+            }
+        s["input"][i] = int(s["input"][i]) + int(r["input_tokens"] or 0)
+        s["output"][i] = int(s["output"][i]) + int(r["output_tokens"] or 0)
+        s["cost"][i] = round(float(s["cost"][i]) + float(r["cost_usd"] or 0), 6)
+    return {
+        "days": day_list,
+        "series": [{"model": m, **v} for m, v in series.items()],
+    }
+
+
 def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
     """今日 24 小时趋势: 每小时 输入/输出/推理 (本地时区, 无数据补 0)."""
     aid = _resolve_account_id(account_id)
