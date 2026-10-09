@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, backup, db
+from . import __version__, backup, db, forecast
 from .autostart import disable as _autostart_disable, enable as _autostart_enable
 from .updater import RELEASE_PAGE_URL, check_update, download_update
 from .commandcode_api import (
@@ -245,6 +245,44 @@ def _record_cycle_bounds(account_id: int, quota: dict[str, Any]) -> None:
                 break
     except Exception:  # noqa: BLE001 持久化失败不影响配额返回
         pass
+
+
+def _parse_exclude_models(query: dict[str, list[str]]) -> list[str]:
+    """「排除模型」查询参数清洗 (dashboard 与 model_trend 同一口径).
+
+    可重复查询参数, 逐项去空白/去重, 长度与数量设上限防止超长 WHERE 拖慢聚合.
+    """
+    exclude: list[str] = []
+    for raw in query.get("exclude_models", []):
+        name = (raw or "").strip()
+        if name and len(name) <= 200 and name not in exclude:
+            exclude.append(name)
+        if len(exclude) >= 50:
+            break
+    return exclude
+
+
+def _attach_forecast(quota: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """给配额窗口附加打满预测 (window.forecast), 供首页三窗口展示.
+
+    不改动缓存对象: 复制一层 dict, 缓存里存的仍是接口原始形状.
+    """
+    if not quota or not quota.get("success") or not quota.get("windows"):
+        return quota
+    period_start, period_end = quota.get("period_start"), quota.get("period_end")
+    payload = dict(quota)
+    payload["windows"] = []
+    for window in quota["windows"]:
+        item = dict(window)
+        item["forecast"] = forecast.window_forecast(
+            used=window.get("used"),
+            reset_in_sec=window.get("reset_in_sec"),
+            window_len=forecast.window_len_sec(
+                window.get("label") or "", period_start, period_end
+            ),
+        )
+        payload["windows"].append(item)
+    return payload
 
 
 def _ensure_quota_async(account_id: Optional[int] = None) -> None:
@@ -826,15 +864,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         else:
             period, days = "30d", 30
         token = db.get_token()
-        # 统计页「排除模型」筛选 (模型用量环形图图例点击): 可重复查询参数,
-        # 逐项清洗 — 去空白/去重/长度与数量上限, 防止超长 WHERE 拖慢聚合
-        exclude_models: list[str] = []
-        for raw in query.get("exclude_models", []):
-            name = (raw or "").strip()
-            if name and len(name) <= 200 and name not in exclude_models:
-                exclude_models.append(name)
-            if len(exclude_models) >= 50:
-                break
+        # 统计页「排除模型」筛选 (模型用量环形图图例点击): 可重复查询参数
+        exclude_models = _parse_exclude_models(query)
         # quota 使用缓存 (按账号分槽), 过期时后台刷新, 不阻塞 dashboard 响应
         active_id = db.get_active_account_id()
         _ensure_quota_async(active_id)
@@ -860,7 +891,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "account_name": account.get("name", ""),
                 "accounts_total": db.count_accounts(),
                 "accounts_logged_in": db.count_logged_in_accounts(),
-                "quota": quota,
+                "quota": _attach_forecast(quota),
                 "totals": totals_period,
                 "today": totals_today,
                 "daily": daily30[-7:],  # 每日趋势固定显示近 7 天
@@ -1122,6 +1153,18 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             days = 126
         active_id = db.get_active_account_id()
         _json_response(handler, {"days": db.daily_stats(days, active_id)})
+        return
+
+    if route == "/api/model_trend" and method == "GET":
+        # 模型堆叠趋势: 近 N 天 日×模型 用量 (默认 30 天), 统计页独立拉取.
+        # 返回全量模型 —— top 截取与排除过滤由前端按当前维度即时完成 (排除是
+        # 图例点击的交互, 不因此重拉接口)
+        try:
+            days = max(7, min(int(query.get("days", ["30"])[0]), 365))
+        except ValueError:
+            days = 30
+        active_id = db.get_active_account_id()
+        _json_response(handler, {"ok": True, **db.model_daily_stats(days, active_id)})
         return
 
     if route == "/api/export/csv" and method == "POST":

@@ -200,6 +200,10 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .ub.c-week .ub-bar-fill { background: linear-gradient(90deg, #4f8ef7, #22c55e); }
 .ub.c-month .ub-bar-fill { background: linear-gradient(90deg, #f59e0b, #ef4444); }
 .ub-meta { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11.5px; color: var(--text3); }
+/* 配额条预测小字: 颜色随块顶渐变条 (取起始色) */
+.ub.c-rolling .ub-fc { color: #a78bfa; }
+.ub.c-week .ub-fc { color: #4f8ef7; }
+.ub.c-month .ub-fc { color: #d97706; }
 .ub-error { font-size: 12px; color: var(--red); padding: 12px 14px; }
 
 /* ---------- KPI / 用量概览 (6 格 2×3) ---------- */
@@ -238,10 +242,17 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 #page-records .sessions, #page-records .records { margin-bottom: 0; }
 .sessions .pager, .records .pager { padding: 8px 0 6px; }
 .sessions .card-h, .records .card-h { min-height: 40px; }
-/* 统计页: 底部两卡片弹性拉伸填满剩余空间, 消除底部空白 */
+/* 统计页: 底部两行两栏 —— 第一行 (模型用量 | 用量趋势) 可弹性拉伸,
+   第二行 (日历热力图 | 模型用量趋势) 高度由内容决定, 与上行同列宽 */
 #page-stats { display: flex; flex-direction: column; }
-#page-stats .two-col { margin-bottom: 0; flex: 1; min-height: 0; align-items: stretch; grid-template-columns: 1fr 1.6fr; }
-#page-stats .model-rank, #page-stats .usage-trend { display: flex; flex-direction: column; min-height: 0; }
+#page-stats .two-col { align-items: stretch; grid-template-columns: 1fr 1.6fr; }
+/* min-height = 卡头 ~45 + 图表最小高 200 (HTML 内联) + 排行列表 3 行 ~98:
+   窗口不够高时不再把卡片压到内容以下 —— 溢出会叠到下一行卡片上, 改由
+   页面滚动承接 (与首页"宁可滚动不裁切"一致); min-height:0 是旧行为 */
+#page-stats #stats-main-row { margin-bottom: 12px; flex: 1; min-height: 343px; }
+/* 第二行不被 flex 压缩: 高度由内容决定, 窗口不够高时由页面滚动承接 */
+#page-stats #heatmap-row { margin-bottom: 0; flex-shrink: 0; }
+#page-stats .model-rank, #page-stats .usage-trend, #page-stats .model-trend-card { display: flex; flex-direction: column; min-height: 0; }
 #page-stats .mr-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #page-stats .chart-box { flex: 1; min-height: 180px; }
 .model-rank { padding-bottom: 10px; }
@@ -389,7 +400,8 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
   .d6-grid { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 1000px) {
-  .two-col { grid-template-columns: 1fr; }
+  /* 统计页的 #page-stats .two-col 特异性更高, 必须同样命中才能真切单列 */
+  .two-col, #page-stats .two-col { grid-template-columns: 1fr; }
 }
 
 /* ---------- 多用户: 顶栏切换器 + 设置页列表 ---------- */
