@@ -95,17 +95,28 @@ _ENTRY_RESET_MAX = 6
 # 读取残留会话基线的上限: 窗口未就绪时 pywebview 的 get_cookies 会一直挂,
 # 超时即放弃采集 (退回数据库旧凭证指纹比对)
 COOKIE_READ_TIMEOUT = 2.0
+# 取 CoreWebView2 的上限: 该读取必须回到 .NET UI 线程执行 (见 _win_core_webview),
+# UI 线程被占住时超时放弃, 只当"窗口未就绪"处理
+_CORE_READ_TIMEOUT = 2.0
+# 该读取失败时的日志节流间隔 (监听线程每秒轮询, 失败会连片出现)
+_CORE_READ_LOG_INTERVAL = 10.0
 _LOG_FILE = os.path.join(tempfile.gettempdir(), "gousage_login.log")
 
 
 def _log(msg: str) -> None:
-    """同时输出到 stdout 与日志文件 (便于诊断)."""
-    print(msg, flush=True)
+    """同时输出到 stdout 与日志文件 (便于诊断).
+
+    带时间戳与 PID: 该文件在公共临时目录里是跨进程追加的 (每次启动/每个
+    实例都写同一份), 没有时间戳时无法判断某行属于哪一次运行 —— 排查"日志
+    停更"这类问题时这是唯一能把时间线钉住的线索.
+    """
+    line = f"{time.strftime('%m-%d %H:%M:%S')} [pid {os.getpid()}] {msg}"
+    print(line, flush=True)
     try:
         # 0600: 该文件位于公共临时目录, 防其他本地用户读取
         fd = os.open(_LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            fh.write(msg + "\n")
+            fh.write(line + "\n")
     except OSError:
         pass
 
@@ -294,15 +305,57 @@ def _github_logged_user(win) -> str:
 # + Task, 每一步都有超时, 任一环节失败只降级不阻塞.
 
 
+_core_read_log_at = 0.0
+
+
+def _log_core_read_failure(msg: str) -> None:
+    """CoreWebView2 读取失败按 10s 节流记日志 (监听线程每秒都读, 不节流会刷屏)."""
+    global _core_read_log_at
+    now = time.monotonic()
+    if now - _core_read_log_at < _CORE_READ_LOG_INTERVAL:
+        return
+    _core_read_log_at = now
+    _log(msg)
+
+
 def _win_core_webview(win):
-    """Windows: 取窗口底层 WebView2 的 CoreWebView2 (未就绪返回 None)."""
+    """Windows: 取窗口底层 WebView2 的 CoreWebView2 (未就绪/读不到返回 None).
+
+    必须经 Control.Invoke 回到 .NET UI 线程读取: WebView2 SDK 规定
+    ``CoreWebView2`` 只能在 UI 线程访问, 跨线程读会抛
+    "CoreWebView2 can only be accessed from the UI thread" (内层是 COM 封送
+    失败 E_NOINTERFACE); 在 WebView2 运行时 154.0.4258.62 上更会退化成 COM
+    封送互锁 —— 调用线程连同 GIL 一起卡住, 整个进程失联 (主窗口"无响应" +
+    HTTP 服务停止 accept), py-spy 的栈就停在本函数读取 CoreWebView2 那一步.
+
+    经 Invoke 读取时调用方最多等 _CORE_READ_TIMEOUT 就放弃: UI 线程忙也只当
+    "窗口未就绪", 绝不会拖死调用线程. 已在 UI 线程时直接读 (Invoke 无意义).
+    """
     try:
-        native = getattr(win, "native", None)          # BrowserForm
+        native = getattr(win, "native", None)          # BrowserForm (WinForms 控件)
         browser = getattr(native, "browser", None)     # EdgeChrome
-        control = getattr(browser, "webview", None)    # WebView2 控件
-        return getattr(control, "CoreWebView2", None)  # 未初始化时 .NET null -> None
+        view = getattr(browser, "webview", None)       # WebView2 控件
+        if view is None:
+            return None
+        if not bool(native.InvokeRequired):  # 已在 UI 线程: 直接读
+            return getattr(view, "CoreWebView2", None)  # .NET null -> None
     except Exception:  # noqa: BLE001 窗口已销毁/pywebview 内部结构变化
         return None
+    box: dict[str, object] = {}
+
+    def read() -> None:
+        try:
+            box["core"] = getattr(view, "CoreWebView2", None)
+        except Exception as exc:  # noqa: BLE001 未初始化/已销毁
+            box["error"] = repr(exc)
+
+    if not _win_invoke_bounded(native, read, _CORE_READ_TIMEOUT):
+        _log_core_read_failure("[login] core webview read timed out (UI thread busy)")
+        return None
+    if "error" in box:
+        _log_core_read_failure(f"[login] core webview read ERROR: {box['error']}")
+        return None
+    return box.get("core")
 
 
 def _win_webview_pair(win, allow_fallback: bool = False):
@@ -1281,6 +1334,29 @@ def read_provider_cookie(win, provider: str, timeout: float = COOKIE_READ_TIMEOU
     return box.get("value")
 
 
+def _bounded_call(fn, timeout: float):
+    """在 daemon 子线程里执行 fn, 最多等 timeout 秒 (超时返回 None).
+
+    pywebview 的部分窗口方法内部用**无超时**信号量等 UI 线程回调, 一旦不返回
+    就永久挂住调用线程 —— 登录监听会因此变僵尸 (单飞守卫再也不放行, 用户再点
+    登录被静默吞掉). 读取类操作用它兜底: 超时即当"读不到"处理, 下一轮照常.
+    """
+    box: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            box["value"] = fn()
+        except Exception:  # noqa: BLE001 窗口未加载完成/已销毁
+            return
+
+    thread = threading.Thread(target=worker, daemon=True, name="gousage-bounded-call")
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        return None
+    return box.get("value")
+
+
 class LoginWatcher:
     """后台轮询登录窗口, 捕获 provider 会话 cookie.
 
@@ -1321,6 +1397,8 @@ class LoginWatcher:
         self._reloads = 0  # 已自动续跑次数
         self._github_cls: Optional[str] = None  # 上次记录的 GitHub 页面分类 (去重日志)
         self._last_nav = ""
+        # 每轮轮询的进展时刻: 供单飞守卫判定监听线程是否已成僵尸
+        self._last_tick = time.monotonic()
         # 登录入口偏离自愈状态 (commandcode 单页入口)
         self._entry_resets = 0
         self._last_entry_reset: Optional[float] = None  # None = 还没 reset 过
@@ -1334,6 +1412,10 @@ class LoginWatcher:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def seconds_since_tick(self) -> float:
+        """距最近一次轮询进展的秒数 (监听线程卡死时持续增长)."""
+        return time.monotonic() - self._last_tick
 
     def _window_alive(self) -> bool:
         try:
@@ -1356,8 +1438,8 @@ class LoginWatcher:
         线程会永久挂死 (单飞守卫再也不释放, 用户再点登录被静默拦截).
 
         但读取是登录能否被识别的唯一通道: 自带的按域读取不可用 (返回 None)
-        时仍回退到 pywebview 的实现 —— 此刻 URL 已确认在 provider 域、页面
-        也已加载完, 挂起风险低, 总比永远读不到 cookie 强.
+        时仍回退到 pywebview 的实现, 但**带超时** —— 它的无超时信号量正是上面
+        说的挂死源, 回退不能把这条路重新打开.
         """
         if sys.platform == "win32":
             pairs = _win_read_provider_cookie_pairs(
@@ -1365,7 +1447,11 @@ class LoginWatcher:
             )
             if pairs is None:
                 _log("[login] win cookie read unavailable -> falling back to pywebview")
-                return _cookie_entries(self.win.get_cookies() or [])
+                cookies = _bounded_call(self.win.get_cookies, COOKIE_READ_TIMEOUT)
+                if cookies is None:
+                    _log("[login] pywebview fallback timed out (window not ready)")
+                    return []
+                return _cookie_entries(cookies or [])
             return list(pairs)
         return _cookie_entries(self.win.get_cookies() or [])
 
@@ -1385,6 +1471,7 @@ class LoginWatcher:
         target_host = self._target_host()
         targets = self._target_cookie_names()
         while not self._stop.is_set():
+            self._last_tick = time.monotonic()
             # 每轮主动检查窗口存活: macOS 关闭窗口后 get_current_url() 返回 None
             # 而非抛异常, 仅靠异常分支检测会让线程变僵尸 (阻塞单飞守卫, 无法再次登录)
             if not self._window_alive():
@@ -1550,6 +1637,11 @@ class LoginWatcher:
             resume = _authorize_url_from_entry(self._oauth_entry or "") or ""
         js = _NAV_HELPER_TEMPLATE.replace("__RESUME_URL__", resume.replace("'", ""))
         try:
-            self.win.evaluate_js(js)
+            if sys.platform == "win32":
+                # pywebview 的 evaluate_js 内部等无超时信号量: UI 线程不泵消息
+                # 就永久挂住监听线程 —— 与 load_url 同一分流, 走自带超时的通道
+                _win_run_js(self.win, js, COOKIE_PURGE_TIMEOUT)
+            else:
+                self.win.evaluate_js(js)
         except Exception:  # noqa: BLE001 页面未就绪/窗口销毁: 下轮再注入
             pass

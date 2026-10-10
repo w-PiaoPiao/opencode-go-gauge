@@ -614,3 +614,50 @@ def test_main_window_close_allowed_when_hide_fails():
         raise RuntimeError("window gone")
 
     assert _main_window_close_verdict(boom, quitting=False, tray_ready=True) is True
+
+
+# ── CoreWebView2 只能从 UI 线程读 (跨线程读会互锁整个进程) ────────────────
+
+
+def test_win_core_webview_reads_via_ui_thread(win_platform):
+    """取 CoreWebView2 必须经 Control.Invoke 回到 UI 线程.
+
+    跨线程直接读会被 WebView2 SDK 拒绝 ("CoreWebView2 can only be accessed
+    from the UI thread", 内层 COM 封送 E_NOINTERFACE); 在 WebView2 运行时
+    154.0.4258.62 上更会退化成 COM 封送互锁 —— 调用线程连同 GIL 一起卡住,
+    主窗口"无响应"且 HTTP 服务停止 accept (2026-10-10 py-spy 实测栈).
+    """
+    core = _FakeCore(_FakeCookieManager([]))
+    win = _FakeWin(core, invoke_required=True)
+
+    assert auth._win_core_webview(win) is core
+    assert win.control.invocations == 1, "未走 UI 线程: 在调用线程上直读了"
+
+
+def test_win_core_webview_reads_directly_when_already_on_ui_thread(win_platform):
+    """已在 UI 线程时直接读 (Invoke 无意义, 且会自锁)."""
+    core = _FakeCore(_FakeCookieManager([]))
+    win = _FakeWin(core, invoke_required=False)
+
+    assert auth._win_core_webview(win) is core
+    assert win.control.invocations == 0
+
+
+def test_win_core_webview_gives_up_when_ui_thread_stuck(win_platform, monkeypatch):
+    """UI 线程不泵消息时读取超时放弃 (返回 None), 绝不拖死调用线程.
+
+    这是本次故障的核心防线: 卡住的是"取 CoreWebView2"这一步, 只要它变成有界
+    调用, 最坏结果只是"窗口未就绪", 不会让整个进程失联.
+    """
+    monkeypatch.setattr(auth, "_CORE_READ_TIMEOUT", 0.1)
+
+    class _StuckForm(_FakeForm):
+        def Invoke(self, delegate):  # noqa: ARG002 模拟 UI 线程被占住
+            time.sleep(30)
+
+    win = _FakeWin(_FakeCore(_FakeCookieManager([])))
+    win.native = _StuckForm(_FakeCore(_FakeCookieManager([])))
+
+    started = time.monotonic()
+    assert auth._win_core_webview(win) is None
+    assert time.monotonic() - started < 5.0, "超时没生效, 调用线程被挂住"
