@@ -47,6 +47,9 @@ _tray_ready = False  # 托盘是否成功启动 (失败时关闭窗口=直接退
 _main_win_ref: dict[str, object] = {"win": None}  # 主窗口引用 (macOS delegate 恢复用)
 # 登录页被残留会话带离登录入口 (commandcode 停在官网/控制台) 时的重置重试上限
 _LOGIN_ENTRY_RETRIES = 2
+# 登录监听的"僵尸"判定: 监听每秒轮询一轮, 超过这么久没有进展就认为某个原生
+# 调用把它挂住了 (单飞守卫会因此永久静默吞掉用户的点击), 停掉并重建窗口
+_LOGIN_WATCHER_STALE_SEC = 20.0
 
 
 # ── Win32 窗口辅助 (仅 Windows 运行时使用; ctypes 为跨平台标准库) ──
@@ -868,6 +871,45 @@ def _destroy_all_windows() -> None:
             pass
 
 
+def _log_runtime_banner() -> None:
+    """把运行时版本写进主日志.
+
+    登录链路的故障几乎都在 .NET/WebView2 边界上 (跨线程访问、SDK 与运行时
+    版本差异), 而发布包的依赖版本此前未锁定、也无法从日志回看 —— 出问题时
+    这一行就是"跑的是哪套栈"的唯一证据.
+    """
+    parts: list[str] = []
+    for dist in ("pywebview", "pythonnet"):
+        try:
+            from importlib.metadata import version as _dist_version  # noqa: PLC0415
+
+            parts.append(f"{dist}={_dist_version(dist)}")
+        except Exception:  # noqa: BLE001 冻结包内无元数据/未安装
+            pass
+    if _IS_WIN:
+        try:
+            import winreg  # noqa: PLC0415
+
+            key = (
+                r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients"
+                r"\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+            )
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as handle:
+                parts.append(f"webview2={winreg.QueryValueEx(handle, 'pv')[0]}")
+        except Exception:  # noqa: BLE001 未装 WebView2 运行时/注册表不可读
+            parts.append("webview2=unknown")
+        try:
+            import clr  # noqa: F401, PLC0415 先导入 clr 才能用 System.*
+
+            from System.Runtime.InteropServices import RuntimeInformation  # noqa: PLC0415
+
+            parts.append(f"clr={RuntimeInformation.FrameworkDescription}")
+        except Exception as exc:  # noqa: BLE001 无 pythonnet/CLR 起不来
+            parts.append(f"clr=unavailable({type(exc).__name__})")
+    if parts:
+        _mlog("[main] runtime: " + " ".join(parts))
+
+
 def main() -> None:
     global _quitting
 
@@ -888,6 +930,7 @@ def main() -> None:
         f"=== GoGauge {__version__} starting "
         f"(platform={sys.platform}, frozen={bool(getattr(sys, 'frozen', False))}) ==="
     )
+    _log_runtime_banner()
 
     host, port = server.start_server()
     dashboard_url = f"http://{host}:{port}/"
@@ -1161,6 +1204,23 @@ def main() -> None:
                 w.stop()
                 watcher["ref"] = None
                 _mlog("[main] zombie watcher stopped (thread alive, window gone)")
+            elif w.seconds_since_tick() > _LOGIN_WATCHER_STALE_SEC:
+                # 窗口还在、线程也活着, 但很久没有轮询进展 = 某次原生调用把它挂住
+                # 了 (正常情况下这个值只有零点几秒). 不处理的话单飞守卫会永久
+                # 静默吞掉后续每一次点击, 用户看到的就是"点登录没反应".
+                _mlog(
+                    f"[main] zombie watcher stopped (no poll progress for "
+                    f"{w.seconds_since_tick():.0f}s) -> recreate window"
+                )
+                w.stop()
+                watcher["ref"] = None
+                stale = login_win_ref["win"]
+                if stale is not None:
+                    try:
+                        stale.destroy()
+                    except Exception as exc:  # noqa: BLE001 已被用户关闭
+                        _mlog(f"[main] stale login window destroy: {exc}")
+                    login_win_ref["win"] = None
             else:
                 _mlog(f"[main] open_login ignored: login in progress (provider={provider})")
                 return
