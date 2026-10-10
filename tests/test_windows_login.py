@@ -184,12 +184,8 @@ def _wait_until(pred, timeout: float = 3.0) -> bool:
 
 @pytest.fixture()
 def win_platform(monkeypatch):
-    """切到 win32, 并把 Control.Invoke 的 .NET delegate 包装降级为直调.
-
-    其余逻辑 (域过滤 / 超时预算 / UI 线程规避 / 降级路径) 全部走真实实现.
-    """
+    """切到 win32 (登录链路已回归上游: 全程走 pywebview 窗口方法 + 有界包裹)."""
     monkeypatch.setattr(auth.sys, "platform", "win32")
-    monkeypatch.setattr(auth, "_win_ui_delegate", lambda fn: fn)
     monkeypatch.setattr(auth.webview, "windows", [])
     return monkeypatch
 
@@ -225,17 +221,6 @@ def test_win_purge_gives_up_when_clear_hangs(win_platform, monkeypatch):
     started = time.monotonic()
     assert auth.clear_provider_cookies("opencode", _StuckWin()) == 0
     assert time.monotonic() - started < 5.0, "超时没生效, 调用线程被挂住"
-
-
-def test_win_read_distinguishes_empty_from_unavailable(win_platform):
-    """空列表 = 确实没有残留; None = 读不到 —— 验证逻辑必须能区分."""
-    win = _FakeWin(_FakeCore(_FakeCookieManager([])))
-    assert auth._win_read_provider_cookies(win, "commandcode.ai", "auth", 1.0) == []
-
-    no_core = _FakeWin(None)
-    assert auth._win_read_provider_cookies(no_core, "commandcode.ai", "auth", 1.0) is None
-
-
 def test_win_purge_skips_when_no_window_and_none_alive(win_platform):
     """窗口已销毁且无其它存活窗口时安全返回 0 (由指纹比对兜底)."""
     assert auth.clear_provider_cookies("opencode", None) == 0
@@ -298,14 +283,13 @@ def test_win_baseline_feeds_stale_detection(win_platform, monkeypatch):
     assert watcher._is_stale("FRESHSESSION") is False
 
 
-def test_win_watcher_falls_back_to_pywebview_when_read_unavailable(win_platform, monkeypatch):
-    """自带读取不可用时监听线程必须回退到 pywebview 的 get_cookies.
+def test_win_watcher_captures_credential_from_window(win_platform, monkeypatch):
+    """监听线程从窗口 cookie 里认出目标凭证 (上游做法: pywebview 的 get_cookies).
 
-    读取是"登录能否被识别"的唯一通道 —— 宁可走备选通道, 也不能永远读不到
-    凭证 (登录窗会一直不关).
+    读取是"登录能否被识别"的唯一通道: 读不到凭证, 登录窗就一直不关.
     """
     monkeypatch.setattr(auth, "COOKIE_POLL_SEC", 0.02)
-    win = _FakeWin(None)  # 无 CoreWebView2 → 自带按域读取返回 None
+    win = _FakeWin(None)
     win.get_cookies = lambda: [{"name": auth.CC_AUTH_COOKIE_NAME, "value": "FRESHSESSION"}]
     win_platform.setattr(auth.webview, "windows", [win])
 
@@ -378,79 +362,6 @@ def test_win_watcher_survives_hanging_cookie_read(win_platform, monkeypatch):
 # ---------------------------------------------------------------------------
 # 登录页加载看门狗 (WebView2: readyState + Source)
 # ---------------------------------------------------------------------------
-
-
-def test_win_load_state_complete_on_provider_page(win_platform):
-    core = _FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/signin")
-    core.ready = "complete"
-    assert auth.page_load_state(_FakeWin(core)) == {"progress": 1.0, "loading": False}
-
-
-def test_win_load_state_loading_while_interactive(win_platform):
-    core = _FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/signin")
-    core.ready = "interactive"
-    assert auth.page_load_state(_FakeWin(core)) == {"progress": 0.0, "loading": True}
-
-
-def test_win_load_state_treats_boot_page_as_loading(win_platform):
-    """引导页 (about:blank) 即使 readyState=complete 也不能算登录页加载完成."""
-    core = _FakeCore(_FakeCookieManager([]), source="about:blank")
-    core.ready = "complete"
-    assert auth.page_load_state(_FakeWin(core))["loading"] is True
-
-
-def test_win_load_state_none_without_webview2(win_platform):
-    assert auth.page_load_state(_FakeWin(None)) is None
-
-
-def test_win_reload_calls_webview2_reload(win_platform):
-    core = _FakeCore(_FakeCookieManager([]))
-    assert auth.reload_window(_FakeWin(core)) is True
-    assert core.reloads == 1
-
-
-def test_win_reload_safe_without_webview2(win_platform):
-    assert auth.reload_window(_FakeWin(None)) is False
-
-
-def test_win_page_ops_never_borrow_another_window(win_platform):
-    """页面状态类操作必须用窗口自己的实例.
-
-    cookie 可以借 (store 进程内共享), 但 readyState/reload 借来的实例读到的是
-    另一个窗口的页面 —— 必须退化为"读不到"而不是拿错数据.
-    """
-    other = _FakeWin(_FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/"))
-    win_platform.setattr(auth.webview, "windows", [other])
-    fresh = _FakeWin(None)  # 登录窗口的 WebView2 还在异步初始化
-
-    assert auth.page_load_state(fresh) is None
-    assert auth.reload_window(fresh) is False
-    assert auth.page_snapshot(fresh) is None
-    assert other.native.invocations == 0, "不得把主窗口面板的状态当成登录页的"
-
-
-def test_win_watchdog_gives_up_when_state_unavailable(win_platform, monkeypatch):
-    """连续读不到加载状态时必须提前放弃, 不再空转到总超时 (45s)."""
-    monkeypatch.setattr(auth, "page_load_state", lambda win: None)
-    started = time.time()
-    loaded = auth.ensure_login_page_loaded(_FakeWin(None), stall_sec=0.1, total_sec=45.0)
-    assert loaded is False
-    assert time.time() - started < 10.0
-
-
-def test_win_snapshot_reads_page_state(win_platform):
-    core = _FakeCore(_FakeCookieManager([]), source="https://commandcode.ai/signin")
-    core.ready = "complete"
-    snapshot = auth.page_snapshot(_FakeWin(core))
-    assert snapshot == "complete"  # ExecuteScriptAsync 的 JSON 字符串被解码
-    assert core.scripts, "快照脚本必须真的下发到页面"
-
-
-# ---------------------------------------------------------------------------
-# 残留会话把登录页带离入口 (commandcode 停在官网/控制台)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "url,expected",
     [
@@ -641,47 +552,3 @@ def test_main_window_close_allowed_when_hide_fails():
 
 
 # ── CoreWebView2 只能从 UI 线程读 (跨线程读会互锁整个进程) ────────────────
-
-
-def test_win_core_webview_reads_via_ui_thread(win_platform):
-    """取 CoreWebView2 必须经 Control.Invoke 回到 UI 线程.
-
-    跨线程直接读会被 WebView2 SDK 拒绝 ("CoreWebView2 can only be accessed
-    from the UI thread", 内层 COM 封送 E_NOINTERFACE); 在 WebView2 运行时
-    154.0.4258.62 上更会退化成 COM 封送互锁 —— 调用线程连同 GIL 一起卡住,
-    主窗口"无响应"且 HTTP 服务停止 accept (2026-10-10 py-spy 实测栈).
-    """
-    core = _FakeCore(_FakeCookieManager([]))
-    win = _FakeWin(core, invoke_required=True)
-
-    assert auth._win_core_webview(win) is core
-    assert win.control.invocations == 1, "未走 UI 线程: 在调用线程上直读了"
-
-
-def test_win_core_webview_reads_directly_when_already_on_ui_thread(win_platform):
-    """已在 UI 线程时直接读 (Invoke 无意义, 且会自锁)."""
-    core = _FakeCore(_FakeCookieManager([]))
-    win = _FakeWin(core, invoke_required=False)
-
-    assert auth._win_core_webview(win) is core
-    assert win.control.invocations == 0
-
-
-def test_win_core_webview_gives_up_when_ui_thread_stuck(win_platform, monkeypatch):
-    """UI 线程不泵消息时读取超时放弃 (返回 None), 绝不拖死调用线程.
-
-    这是本次故障的核心防线: 卡住的是"取 CoreWebView2"这一步, 只要它变成有界
-    调用, 最坏结果只是"窗口未就绪", 不会让整个进程失联.
-    """
-    monkeypatch.setattr(auth, "_CORE_READ_TIMEOUT", 0.1)
-
-    class _StuckForm(_FakeForm):
-        def Invoke(self, delegate):  # noqa: ARG002 模拟 UI 线程被占住
-            time.sleep(30)
-
-    win = _FakeWin(_FakeCore(_FakeCookieManager([])))
-    win.native = _StuckForm(_FakeCore(_FakeCookieManager([])))
-
-    started = time.monotonic()
-    assert auth._win_core_webview(win) is None
-    assert time.monotonic() - started < 5.0, "超时没生效, 调用线程被挂住"
