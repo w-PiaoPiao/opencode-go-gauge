@@ -1,0 +1,15 @@
+# Windows 打包依赖锁定 (release-windows.yml 使用本文件, 保证构建可复现).
+# 升级依赖时: pip freeze 后更新对应版本并重新构建验证.
+#
+# 为什么必须钉: 2026-10-08 pythonnet 3.2.1 上传 PyPI 后 CI 静默升级 (工作流原先
+# 裸写包名), 导致 v2.2.0-windows 与 v2.2.0d-windows 之间 .NET 桥换版、且
+# pythonnet\runtime\ 下的 System.* 卫星程序集整批消失; 而产品日志里没有任何
+# "跑的是哪套栈"的记录, 事后只能靠解析 exe 归档才查出差异 (见 app/main.py
+# 的 _log_runtime_banner —— 现在启动横幅会把它写进主日志).
+# pythonnet 取 3.1.0: v2.2.0b / 本地验证包都用它, 是已知可用的 .NET 桥版本.
+clr-loader==0.3.1
+pillow==12.3.0
+pyinstaller==6.22.3
+pystray==0.19.5
+pythonnet==3.1.0
+pywebview==6.2.1

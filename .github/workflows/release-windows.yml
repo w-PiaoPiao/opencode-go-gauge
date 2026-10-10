@@ -26,7 +26,7 @@ jobs:
       - name: Build GoGauge.exe
         shell: pwsh
         run: |
-          python -m pip install -q pywebview pystray pillow pyinstaller
+          python -m pip install -q -r requirements-windows.lock.txt
           $ver = python -c "from app import __version__; print(__version__)"
           @"
           """构建时自动生成 (gitignored): 打包产物元信息, 供更新检查使用."""
