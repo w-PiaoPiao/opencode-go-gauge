@@ -1232,12 +1232,17 @@ def main() -> None:
         _prepare_login_session(provider, lw)
         try:
             lw.show()
+            if _IS_WIN:
+                # Windows 走上游的登录链路: 显示窗口 → 直接导航到登录页, 不再
+                # 装加载看门狗/入口重置 (见 _arm_login_window 的说明)
+                lw.load_url(build_login_url(provider))
         except Exception as exc:  # noqa: BLE001 窗口可能被用户手动关闭, 重建
             _mlog(f"[main] login window reopen: {exc}")
             _recreate_login_window(provider)
             return
         _start_watcher(lw, provider)
-        _arm_login_window(lw, provider)
+        if _IS_MAC:
+            _arm_login_window(lw, provider)
 
     def _login_still_pending() -> bool:
         """本次登录是否还没拿到凭证 (允许重置会话的前提).
@@ -1250,23 +1255,25 @@ def main() -> None:
         return isinstance(w, LoginWatcher) and not w.done
 
     def _arm_login_window(lw, provider: str) -> None:
-        """后台为登录窗口做三件事: 装请求拦截 → 打开登录页 → 盯加载进度.
+        """macOS 专用: 后台装请求拦截 → 打开登录页 → 盯加载进度.
 
         1. rule list 只对之后的请求生效, 必须在导航前装好;
         2. 登录页引用的追踪域在部分网络下不可达, 会让加载卡在半途 (实测窗口
            一直纯白), 由 ensure_login_page_loaded 停滞超时后主动 reload 救回;
         3. 放后台线程, 避免编译规则/看门狗的等待阻塞 open_login 的调用方.
+
+        Windows 不做这一层 (导航在 open_login 里直接完成): WebView2 的 readyState
+        只有 loading/complete 两档, 慢网络下任何超过 _LOAD_STALL_SEC 的加载都会被
+        判成"停滞"并强制 reload —— 既把页面加载一遍遍清零, 也会吞掉用户此刻的
+        点击 (表现为"点 Continue with GitHub 闪一下不跳转"). 上游的登录链路本来
+        就没有这一层, Windows 回归上游做法: 导航出去, 剩下的交给页面自己.
         """
         def worker() -> None:
-            # 引导页是 macOS 专属的白屏补救 (WKWebView 首帧合成缺陷, 见 auth
-            # 模块注释): Windows/WebView2 无此问题, 跳过可少一次导航, 也让复用
-            # 窗口里残留的旧页面更早停止运行 (旧页面可能正在续写会话 cookie)
-            if _IS_MAC:
-                try:
-                    render_login_boot_page(lw)
-                except Exception as exc:  # noqa: BLE001
-                    _mlog(f"[main] login boot page ERROR: {exc}")
-                time.sleep(BOOT_SETTLE_SEC)
+            try:
+                render_login_boot_page(lw)
+            except Exception as exc:  # noqa: BLE001
+                _mlog(f"[main] login boot page ERROR: {exc}")
+            time.sleep(BOOT_SETTLE_SEC)
             try:
                 ok = install_login_network_rules(lw)
                 _mlog(f"[main] login network rules: {'on' if ok else 'skipped'}")
@@ -1321,13 +1328,15 @@ def main() -> None:
                 old.destroy()
             except Exception:  # noqa: BLE001
                 pass
-        # 新窗口由 pywebview 的 private_mode 清理网站数据, 但那是异步的: 先显式
-        # 清一遍目标域会话, 保证登录页拿到的是未登录态 (old 已销毁, Windows 侧
-        # 会借任一存活窗口的 cookie store —— 进程内共享, 效果相同)
-        _prepare_login_session(provider, old)
+        # macOS: 新窗口由 pywebview 的 private_mode 清理网站数据, 但那是异步的:
+        # 先显式清一遍目标域会话, 保证登录页拿到的是未登录态.
+        # Windows: 不做 (上游做法) —— 旧窗口已销毁, 而 WebView2 每个新窗口初始化
+        # 时都会清一次 cookie store (pywebview private_mode), 再清一遍是多余的.
+        if not _IS_WIN:
+            _prepare_login_session(provider, old)
         new_win = webview.create_window(
             "GoGauge - Login",
-            "about:blank",
+            build_login_url(provider) if _IS_WIN else "about:blank",
             width=720,
             height=640,
             min_size=(560, 500),
@@ -1337,7 +1346,8 @@ def main() -> None:
         _bind_login_close_cleanup(new_win)
         # 新建窗口: 上面刚清过残留 cookie, 基线必为空, 不必再读 (窗口未就绪会卡超时)
         _start_watcher(new_win, provider, snapshot_stale=False)
-        _arm_login_window(new_win, provider)
+        if _IS_MAC:
+            _arm_login_window(new_win, provider)
 
     api.set_login_callback(open_login)
     server.set_login_callback(open_login)  # /api/relogin 兼容 (浏览器环境/兜底)
