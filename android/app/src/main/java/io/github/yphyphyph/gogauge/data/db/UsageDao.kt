@@ -272,6 +272,8 @@ abstract class UsageDao {
         """
         SELECT CAST(strftime('%H', datetime(created_at, 'localtime')) AS INTEGER) AS hour,
                COALESCE(SUM(input_tokens), 0) AS input,
+               COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+               COALESCE(SUM(cache_write_5m_tokens + cache_write_1h_tokens), 0) AS cache_write,
                COALESCE(SUM(output_tokens), 0) AS output,
                COALESCE(SUM(reasoning_tokens), 0) AS reasoning
         FROM usage_records
@@ -292,9 +294,32 @@ abstract class UsageDao {
                 input = r?.input ?: 0L,
                 output = r?.output ?: 0L,
                 reasoning = r?.reasoning ?: 0L,
+                cacheRead = r?.cacheRead ?: 0L,
+                cacheWrite = r?.cacheWrite ?: 0L,
             )
         }
     }
+
+    @Query(
+        """
+        SELECT local_date AS date, model,
+               COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS input,
+               COALESCE(SUM(output_tokens), 0) AS output,
+               COALESCE(SUM(cost_usd), 0) AS cost_usd
+        FROM usage_records
+        WHERE account_id = :accountId AND local_date >= date('now', 'localtime', :intervalArg)
+        GROUP BY local_date, model
+        """
+    )
+    abstract suspend fun modelDailyStatsRaw(accountId: Int, intervalArg: String): List<ModelDailyRow>
+
+    /**
+     * 近 N 天「日 × 模型」原始聚合 — mirrors db.model_daily_stats 聚合行 (desktop
+     * /api/model_trend): input 含缓存读/写 (与环形图 input 口径一致); 连续日期补齐与
+     * series 组装在 repository 层 (与 charts 源共用同一份组装逻辑).
+     */
+    suspend fun modelDailyStatsRows(days: Int, accountId: Int): List<ModelDailyRow> =
+        modelDailyStatsRaw(accountId, "-${days.coerceIn(1, 365)} days")
 
     /** Per-model aggregation — mirrors db.model_stats (按账号). */
     suspend fun modelStats(period: String, accountId: Int, cycleStart: String? = null): List<ModelStat> {
@@ -513,7 +538,24 @@ abstract class UsageDao {
         @androidx.room.ColumnInfo(name = "request_count") val requestCount: Int,
     )
 
-    data class HourTrendRow(val hour: Int, val input: Long, val output: Long, val reasoning: Long)
+    /** 今日趋势聚合行 (v2.2.1a 起含 cache 两列, 供首页「含缓存」口径求和); charts 源共用. */
+    data class HourTrendRow(
+        val hour: Int,
+        val input: Long,
+        val output: Long,
+        val reasoning: Long,
+        @androidx.room.ColumnInfo(name = "cache_read") val cacheRead: Long = 0L,
+        @androidx.room.ColumnInfo(name = "cache_write") val cacheWrite: Long = 0L,
+    )
+
+    /** 模型用量趋势聚合行 (日 × 模型, input 含缓存); charts 源共用. */
+    data class ModelDailyRow(
+        val date: String,
+        val model: String,
+        val input: Long,
+        val output: Long,
+        @androidx.room.ColumnInfo(name = "cost_usd") val costUsd: Double,
+    )
 
     data class ModelStatRow(
         val model: String,

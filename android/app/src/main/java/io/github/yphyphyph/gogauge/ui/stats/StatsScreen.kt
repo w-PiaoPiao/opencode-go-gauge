@@ -54,7 +54,9 @@ import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.components.KpiCard
 import io.github.yphyphyph.gogauge.ui.components.ModelIcon
 import io.github.yphyphyph.gogauge.ui.components.ModelPieChart
+import io.github.yphyphyph.gogauge.ui.components.ModelTrendChart
 import io.github.yphyphyph.gogauge.ui.components.PillRow
+import io.github.yphyphyph.gogauge.ui.components.SegButtons
 import io.github.yphyphyph.gogauge.ui.components.TrendLineChart
 import io.github.yphyphyph.gogauge.ui.theme.Gg
 import io.github.yphyphyph.gogauge.ui.theme.GgChart
@@ -124,26 +126,11 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                 CardHeader(
                     s.modelUsage,
                     trailing = {
-                        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-                            listOf("input" to s.input, "output" to s.output, "cost" to s.cost).forEach { (v, label) ->
-                                val active = vm.modelDim == v
-                                // 触控目标 ≥44dp: 原先 12sp + 4dp*2 ≈ 25dp, 容易点空
-                                Box(
-                                    Modifier
-                                        .clickable { vm.changeModelDim(v) }
-                                        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(
-                                        label,
-                                        fontSize = 12.sp,
-                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                        color = if (active) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                        }
+                        SegButtons(
+                            options = listOf("input" to s.input, "output" to s.output, "cost" to s.cost),
+                            selected = vm.modelDim,
+                            onSelect = vm::changeModelDim,
+                        )
                     },
                 )
                 ModelPieChart(
@@ -245,26 +232,11 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                 CardHeader(
                     s.heatmapTitle,
                     trailing = {
-                        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-                            listOf("cost" to s.cost, "requests" to s.totalRequests, "tokens" to s.totalTokens)
-                                .forEach { (v, label) ->
-                                    val active = vm.heatmapDim == v
-                                    Box(
-                                        Modifier
-                                            .clickable { vm.changeHeatmapDim(v) }
-                                            .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(
-                                            label,
-                                            fontSize = 12.sp,
-                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                            color = if (active) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                        }
+                        SegButtons(
+                            options = listOf("cost" to s.cost, "requests" to s.totalRequests, "tokens" to s.totalTokens),
+                            selected = vm.heatmapDim,
+                            onSelect = vm::changeHeatmapDim,
+                        )
                     },
                 )
                 if (vm.heatmapDays.isEmpty() || vm.heatmapDays.all { it.requestCount == 0 }) {
@@ -283,6 +255,26 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                         usdCny = d.usdCny,
                     )
                     Spacer(Modifier.height(10.dp))
+                }
+            }
+
+            // model usage trend (v2.2.1a) — desktop chartModelTrend parity:
+            // 30 天口径独立于页签 range; 无数据时整卡隐藏
+            val modelTrend = vm.modelTrend
+            if (modelTrend != null && modelTrend.series.isNotEmpty()) {
+                GgCard {
+                    CardHeader(s.mtTitle, trailing = { Hint(s.trendHint) })
+                    ModelTrendChart(
+                        data = modelTrend,
+                        models = d.models,
+                        dim = vm.modelDim,
+                        excludedModels = vm.excludedModels,
+                        labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        gridLineColor = MaterialTheme.colorScheme.outline,
+                        currency = vm.currency,
+                        usdCny = d.usdCny,
+                        animate = vm.settings.chartAnimation,
+                    )
                 }
             }
         }

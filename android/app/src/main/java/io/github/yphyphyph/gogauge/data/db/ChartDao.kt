@@ -267,8 +267,10 @@ abstract class ChartDao {
     @Query(
         """
         SELECT CAST(strftime('%H', datetime(time_bucket, 'localtime')) AS INTEGER) AS hour,
-               SUM(tokens_in) AS input,
-               SUM(tokens_out) AS output,
+               COALESCE(SUM(tokens_in - cache_read_tokens), 0) AS input,
+               COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+               COALESCE(SUM(cache_creation_tokens), 0) AS cache_write,
+               COALESCE(SUM(tokens_out), 0) AS output,
                0 AS reasoning
         FROM usage_charts
         WHERE account_id = :accountId
@@ -288,9 +290,28 @@ abstract class ChartDao {
                 input = r?.input ?: 0L,
                 output = r?.output ?: 0L,
                 reasoning = r?.reasoning ?: 0L,
+                cacheRead = r?.cacheRead ?: 0L,
+                cacheWrite = r?.cacheWrite ?: 0L,
             )
         }
     }
+
+    @Query(
+        """
+        SELECT local_date AS date, model,
+               COALESCE(SUM(tokens_in), 0) AS input,
+               COALESCE(SUM(tokens_out), 0) AS output,
+               COALESCE(SUM(total_cost), 0) AS cost_usd
+        FROM usage_charts
+        WHERE account_id = :accountId AND local_date >= date('now', 'localtime', :intervalArg)
+        GROUP BY local_date, model
+        """
+    )
+    abstract suspend fun modelDailyStatsRaw(accountId: Int, intervalArg: String): List<UsageDao.ModelDailyRow>
+
+    /** 近 N 天「日 × 模型」原始聚合 (charts 源; tokens_in 含缓存) — desktop model_daily_stats charts 分支 parity. */
+    suspend fun modelDailyStatsRows(days: Int, accountId: Int): List<UsageDao.ModelDailyRow> =
+        modelDailyStatsRaw(accountId, "-${days.coerceIn(1, 365)} days")
 
     @Query("SELECT DISTINCT model FROM usage_charts WHERE account_id = :accountId " +
         "UNION SELECT DISTINCT model FROM usage_records WHERE account_id = :accountId ORDER BY model")

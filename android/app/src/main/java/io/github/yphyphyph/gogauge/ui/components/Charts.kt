@@ -53,12 +53,22 @@ import com.github.mikephil.charting.listener.OnChartValueSelectedListener
 import io.github.yphyphyph.gogauge.data.model.DailyStat
 import io.github.yphyphyph.gogauge.data.model.HourStat
 import io.github.yphyphyph.gogauge.data.model.ModelStat
+import io.github.yphyphyph.gogauge.data.model.ModelTrendData
+import io.github.yphyphyph.gogauge.data.model.ModelTrendSeries
 import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.theme.GgChart
 import io.github.yphyphyph.gogauge.util.Fmt
 
 private fun Color.toArgbInt(): Int = android.graphics.Color.argb(
     (this.alpha * 255).toInt(), (this.red * 255).toInt(), (this.green * 255).toInt(), (this.blue * 255).toInt()
+)
+
+/**
+ * 环形图/堆叠趋势共享调色板 (同模型两图同色): 与桌面 MODEL_PALETTE 同序.
+ * 第 6 槽珊瑚为扩展位 (环形图没有的模型续后使用).
+ */
+private val MODEL_COLORS = listOf(
+    GgChart.Input, GgChart.Output, GgChart.Reasoning, GgChart.Cache, GgChart.Cost, GgChart.Extra,
 )
 
 /**
@@ -75,24 +85,40 @@ fun TodayBarChart(
     labelColor: Color,
     gridLineColor: Color,
     animate: Boolean = false,
+    totalMode: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     // Rebuild the dataset only when the data or labels change; recomposition (theme,
     // syncing, progress updates) then reuses the cached BarData instead of rebuilding.
-    val barData = remember(data, s) {
-        val inEntries = data.mapIndexed { i, h -> BarEntry(i.toFloat(), h.input.toFloat()) }
-        val outEntries = data.mapIndexed { i, h -> BarEntry(i.toFloat(), h.output.toFloat()) }
-        val dsIn = BarDataSet(inEntries, s.input).apply {
-            color = GgChart.Input.toArgbInt()
-            setDrawValues(false)
-        }
-        val dsOut = BarDataSet(outEntries, s.output).apply {
-            color = GgChart.Output.toArgbInt()
-            setDrawValues(false)
-        }
-        BarData(dsIn, dsOut).apply {
-            barWidth = 0.35f
-            isHighlightEnabled = false
+    // totalMode (v2.2.1a): 输出不再单列, 只画「总 TOKEN 消耗」一根柱 (未缓存输入 +
+    // 缓存读 + 缓存写 + 输出 + 推理, 与首页「总 TOKEN 消耗」卡完全同口径) —
+    // desktop c7f841c 含缓存口径 parity.
+    val barData = remember(data, s, totalMode) {
+        if (totalMode) {
+            val totalEntries = data.mapIndexed { i, h -> BarEntry(i.toFloat(), h.totalTokens.toFloat()) }
+            val dsTotal = BarDataSet(totalEntries, s.totalTokens).apply {
+                color = GgChart.Extra.toArgbInt()  // 桌面 total 柱取 --primary (此处同色: 珊瑚)
+                setDrawValues(false)
+            }
+            BarData(dsTotal).apply {
+                barWidth = 0.5f
+                isHighlightEnabled = false
+            }
+        } else {
+            val inEntries = data.mapIndexed { i, h -> BarEntry(i.toFloat(), h.input.toFloat()) }
+            val outEntries = data.mapIndexed { i, h -> BarEntry(i.toFloat(), h.output.toFloat()) }
+            val dsIn = BarDataSet(inEntries, s.input).apply {
+                color = GgChart.Input.toArgbInt()
+                setDrawValues(false)
+            }
+            val dsOut = BarDataSet(outEntries, s.output).apply {
+                color = GgChart.Output.toArgbInt()
+                setDrawValues(false)
+            }
+            BarData(dsIn, dsOut).apply {
+                barWidth = 0.35f
+                isHighlightEnabled = false
+            }
         }
     }
     val hourLabels = remember(data) { data.map { it.hour } }
@@ -156,11 +182,7 @@ fun ModelPieChart(
     animate: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val palette = remember {
-        listOf(
-            GgChart.Input, GgChart.Output, GgChart.Reasoning, GgChart.Cache, GgChart.Cost, GgChart.Extra,
-        ).map { it.toArgbInt() }
-    }
+    val palette = remember { MODEL_COLORS.map { it.toArgbInt() } }
     val fmt: (Double) -> String = if (dim == "cost") { v -> Fmt.money(v, currency, usdCny) } else { v -> Fmt.tokens(v) }
     // 全量 top6 定序: 颜色与图例都按全量排序的索引分配 —— 排除某项不改变其余项颜色
     val top = remember(models, dim) { models.sortedByDescending { getVal(it, dim) }.take(6) }
@@ -411,6 +433,115 @@ fun TrendLineChart(
             }
             if (chart.data !== lineData) {
                 chart.data = lineData
+                if (animate) chart.animateY(400)
+            }
+            chart.invalidate()
+        },
+    )
+}
+
+/** 单模型序列 30 天总量 (按维度) — 堆叠趋势的排序键. */
+private fun ModelTrendSeries.totalFor(dim: String): Double = when (dim) {
+    "output" -> output.sumOf { it.toDouble() }
+    "cost" -> cost.sum()
+    else -> input.sumOf { it.toDouble() }
+}
+
+/**
+ * 模型用量趋势堆叠柱 — desktop chartModelTrend (v2.2.1a).
+ *
+ * 模型集取本图自身 30 天口径 (与 statsRange 无关): 排序以环形图当前顺序为配色基准
+ * (两图同模型同色), 环形图没有的模型按自身用量续后; 排除集即时过滤 (不重查数据).
+ * dim 与环形图联动: input=含缓存总输入 / output / cost.
+ */
+@Composable
+fun ModelTrendChart(
+    data: ModelTrendData,
+    models: List<ModelStat>,
+    dim: String,
+    excludedModels: Set<String>,
+    labelColor: Color,
+    gridLineColor: Color,
+    currency: String,
+    usdCny: Double,
+    animate: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    // 配色顺序: 环形图全量 top6 (与 ModelPieChart 同排序) → 位置即调色板索引
+    val order = remember(models, dim) {
+        models.sortedByDescending { getVal(it, dim) }
+            .take(MODEL_COLORS.size)
+            .map { it.model }
+            .withIndex()
+            .associate { (i, m) -> m to i }
+    }
+    // 本图模型集: 30 天有量的模型, 按 (环形图顺序, 自身总量) 排序取前 6
+    val ranked = remember(data, dim, excludedModels, order) {
+        data.series
+            .filter { it.model !in excludedModels }
+            .map { it to it.totalFor(dim) }
+            .filter { it.second > 0.0 }
+            .sortedWith(
+                compareBy<Pair<ModelTrendSeries, Double>> { order[it.first.model] ?: Int.MAX_VALUE }
+                    .thenByDescending { it.second }
+            )
+            .take(MODEL_COLORS.size)
+    }
+    val barData = remember(ranked, dim) {
+        val sets = ranked.map { (series, _) ->
+            val values = when (dim) {
+                "output" -> series.output.map { it.toDouble() }
+                "cost" -> series.cost
+                else -> series.input.map { it.toDouble() }
+            }
+            val colorIdx = order[series.model] ?: (MODEL_COLORS.size - 1)
+            BarDataSet(
+                values.mapIndexed { i, v -> BarEntry(i.toFloat(), v.toFloat()) },
+                series.model,
+            ).apply {
+                color = MODEL_COLORS[colorIdx % MODEL_COLORS.size].toArgbInt()
+                setDrawValues(false)
+            }
+        }
+        BarData(sets).apply {
+            barWidth = 0.7f
+            isHighlightEnabled = false
+        }
+    }
+    // 手机窄屏: 30 天标签必粘连 → 短格式 + 限 labelCount
+    val dateLabels = remember(data) { data.days.map { shortDate(it) } }
+    val fmtY: (Float) -> String = if (dim == "cost") {
+        { v -> Fmt.money(v.toDouble(), currency, usdCny) }
+    } else {
+        { v -> Fmt.tokens(v.toLong()) }
+    }
+    AndroidView(
+        modifier = modifier.fillMaxWidth().height(220.dp),
+        factory = { ctx -> BarChart(ctx).apply { description.isEnabled = false } },
+        update = { chart ->
+            chart.legend.isEnabled = true
+            chart.legend.textSize = 10f
+            chart.legend.textColor = labelColor.toArgbInt()
+            chart.xAxis.apply {
+                position = XAxis.XAxisPosition.BOTTOM
+                setDrawGridLines(false)
+                textSize = 10f
+                textColor = labelColor.toArgbInt()
+                setLabelCount(6, false)
+                granularity = 1f
+                valueFormatter = IndexAxisValueFormatter(dateLabels)
+            }
+            chart.axisLeft.apply {
+                textSize = 10f
+                textColor = labelColor.toArgbInt()
+                gridColor = gridLineColor.toArgbInt()
+                valueFormatter = object : ValueFormatter() {
+                    override fun getFormattedValue(value: Float) = fmtY(value)
+                }
+            }
+            chart.axisRight.isEnabled = false
+            if (chart.data !== barData) {
+                chart.data = barData
                 if (animate) chart.animateY(400)
             }
             chart.invalidate()

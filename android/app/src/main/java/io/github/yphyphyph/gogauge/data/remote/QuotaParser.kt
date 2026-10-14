@@ -13,8 +13,8 @@ import java.time.ZoneOffset
  *
  * ``GET /console/api/go/status`` 的 access.meters.{fiveHour,week,month} 各含
  * limitMicroCents / usedMicroCents (单位为 1e-8 USD, 值可能是数字或字符串),
- * 以及可选 resetsAt; 月额度无 resetsAt 时重置时间取 access.endsAt。
- * 旧 dashboard HTML 解析已随改版下线。
+ * 以及可选 resetsAt; 月额度无 resetsAt 时重置时间取 access.endsAt (5h/周窗口
+ * 无 resetsAt 表示窗口未开始, 留空). 旧 dashboard HTML 解析已随改版下线。
  */
 object QuotaParser {
 
@@ -94,7 +94,13 @@ object QuotaParser {
             val usedRaw = meter["usedMicroCents"].asDouble()
             if (limit <= 0) continue
             val used = clampPercent(usedRaw / limit * 100.0)
-            val resetAt = isoFromText(meter["resetsAt"].asText()).ifEmpty { periodEnd }
+            // 月额度无 resetsAt 是常态, 用订阅周期结束兜底; 5h/周窗口没有 resetsAt 则是
+            // 「窗口未开始」(接口从窗口内第一条请求才给 resetsAt) —— 无条件兜底会让滚动
+            // 窗口显示成「重置于 24 天」(月周期倒计时), 与同卡的「已用 0%」自相矛盾; 留空
+            // 交给界面 (desktop 08dfca1 parity).
+            val resetAt = isoFromText(meter["resetsAt"].asText()).ifEmpty {
+                if (label == LABEL_MONTHLY) periodEnd else ""
+            }
             windows += QuotaWindow(
                 label = label,
                 used = round2(used),

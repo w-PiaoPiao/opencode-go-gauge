@@ -255,6 +255,14 @@ open class Strings(
     val importDone: String,
     val importFailed: String,
     val busyWorking: String,
+    // ---- v2.2.1a: 配额空闲窗口/打满预测 + 今日趋势双口径 + 模型用量趋势 ----
+    val windowNotStarted: String,
+    val resetUnknown: String,
+    val fcExhaust: String,
+    val fcNeverFull: String,
+    val ttPlain: String,
+    val ttTotal: String,
+    val mtTitle: String,
 )
 
 object ZhStrings : Strings(
@@ -366,6 +374,7 @@ object ZhStrings : Strings(
     todayTotalInput = "今日总输入", todayTotalCost = "今日总费用",
     activeAccount = "当前活跃", quotaNotReady = "配额获取中…",
     overviewPanel = "账户总览面板", overviewPanelDesc = "底部导航显示多账户总览入口，聚合展示各账户配额与用量",
+    persistentNotif = "常驻通知", persistentNotifDesc = "在通知栏常驻显示配额窗口余量",
     notifPermissionDenied = "未授予通知权限，请在系统设置中允许",
     wgAccountLabel = "显示账号", wgAccountActive = "当前活跃账号", wgAccountAll = "全部账号合计",
     tileLabel = "配额余量",
@@ -376,6 +385,10 @@ object ZhStrings : Strings(
     exportDone = "已导出", exportFailed = "导出失败",
     importDone = "导入完成，新增 %1\$d 条记录", importFailed = "导入失败",
     busyWorking = "处理中…",
+    windowNotStarted = "窗口未开始", resetUnknown = "重置时间未知",
+    fcExhaust = "预计耗尽于 %1\$s", fcNeverFull = "预计不会打满",
+    ttPlain = "不含缓存", ttTotal = "含缓存",
+    mtTitle = "模型用量趋势",
 )
 
 object EnStrings : Strings(
@@ -498,4 +511,8 @@ object EnStrings : Strings(
     exportDone = "Exported", exportFailed = "Export failed",
     importDone = "Imported, %1\$d new records", importFailed = "Import failed",
     busyWorking = "Working…",
+    windowNotStarted = "Window not started", resetUnknown = "Reset time unknown",
+    fcExhaust = "Runs out in %1\$s", fcNeverFull = "Won't fill before reset",
+    ttPlain = "Excl. cache", ttTotal = "Incl. cache",
+    mtTitle = "Model Usage Trend",
 )

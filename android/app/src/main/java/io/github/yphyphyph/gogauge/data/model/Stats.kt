@@ -31,12 +31,36 @@ data class DailyStat(
     val hitRate: Double,
 )
 
-/** One hour of today — mirrors db.today_trend output (desktop). */
+/**
+ * One hour of today — mirrors db.today_trend output (desktop).
+ *
+ * ``input`` 为未缓存输入; cacheRead/cacheWrite 供首页「含缓存」口径求和
+ * (v2.2.1a, desktop c7f841c parity)。
+ */
 data class HourStat(
     val hour: String,
     val input: Long,
     val output: Long,
     val reasoning: Long,
+    val cacheRead: Long = 0L,
+    val cacheWrite: Long = 0L,
+) {
+    /** 含缓存总 TOKEN 消耗 (与 Totals.totalTokens 同口径): 未缓存输入 + 缓存读 + 缓存写 + 输出 + 推理. */
+    val totalTokens: Long get() = input + cacheRead + cacheWrite + output + reasoning
+}
+
+/** 单个模型的等长日序列 (缺日补 0) — mirrors model_daily_stats.series 元素. */
+data class ModelTrendSeries(
+    val model: String,
+    val input: List<Long>,
+    val output: List<Long>,
+    val cost: List<Double>,
+)
+
+/** 模型用量趋势数据源 — mirrors db.model_daily_stats {days, series} (桌面 /api/model_trend). */
+data class ModelTrendData(
+    val days: List<String>,
+    val series: List<ModelTrendSeries>,
 )
 
 /** Per-model aggregate — mirrors db.model_stats output (desktop). */

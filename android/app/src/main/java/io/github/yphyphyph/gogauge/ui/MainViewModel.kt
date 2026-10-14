@@ -13,6 +13,7 @@ import io.github.yphyphyph.gogauge.data.model.AccountInfo
 import io.github.yphyphyph.gogauge.data.model.AccountsOverviewData
 import io.github.yphyphyph.gogauge.data.model.AppSettings
 import io.github.yphyphyph.gogauge.data.model.DashboardData
+import io.github.yphyphyph.gogauge.data.model.ModelTrendData
 import io.github.yphyphyph.gogauge.data.model.PageResult
 import io.github.yphyphyph.gogauge.data.model.SessionStat
 import io.github.yphyphyph.gogauge.data.model.SyncProgress
@@ -86,6 +87,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 热力图指标: cost / requests / tokens。 */
     var heatmapDim by mutableStateOf("cost")
+        private set
+
+    /** 模型用量趋势数据 (近 30 天, 与 statsRange 无关) — desktop /api/model_trend parity。 */
+    var modelTrend by mutableStateOf<ModelTrendData?>(null)
+        private set
+
+    /** 今日趋势口径: plain=未缓存输入+输出两列 (旧行为); total=含缓存总 TOKEN 单列 — desktop c7f841c parity。 */
+    var ttMode by mutableStateOf("plain")
         private set
 
     // ---- 导出/导入 (v2.2.0b, SAF) ----
@@ -389,6 +398,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 dashboard = data
                 dashboardVersion++
                 loadHeatmap()
+                loadModelTrend()
             } catch (e: CancellationException) {
                 throw e // viewModelScope 取消时正常退出, 不当加载失败记录
             } catch (e: Exception) {
@@ -412,6 +422,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun changeHeatmapDim(d: String) {
         heatmapDim = d
+    }
+
+    /** 模型用量趋势数据重算 (随 dashboard 重载联动刷新)。 */
+    private fun loadModelTrend() {
+        scope.launch {
+            try {
+                modelTrend = repo.modelDailyStats(30)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("GoGauge", "loadModelTrend failed", e)
+            }
+        }
+    }
+
+    /** 今日趋势口径切换: 本地用缓存数据重绘, 不重查接口 (desktop #tt-mode parity)。 */
+    fun changeTodayTrendMode(m: String) {
+        ttMode = if (m == "total") "total" else "plain"
     }
 
     // ------------------------------------------------------------------

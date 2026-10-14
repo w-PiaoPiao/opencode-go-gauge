@@ -52,6 +52,8 @@ import io.github.yphyphyph.gogauge.ui.components.KpiCard
 import io.github.yphyphyph.gogauge.ui.components.QuotaCard
 import io.github.yphyphyph.gogauge.ui.components.Sparkline
 import io.github.yphyphyph.gogauge.ui.components.TrendLineChart
+import io.github.yphyphyph.gogauge.ui.components.quotaForecastText
+import io.github.yphyphyph.gogauge.ui.components.quotaResetText
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import io.github.yphyphyph.gogauge.util.Fmt
 
@@ -271,8 +273,9 @@ private fun AccountCard(acc: AccountOverview, vm: MainViewModel, usdCny: Double,
                         label = quotaLabel(w.label, s),
                         usedPercent = w.used,
                         remainingText = "${s.remaining} ${w.remaining.toInt()}%",
-                        resetText = "${s.resetsIn} ${Fmt.dur(w.resetInSec.toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon)}",
+                        resetText = quotaResetText(w, s),
                         accent = quotaAccent(w.label),
+                        forecastText = quotaForecastText(w, quota, s),
                     )
                 }
             }
