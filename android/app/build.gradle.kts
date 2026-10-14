@@ -17,8 +17,8 @@ android {
         applicationId = "io.github.yphyphyph.gogauge"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "2.2.0b"
+        versionCode = 10
+        versionName = "2.2.1a"
         // instrumented 测试 (Keystore 加密往返等, 见 app/src/androidTest)
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
