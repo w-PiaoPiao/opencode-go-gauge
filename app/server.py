@@ -274,12 +274,18 @@ def _attach_forecast(quota: Optional[dict[str, Any]]) -> Optional[dict[str, Any]
     payload["windows"] = []
     for window in quota["windows"]:
         item = dict(window)
-        item["forecast"] = forecast.window_forecast(
-            used=window.get("used"),
-            reset_in_sec=window.get("reset_in_sec"),
-            window_len=forecast.window_len_sec(
-                window.get("label") or "", period_start, period_end
-            ),
+        # 无重置时间 = 窗口未开始 (见 opencode_api.parse_go_status): 没有已过时间,
+        # 速率外推无从谈起 —— reset_in_sec 此时为 0, 硬算会把整窗当样本得出「不会打满」
+        item["forecast"] = (
+            forecast.window_forecast(
+                used=window.get("used"),
+                reset_in_sec=window.get("reset_in_sec"),
+                window_len=forecast.window_len_sec(
+                    window.get("label") or "", period_start, period_end
+                ),
+            )
+            if window.get("reset_at")
+            else None
         )
         payload["windows"].append(item)
     return payload

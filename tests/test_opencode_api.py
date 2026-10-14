@@ -155,6 +155,39 @@ def test_parse_go_status_windows():
     assert all(w.unit == "%" and w.total == 100.0 for w in windows)
 
 
+def test_parse_go_status_idle_rolling_window_has_no_reset():
+    """5h 窗口空闲 (窗口内无请求) 时 meter 只有金额字段, 没有 startsAt/resetsAt.
+
+    实测 2026-10-14: 09:29 (UTC 01:29) 的配额快照里滚动窗口 0%、重置时间等于月
+    周期结束; 09:31 窗口内第一条请求发出后 resetsAt 才出现 (= startsAt + 5h). 此时
+    不能借月周期结束兜底 —— 那会把滚动窗口显示成「重置于 24 天 23 小时」.
+    """
+    idle = {
+        "access": {
+            "startsAt": "2026-10-08T01:01:55.000Z",
+            "endsAt": "2026-11-08T01:01:55.000Z",
+            "meters": {
+                "fiveHour": {"limitMicroCents": "1200000000", "usedMicroCents": "0"},
+                "week": {
+                    "startsAt": "2026-10-12T00:00:00.000Z",
+                    "resetsAt": "2026-10-19T00:00:00.000Z",
+                    "limitMicroCents": "3000000000",
+                    "usedMicroCents": "351654258",
+                },
+                "month": {"limitMicroCents": "6000000000", "usedMicroCents": "1052219276"},
+            },
+        }
+    }
+    rolling, weekly, monthly = api.parse_go_status(idle, NOW)
+    assert rolling.used == 0.0
+    assert rolling.reset_at == ""          # 窗口未开始: 重置时间未知
+    assert rolling.reset_in_sec == 0
+    # 月额度缺 resetsAt 仍走周期结束兜底 (与上一条用例同口径)
+    assert monthly.reset_at == "2026-11-08T01:01:55Z"
+    # 周期边界只影响窗口自身, 不泄漏到 5h/周窗口
+    assert weekly.reset_at == "2026-10-19T00:00:00Z"
+
+
 def test_parse_go_status_clamps_over_limit():
     payload = {
         "access": {"meters": {"fiveHour": {

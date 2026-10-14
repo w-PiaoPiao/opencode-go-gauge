@@ -54,6 +54,7 @@ const I18N = {
     quitApp: "退出应用",
     rolling: "滚动用量", weekly: "每周用量", monthly: "每月用量",
     remaining: "剩余", used: "已用", resetsIn: "重置于",
+    windowIdle: "窗口未开始", resetUnknown: "重置时间未知",
     fcExhaust: "预计耗尽于 %1", fcNeverFull: "预计不会打满",
     hitRate: "缓存命中率", hitAmount: "缓存命中量", totalTokens: "总 TOKEN 消耗",
     totalRequests: "总请求", totalCost: "总费用", sessions: "会话数",
@@ -148,6 +149,7 @@ const I18N = {
     quitApp: "Quit App",
     rolling: "Rolling Usage", weekly: "Weekly Usage", monthly: "Monthly Usage",
     remaining: "Remaining", used: "Used", resetsIn: "Resets in",
+    windowIdle: "Window not started", resetUnknown: "Reset time unknown",
     fcExhaust: "Runs out in %1", fcNeverFull: "Won't fill before reset",
     hitRate: "Cache Hit Rate", hitAmount: "Cache Hits", totalTokens: "Total Tokens",
     totalRequests: "Requests", totalCost: "Total Cost", sessions: "Sessions",
@@ -265,6 +267,14 @@ function fmtDur(sec) {
   if (h > 0) return h + " " + t("hUnit") + " " + m + " " + t("mUnit");
   if (m > 0) return m + " " + t("mUnit");
   return t("soon");
+}
+/* 窗口重置倒计时. reset_at 为空 = 接口未给该窗口的重置时间: 5h 滚动窗口自窗口内
+   第一条请求起算, 空闲时 (最近 5 小时无请求) 窗口未开始, 接口不带 resetsAt ——
+   此时不显示倒计时 (旧版借月周期兜底, 会把滚动窗口显示成「重置于 24 天 23 小时」).
+   仍有用量的窗口缺 reset_at 属接口没给周期边界, 只能标注未知 */
+function resetText(w) {
+  if (w && w.reset_at) return `${t("resetsIn")} ${fmtDur(w.reset_in_sec)}`;
+  return Number(w && w.used) > 0 ? t("resetUnknown") : t("windowIdle");
 }
 function fmtDateTime(iso) {
   if (!iso) return "—";
@@ -532,7 +542,7 @@ function renderUsageBlocks(quota) {
       label: quotaLabel(w.label),
       used: used,
       remaining: (Number(w.remaining) || 0).toFixed(0) + "%",
-      reset: `${t("resetsIn")} ${fmtDur(w.reset_in_sec)}`,
+      reset: resetText(w),
       fc: forecastText(w.forecast),
     });
   }
@@ -1111,7 +1121,7 @@ function renderAccountCard(a) {
       return `<div class="ub ${cls} ov-ub">
         <div class="ub-head"><span class="ub-l">${quotaLabel(w.label)}</span><span class="ub-rem">${t("remaining")} ${(Number(w.remaining) || 0).toFixed(0)}%</span></div>
         <div class="ub-bar"><div class="ub-bar-fill" style="width:${used}%"></div></div>
-        <div class="ub-meta"><span>${t("used")} ${used.toFixed(0)}%</span><span>${t("resetsIn")} ${fmtDur(w.reset_in_sec)}</span></div>
+        <div class="ub-meta"><span>${t("used")} ${used.toFixed(0)}%</span><span>${resetText(w)}</span></div>
       </div>`;
     }).join("")}</div>`;
   } else {

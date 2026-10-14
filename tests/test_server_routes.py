@@ -156,9 +156,9 @@ def test_attach_forecast_annotates_windows_without_mutating_cache():
         "period_start": "2026-10-08T00:00:00Z",
         "period_end": "2026-11-08T00:00:00Z",
         "windows": [
-            {"label": "5h Rolling", "used": 42.0, "reset_in_sec": 12000},
-            {"label": "Weekly", "used": 20.0, "reset_in_sec": 518400},
-            {"label": "Monthly", "used": 3.0, "reset_in_sec": 2592000},
+            {"label": "5h Rolling", "used": 42.0, "reset_at": "2026-10-08T05:00:00Z", "reset_in_sec": 12000},
+            {"label": "Weekly", "used": 20.0, "reset_at": "2026-10-15T00:00:00Z", "reset_in_sec": 518400},
+            {"label": "Monthly", "used": 3.0, "reset_at": "2026-11-08T00:00:00Z", "reset_in_sec": 2592000},
         ],
     }
     out = server._attach_forecast(quota)
@@ -167,6 +167,23 @@ def test_attach_forecast_annotates_windows_without_mutating_cache():
     assert out["windows"][2]["forecast"] == {"state": "no_fill"}
     assert out is not quota
     assert all("forecast" not in w for w in quota["windows"])
+
+
+def test_attach_forecast_skips_window_without_reset():
+    """无重置时间 = 窗口未开始 (5h 窗口空闲): reset_in_sec 为 0 会让整窗被当成
+    已过样本、算出「不会打满」—— 没有窗口在跑就别说预测, forecast 留 null."""
+    quota = {
+        "success": True,
+        "period_start": "2026-10-08T00:00:00Z",
+        "period_end": "2026-11-08T00:00:00Z",
+        "windows": [
+            {"label": "5h Rolling", "used": 0.0, "reset_at": "", "reset_in_sec": 0},
+            {"label": "Monthly", "used": 3.0, "reset_at": "2026-11-08T00:00:00Z", "reset_in_sec": 2592000},
+        ],
+    }
+    out = server._attach_forecast(quota)
+    assert out["windows"][0]["forecast"] is None
+    assert out["windows"][1]["forecast"] == {"state": "no_fill"}
 
 
 def test_attach_forecast_passthrough_when_unavailable():

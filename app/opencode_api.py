@@ -72,7 +72,7 @@ class QuotaWindow:
     remaining: float
     total: float
     unit: str
-    reset_at: str  # ISO
+    reset_at: str  # ISO; "" = 接口未给该窗口的重置时间 (窗口未开始 / 无周期边界)
     reset_in_sec: int
 
     def to_dict(self) -> dict[str, Any]:
@@ -409,6 +409,9 @@ def parse_go_status(payload: Any, now: Optional[datetime] = None) -> list[QuotaW
 
     结构: access.meters.{fiveHour,week,month} 各含 limitMicroCents / usedMicroCents
     (1e-8 USD), 以及可选 startsAt / resetsAt; 月额度无 resetsAt 时用 access.endsAt.
+
+    5h 窗口自窗口内第一条请求起算, 空闲时 (最近 5 小时无请求) 接口不给 resetsAt ——
+    此时重置时间留空, 界面按「窗口未开始」呈现, 不能借月周期兜底 (见下).
     """
     now = now or datetime.now(timezone.utc)
     if not isinstance(payload, dict):
@@ -434,7 +437,12 @@ def parse_go_status(payload: Any, now: Optional[datetime] = None) -> list[QuotaW
         if limit <= 0:
             continue
         used = _clamp_percent(used_raw / limit * 100.0)
-        reset_at = _iso_from_text(meter.get("resetsAt")) or period_end
+        # 月额度无 resetsAt 是常态, 用订阅周期结束兜底; 5h/周窗口没有 resetsAt 则是
+        # 「窗口未开始」, 兜底会让滚动窗口显示成「重置于 24 天 23 小时」(月周期倒计时),
+        # 与同卡的「已用 0%」自相矛盾 —— 留空交给界面.
+        reset_at = _iso_from_text(meter.get("resetsAt"))
+        if not reset_at and label == LABEL_MONTHLY:
+            reset_at = period_end
         windows.append(
             QuotaWindow(
                 label=label,
