@@ -8,6 +8,7 @@ const I18N = {
     homeTitle: "用量统计总览", today: "今天", d7: "近7天", d30: "近30天", month: "本周期", all: "全部",
     overviewTitle: "用量概览", followRange: "数据跟随时间范围",
     todayTrend: "今日趋势", hours24: "24 小时",
+    ttPlain: "不含缓存", ttTotal: "含缓存",
     statsTitle: "用量统计", tokenBreakdown: "Token 构成",
     modelUsage: "模型用量", input: "输入", output: "输出", cost: "成本",
     mtTitle: "模型用量趋势",
@@ -103,6 +104,7 @@ const I18N = {
     homeTitle: "Usage Overview", today: "Today", d7: "7 Days", d30: "30 Days", month: "This Cycle", all: "All",
     overviewTitle: "Usage Overview", followRange: "Follows selected range",
     todayTrend: "Today's Trend", hours24: "24 Hours",
+    ttPlain: "Excl. cache", ttTotal: "Incl. cache",
     statsTitle: "Usage Stats", tokenBreakdown: "Token Breakdown",
     modelUsage: "Model Usage", input: "Input", output: "Output", cost: "Cost",
     mtTitle: "Model Usage Trend",
@@ -202,6 +204,8 @@ let state = {
   statsRange: "7d",
   modelDim: "input",
   heatmapDim: "cost",
+  // 首页今日趋势口径: plain=未缓存输入/输出两列 (旧行为); total=含缓存总 TOKEN 单列
+  ttMode: "plain",
   data: null,
   exchangeRate: 7.0,
   currency: "CNY",
@@ -577,21 +581,29 @@ function renderOverview(totals) {
     <div class="card kpi ${c.cls}"><div class="kpi-l">${c.l}</div><div class="kpi-v">${c.v}</div><div class="kpi-s">${c.s}</div></div>`).join("");
 }
 /* ---------------- 首页: 今日趋势 24h ---------------- */
+/* 两种口径 (右上角 seg 切换, 本地重绘不重拉): plain=未缓存输入+输出 (旧行为);
+   total=含缓存总 TOKEN 单列, 与「总 TOKEN 消耗」卡同口径 (+缓存读/缓存写/推理) */
 let cToday = null;
+function todayTotalTokens(d) {
+  return (d.input || 0) + (d.cache_read || 0) + (d.cache_write || 0) + (d.output || 0) + (d.reasoning || 0);
+}
 function chartToday(trend) {
   const canvas = $("today-chart");
   if (cToday) cToday.destroy();
   const box = canvas ? canvas.parentElement : null;
   if (box) box.classList.remove("sk-box");  // 移除骨架遮罩
   if (!trend || !trend.length) { cToday = null; return; }
+  const datasets = state.ttMode === "total"
+    ? [{ label: t("totalTokens"), data: trend.map(todayTotalTokens), backgroundColor: cssVar("--primary"), borderRadius: 2, barPercentage: 0.8 }]
+    : [
+        { label: t("input"), data: trend.map((d) => d.input), backgroundColor: COLOR.input, borderRadius: 2, barPercentage: 0.8 },
+        { label: t("output"), data: trend.map((d) => d.output), backgroundColor: COLOR.output, borderRadius: 2, barPercentage: 0.8 },
+      ];
   cToday = new Chart(canvas, {
     type: "bar",
     data: {
       labels: trend.map((d) => d.hour),
-      datasets: [
-        { label: t("input"), data: trend.map((d) => d.input), backgroundColor: COLOR.input, borderRadius: 2, barPercentage: 0.8 },
-        { label: t("output"), data: trend.map((d) => d.output), backgroundColor: COLOR.output, borderRadius: 2, barPercentage: 0.8 },
-      ],
+      datasets,
     },
     options: {
       responsive: false, maintainAspectRatio: false,
@@ -1604,6 +1616,13 @@ function bindEvents() {
     document.querySelectorAll("#mr-dim button").forEach((x) => x.classList.remove("active"));
     b.classList.add("active"); state.modelDim = b.dataset.dim;
     if (state.data) chartModel(state.data.models);
+  });
+  // 今日趋势口径切换 (含/不含缓存): 用缓存数据重渲染, 不重拉
+  $("tt-mode").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    document.querySelectorAll("#tt-mode button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active"); state.ttMode = b.dataset.v;
+    if (state.data) chartToday(state.data.today_trend);
   });
   // 热力图指标切换: 用缓存数据重渲染, 不重拉
   $("hm-dim").addEventListener("click", (e) => {
