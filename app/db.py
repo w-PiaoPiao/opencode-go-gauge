@@ -2173,7 +2173,13 @@ def model_daily_stats(
 
 
 def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
-    """今日 24 小时趋势: 每小时 输入/输出/推理 (本地时区, 无数据补 0)."""
+    """今日 24 小时趋势: 每小时 未缓存输入/缓存读/缓存写/输出/推理 (本地时区, 无数据补 0).
+
+    ``input`` 为未缓存输入 (与 daily_stats.uncached_input_tokens 同口径);
+    charts 路径的 tokens_in 含缓存读, 需减去 cache_read_tokens 才与明细对齐.
+    「含缓存总 TOKEN」由消费侧求和 (input + cache_read + cache_write + output
+    + reasoning), 与首页「总 TOKEN 消耗」卡口径一致.
+    """
     aid = _resolve_account_id(account_id)
     # 日界过滤走 local_date 索引; 小时分组仍需对时间列取 strftime (无法索引, 但
     # 行数已被 local_date 收敛到当天).
@@ -2181,7 +2187,9 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
         rows = get_db().execute(
             """
             SELECT CAST(strftime('%H', datetime(time_bucket, 'localtime')) AS INTEGER) AS h,
-                   SUM(tokens_in) AS input,
+                   SUM(tokens_in - cache_read_tokens) AS input,
+                   SUM(cache_read_tokens) AS cache_read,
+                   SUM(cache_creation_tokens) AS cache_write,
                    SUM(tokens_out) AS output,
                    0 AS reasoning
             FROM usage_charts
@@ -2196,6 +2204,8 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
             """
             SELECT CAST(strftime('%H', datetime(created_at, 'localtime')) AS INTEGER) AS h,
                    SUM(input_tokens) AS input,
+                   SUM(cache_read_tokens) AS cache_read,
+                   SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS cache_write,
                    SUM(output_tokens) AS output,
                    SUM(reasoning_tokens) AS reasoning
             FROM usage_records
@@ -2213,6 +2223,8 @@ def today_trend(account_id: Optional[int] = None) -> list[dict[str, Any]]:
             {
                 "hour": f"{h:02d}:00",
                 "input": int(r["input"]) if r else 0,
+                "cache_read": int(r["cache_read"]) if r else 0,
+                "cache_write": int(r["cache_write"]) if r else 0,
                 "output": int(r["output"]) if r else 0,
                 "reasoning": int(r["reasoning"]) if r else 0,
             }
