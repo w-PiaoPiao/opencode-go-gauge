@@ -64,7 +64,10 @@ import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.components.PillRow
 import io.github.yphyphyph.gogauge.ui.components.QuotaCard
+import io.github.yphyphyph.gogauge.ui.components.SegButtons
 import io.github.yphyphyph.gogauge.ui.components.TodayBarChart
+import io.github.yphyphyph.gogauge.ui.components.quotaForecastText
+import io.github.yphyphyph.gogauge.ui.components.quotaResetText
 import io.github.yphyphyph.gogauge.util.Fmt
 
 /** Home page: quota windows + overview KPIs + today's 24h trend. Pull-to-refresh at top. */
@@ -137,9 +140,10 @@ fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) 
                         label = quotaLabel(w.label, s),
                         usedPercent = w.used,
                         remainingText = "${s.remaining} ${w.remaining.toInt()}%",
-                        resetText = "${s.resetsIn} ${Fmt.dur(w.resetInSec.toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon)}",
+                        resetText = quotaResetText(w, s),
                         accent = accent,
                         accentEnd = accentEnd,
+                        forecastText = quotaForecastText(w, quota, s),
                     )
                 }
             }
@@ -153,13 +157,24 @@ fun HomeScreen(vm: MainViewModel = viewModel(), onManageUsers: () -> Unit = {}) 
             }
             // today's 24h trend
             GgCard {
-                CardHeader("${s.todayTrend}  ${s.hours24}")
+                CardHeader(
+                    "${s.todayTrend}  ${s.hours24}",
+                    trailing = {
+                        // 口径切换 (v2.2.1a, desktop #tt-mode parity): 本地重绘, 不重查数据
+                        SegButtons(
+                            options = listOf("plain" to s.ttPlain, "total" to s.ttTotal),
+                            selected = vm.ttMode,
+                            onSelect = vm::changeTodayTrendMode,
+                        )
+                    },
+                )
                 TodayBarChart(
                     data = d.todayTrend,
                     s = s,
                     labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     gridLineColor = MaterialTheme.colorScheme.outline,
                     animate = vm.settings.chartAnimation,
+                    totalMode = vm.ttMode == "total",
                 )
             }
         }

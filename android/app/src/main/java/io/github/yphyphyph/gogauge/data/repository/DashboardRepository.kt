@@ -6,6 +6,8 @@ import io.github.yphyphyph.gogauge.data.model.PROVIDER_OPENCODE
 import io.github.yphyphyph.gogauge.data.model.AccountOverview
 import io.github.yphyphyph.gogauge.data.model.AccountsOverviewData
 import io.github.yphyphyph.gogauge.data.model.DashboardData
+import io.github.yphyphyph.gogauge.data.model.ModelTrendData
+import io.github.yphyphyph.gogauge.data.model.ModelTrendSeries
 import io.github.yphyphyph.gogauge.data.model.PageResult
 import io.github.yphyphyph.gogauge.data.model.QuotaResult
 import io.github.yphyphyph.gogauge.data.model.QuotaWindow
@@ -522,6 +524,43 @@ class DashboardRepository(
         } else {
             usageDao.dailyStats(HEATMAP_DAYS, aid)
         }
+    }
+
+    /**
+     * 模型用量趋势 (v2.2.1a) — 近 N 天「日 × 模型」聚合 (desktop /api/model_trend parity).
+     *
+     * chartsFirst 口径与统计页一致; 返回全量模型, top 截取与排除过滤由 UI 侧按当前
+     * 维度即时完成 (排除是图例点击的交互, 不因此重查). 连续日期补 0: 无记录的天也
+     * 占位, 避免堆叠柱 x 轴错位 (与 daily_stats 同一口径).
+     */
+    suspend fun modelDailyStats(days: Int = 30): ModelTrendData {
+        val aid = activeAccountId()
+        if (aid == 0) return ModelTrendData(emptyList(), emptyList())
+        val clamped = days.coerceIn(1, 365)
+        val rows = if (syncDao.getAccountProvider(aid) == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null) {
+            chartDao.modelDailyStatsRows(clamped, aid)
+        } else {
+            usageDao.modelDailyStatsRows(clamped, aid)
+        }
+        val today = java.time.LocalDate.now()
+        val dayList = (clamped downTo 0).map { today.minusDays(it.toLong()).toString() }
+        val idx = dayList.withIndex().associate { (i, d) -> d to i }
+        val series = LinkedHashMap<String, Triple<LongArray, LongArray, DoubleArray>>()
+        rows.forEach { r ->
+            val i = idx[r.date] ?: return@forEach  // 边界外的行 (时区/手工改库): 不参与
+            val s = series.getOrPut(r.model) {
+                Triple(LongArray(dayList.size), LongArray(dayList.size), DoubleArray(dayList.size))
+            }
+            s.first[i] += r.input
+            s.second[i] += r.output
+            s.third[i] += r.costUsd
+        }
+        return ModelTrendData(
+            days = dayList,
+            series = series.map { (model, v) ->
+                ModelTrendSeries(model, v.first.toList(), v.second.toList(), v.third.toList())
+            },
+        )
     }
 
     // ------------------------------------------------------------------

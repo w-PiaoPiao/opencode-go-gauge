@@ -92,6 +92,35 @@ class QuotaParserTest {
     }
 
     @Test
+    fun `idle rolling window keeps reset empty while monthly keeps period fallback`() {
+        // 5h 窗口空闲 (最近 5 小时无请求) 时接口只给金额不给 resetsAt: 重置时间留空,
+        // 不再继承 access.endsAt —— 否则滚动窗口显示成「重置于 24 天」(月周期倒计时),
+        // 与同卡「已用 0%」自相矛盾 (desktop 08dfca1 parity)。
+        val payload = json.parseToJsonElement(
+            """
+            {
+              "access": {
+                "startsAt": "2026-09-26T12:06:25.000Z",
+                "endsAt": "2026-10-26T12:06:25.000Z",
+                "meters": {
+                  "fiveHour": {"limitMicroCents": "1200000000", "usedMicroCents": "0"},
+                  "week": {"limitMicroCents": "3000000000", "usedMicroCents": "0"},
+                  "month": {"limitMicroCents": "6000000000", "usedMicroCents": "7632295"}
+                }
+              }
+            }
+            """.trimIndent()
+        )
+        val windows = QuotaParser.parseGoStatus(payload, nowMillis)
+        assertEquals(3, windows.size)
+        assertEquals("", windows[0].resetAt)  // 空闲 fiveHour: 留空 (界面按「窗口未开始」呈现)
+        assertEquals(0, windows[0].resetInSec)
+        assertEquals("", windows[1].resetAt)  // 周窗口同理
+        // 月窗口无 resetsAt 是常态: 仍用订阅周期结束兜底
+        assertEquals("2026-10-26T12:06:25Z", windows[2].resetAt)
+    }
+
+    @Test
     fun `clamps usage percent into 0-100`() {
         val payload = json.parseToJsonElement(
             """

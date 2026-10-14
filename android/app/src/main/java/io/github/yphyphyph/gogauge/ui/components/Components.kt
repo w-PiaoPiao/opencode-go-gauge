@@ -45,14 +45,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.yphyphyph.gogauge.data.model.Forecast
+import io.github.yphyphyph.gogauge.data.model.QuotaResult
+import io.github.yphyphyph.gogauge.data.model.QuotaWindow
+import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.theme.CaptionLabel
 import io.github.yphyphyph.gogauge.ui.theme.Gg
 import io.github.yphyphyph.gogauge.ui.theme.GgDark
 import io.github.yphyphyph.gogauge.ui.theme.NUM_FEATURE_SETTINGS
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
+import io.github.yphyphyph.gogauge.util.Fmt
 
 /**
  * Shared mobile-first components — Claude 官方令牌体系:
@@ -218,6 +224,7 @@ fun QuotaCard(
     resetText: String,
     accent: Color,
     accentEnd: Color? = null,
+    forecastText: String = "",
     modifier: Modifier = Modifier,
 ) {
     val shape = GgCardShape
@@ -277,17 +284,87 @@ fun QuotaCard(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text(
-                "${usedPercent.toInt()}%",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                Modifier.weight(1f, fill = false),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${usedPercent.toInt()}%",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (forecastText.isNotEmpty()) {
+                    // 打满预测小字 (desktop .ub-fc): 主色; 窄屏长文案省略而不换行
+                    Text(
+                        forecastText,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             Text(
                 resetText,
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = NumFontFamily,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
+        }
+    }
+}
+
+/**
+ * 配额窗口重置文案 (desktop resetText parity, 08dfca1):
+ * 有重置时间照旧「重置于 X」; 无重置时间且 used=0 → 「窗口未开始」(5h 窗口空闲,
+ * 接口不给 resetsAt); 无重置时间但 used>0 → 「重置时间未知」(Command Code 缺订阅响应).
+ */
+fun quotaResetText(w: QuotaWindow, s: Strings): String = when {
+    w.resetAt.isNotBlank() -> "${s.resetsIn} ${Fmt.dur(w.resetInSec.toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon)}"
+    w.used <= 0.0 -> s.windowNotStarted
+    else -> s.resetUnknown
+}
+
+/**
+ * 配额窗口打满预测小字 (desktop forecastText parity): 会打满 →「· 预计耗尽于 X」,
+ * 重置前用不完 →「· 预计不会打满」; 样本不足 / 已打满 / 窗口未开始 → 空串 (不显示).
+ */
+fun quotaForecastText(w: QuotaWindow, q: QuotaResult, s: Strings): String {
+    val fc = Forecast.forWindow(w, q.periodStart, q.periodEnd) ?: return ""
+    return when (fc.state) {
+        "fill" -> " · ${s.fcExhaust.format(Fmt.dur(fc.sec.toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon))}"
+        "no_fill" -> " · ${s.fcNeverFull}"
+        else -> ""
+    }
+}
+
+/** 卡头分段选择 (仿桌面 .seg / 统计页维度切换): 选中项主色加粗; 触控目标 ≥44dp。 */
+@Composable
+fun SegButtons(
+    options: List<Pair<String, String>>, // (value, label)
+    selected: String,
+    onSelect: (String) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+        options.forEach { (v, label) ->
+            val active = selected == v
+            Box(
+                Modifier
+                    .clickable { onSelect(v) }
+                    .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label,
+                    fontSize = 12.sp,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (active) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
