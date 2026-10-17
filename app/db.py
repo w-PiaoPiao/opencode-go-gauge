@@ -595,6 +595,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
               ON usage_records(account_id, local_date);
             CREATE INDEX IF NOT EXISTS idx_usage_account_model
               ON usage_records(account_id, model);
+            -- 导出分页 (created_at, usg_id) 全序: created_at 不唯一 (毫秒精度 +
+            -- 批量同步一次插多条), 只按它排序时并列行的次序不保证稳定, keyset
+            -- 游标需要 usg_id 作次序键才不漏行/重行.
+            CREATE INDEX IF NOT EXISTS idx_usage_account_time_usgid
+              ON usage_records(account_id, created_at, usg_id);
+            -- dashboard 周期聚合的覆盖索引: 过滤列 (account_id, local_date) 之后
+            -- 紧随聚合/投影用到的全部明细列 (含 session_id —— 缺它会让
+            -- totals_today / today_trend 等查询反而变慢, 见性能审计集群 A),
+            -- 使 6 条周期查询只扫索引不回表.
+            CREATE INDEX IF NOT EXISTS idx_usage_cover_dash ON usage_records(
+              account_id, local_date, model,
+              input_tokens, output_tokens, reasoning_tokens,
+              cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+              cost_usd, session_id);
             CREATE INDEX IF NOT EXISTS idx_charts_account_localdate
               ON usage_charts(account_id, local_date);
             -- get_sync_state 每次轮询都要取 SUM(requests) 与 MAX(synced_at);
@@ -675,6 +689,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                   ON usage_records(account_id, local_date);
                 CREATE INDEX IF NOT EXISTS idx_usage_account_model
                   ON usage_records(account_id, model);
+                -- 性能审计集群 A 新增的两个索引也是"旧表的索引", 随 DROP TABLE
+                -- 一起消失; 不在此重建则升级后的**首个进程**漏掉它们 (迁移 6 的
+                -- 补建要等下次启动): 导出退化成 O(n²) offset 扫描, dashboard
+                -- 周期查询退回全表扫描.
+                CREATE INDEX IF NOT EXISTS idx_usage_account_time_usgid
+                  ON usage_records(account_id, created_at, usg_id);
+                CREATE INDEX IF NOT EXISTS idx_usage_cover_dash ON usage_records(
+                  account_id, local_date, model,
+                  input_tokens, output_tokens, reasoning_tokens,
+                  cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+                  cost_usd, session_id);
                 """
             )
         else:
@@ -1164,6 +1189,27 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " key_id = excluded.key_id, session_id = excluded.session_id, plan = excluded.plan,"
         " synced_at = excluded.synced_at,"
         " local_date = excluded.local_date"
+        # 变更守卫: 值列全部未变时不写该行. 增量同步每轮回溯 1 小时, 命中的
+        # 已存在记录值基本不变, 无守卫时每次重写都产生整批 WAL (~1000 条
+        # 460KB, 实测 9ms + 大量脏页 → 守卫后 0 写). WHERE 必须覆盖**全部**值列
+        # (15 列): 漏一列就是"该列在服务端变化后静默不更新". usage_records.synced_at
+        # 全库无读取方, 故意不参与比较 (它只标最后写入时刻); SET 仍写它, 以便
+        # 值真变时同步时间跟着刷新.
+        " WHERE created_at IS NOT excluded.created_at"
+        " OR model IS NOT excluded.model"
+        " OR provider IS NOT excluded.provider"
+        " OR input_tokens IS NOT excluded.input_tokens"
+        " OR output_tokens IS NOT excluded.output_tokens"
+        " OR reasoning_tokens IS NOT excluded.reasoning_tokens"
+        " OR cache_read_tokens IS NOT excluded.cache_read_tokens"
+        " OR cache_write_5m_tokens IS NOT excluded.cache_write_5m_tokens"
+        " OR cache_write_1h_tokens IS NOT excluded.cache_write_1h_tokens"
+        " OR cost_raw IS NOT excluded.cost_raw"
+        " OR cost_usd IS NOT excluded.cost_usd"
+        " OR key_id IS NOT excluded.key_id"
+        " OR session_id IS NOT excluded.session_id"
+        " OR plan IS NOT excluded.plan"
+        " OR local_date IS NOT excluded.local_date"
     )
     inserted = 0
     try:
@@ -1248,6 +1294,25 @@ def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = 
         " cache_read_tokens = excluded.cache_read_tokens,"
         " cache_creation_tokens = excluded.cache_creation_tokens,"
         " synced_at = excluded.synced_at, local_date = excluded.local_date"
+        # 变更守卫: 值列全部未变时不写该行. 全周期快照每轮同步整体重放, 但服务端
+        # 聚合值一天内大多不变 —— 无守卫时 4.3 万行每次同步都产生 ~10MB WAL
+        # (实测 272ms + 10.2MB → 守卫后 0 写). WHERE 必须覆盖**全部**值列
+        # (provider/requests/…/cache_creation_tokens/local_date, 13 列): 漏一列
+        # 就是"该列在服务端变化后静默不更新". SET 也必须保留
+        # synced_at = excluded.synced_at, 否则同步时间永久冻结在首次写入时刻.
+        " WHERE provider IS NOT excluded.provider"
+        " OR requests IS NOT excluded.requests"
+        " OR input_cost IS NOT excluded.input_cost"
+        " OR output_cost IS NOT excluded.output_cost"
+        " OR cache_cost IS NOT excluded.cache_cost"
+        " OR total_cost IS NOT excluded.total_cost"
+        " OR credits_total IS NOT excluded.credits_total"
+        " OR tokens_in IS NOT excluded.tokens_in"
+        " OR tokens_out IS NOT excluded.tokens_out"
+        " OR tokens_total IS NOT excluded.tokens_total"
+        " OR cache_read_tokens IS NOT excluded.cache_read_tokens"
+        " OR cache_creation_tokens IS NOT excluded.cache_creation_tokens"
+        " OR local_date IS NOT excluded.local_date"
     )
     try:
         conn.execute("BEGIN")
@@ -1493,11 +1558,6 @@ def session_stats_page(
         "WHEN key_id IS NOT NULL AND key_id != '' THEN key_id ELSE '' END"
     )
     conn = get_db()
-    total = int(
-        conn.execute(
-            f"SELECT COUNT(DISTINCT {session_key}) AS c FROM usage_records {where_sql}", params
-        ).fetchone()["c"]
-    )
     rows = conn.execute(
         f"""SELECT {session_key} AS session_id,
                MAX(key_id) AS key_id,
@@ -1507,13 +1567,31 @@ def session_stats_page(
                SUM(output_tokens) AS total_output_tokens,
                SUM(reasoning_tokens) AS total_reasoning_tokens,
                SUM(cost_usd) AS total_cost_usd,
-               MAX(created_at) AS last_at
+               MAX(created_at) AS last_at,
+               -- 单遍聚合: 窗口函数与 GROUP BY 同层求值, SQLite 在 LIMIT/OFFSET
+               -- 之前算出全部分组数, 于是不再需要先跑一遍 COUNT(DISTINCT …)
+               -- (原先每条请求把同一份扫描做两次).
+               COUNT(*) OVER () AS total_sessions
         FROM usage_records {where_sql}
         GROUP BY {session_key}
-        ORDER BY last_at DESC
+        -- session_id 是分组键 (结果集内唯一), 并列 last_at 时由它构成全序:
+        -- 只按 last_at 排序时并列项的次序由计划/排序器决定, 分页在页边界上可能
+        -- 重复或跳过记录. 加次序键后逐页拼接完全确定 (只影响并列项的展示顺序).
+        ORDER BY last_at DESC, session_id ASC
         LIMIT ? OFFSET ?""",
         params + [page_size, (page - 1) * page_size],
     ).fetchall()
+    if rows:
+        total = int(rows[0]["total_sessions"])
+    else:
+        # 边界: page 超出末页 (或无任何数据) 时结果集为空, 窗口拿不到 total;
+        # 回退执行一次原 COUNT(DISTINCT …), 保证 total 与旧实现完全一致
+        # —— 否则前端会把翻页上限算成 0. 空集是低频路径, 多一次扫描可接受.
+        total = int(
+            conn.execute(
+                f"SELECT COUNT(DISTINCT {session_key}) AS c FROM usage_records {where_sql}", params
+            ).fetchone()["c"]
+        )
     records = [
         {
             "session_id": r["session_id"],
@@ -2358,10 +2436,26 @@ def export_page(
     limit: int = 1000,
     offset: int = 0,
     account_id: Optional[int] = None,
+    after: Optional[tuple[str, str]] = None,
 ) -> list[dict[str, Any]]:
-    """按时间升序分页导出明细 (BackupManager 流式写文件用)."""
+    """按时间升序分页导出明细 (BackupManager 流式写文件用).
+
+    ``after`` 为 keyset 游标 ``(created_at, usg_id)``: 传入上一页末行的这两个值
+    即取下一页, 走 idx_usage_account_time_usgid 定位后顺序扫描, 每页代价与页码
+    无关; offset 分页则是 O(页数²) (每页都要跳过前面所有行; 实测同一 200k 行库
+    走查 12.1s → 1.1s). ``after=None`` 保留 offset 语义以兼容旧调用.
+    """
     aid = _resolve_account_id(account_id)
-    rows = get_db().execute(
+    conn = get_db()
+    if after is not None:
+        rows = conn.execute(
+            "SELECT * FROM usage_records WHERE account_id = ?"
+            " AND (created_at, usg_id) > (?, ?)"
+            " ORDER BY created_at ASC, usg_id ASC LIMIT ?",
+            (aid, after[0], after[1], max(1, limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    rows = conn.execute(
         # usg_id 追加为次序键: created_at 不唯一 (毫秒精度 + 批量同步一次插多条),
         # 只按它排序时并列行的相对次序在两次查询间不保证稳定, OFFSET 分页会漏行/重行,
         # 表现为备份静默丢记录. (created_at, usg_id) 在单账号内是全序.

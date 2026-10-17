@@ -309,8 +309,17 @@ const API_TIMEOUT_MS = 15000;  // 本地服务异常时避免永久"加载中"
 async function api(path, opts = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  // 可选外部取消信号 (opts.signal): 与超时共用同一个 fetch 信号; 外部取消与超时
+  // 都抛 AbortError, 用 err.cancelled 区分 —— 外部取消要静默 (不弹 toast)
+  const ext = opts.signal;
+  const { signal: _sig, ...rest } = opts;
+  const onAbort = () => ctrl.abort();
+  if (ext) {
+    if (ext.aborted) ctrl.abort();
+    else ext.addEventListener("abort", onAbort, { once: true });
+  }
   try {
-    const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, signal: ctrl.signal, ...opts });
+    const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...rest, signal: ctrl.signal });
     if (!resp.ok) {
       let msg = "HTTP " + resp.status;
       try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch (e) { /* 无 body 或非 JSON 时保持默认 */ }
@@ -318,11 +327,25 @@ async function api(path, opts = {}) {
     }
     return await resp.json();
   } catch (e) {
-    if (e && e.name === "AbortError") throw new Error(t("timeout"));
+    if (e && e.name === "AbortError") {
+      const err = new Error(t("timeout"));
+      err.name = "AbortError";
+      err.cancelled = !!(ext && ext.aborted);
+      throw err;
+    }
     throw e;
   } finally {
     clearTimeout(timer);
+    if (ext) ext.removeEventListener("abort", onAbort);
   }
+}
+/* 连点防抖: ms 内的多次触发只执行最后一次 (range pill / 模型图例用) */
+function debounce(fn, ms = 180) {
+  let timer = 0;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { timer = 0; fn(...args); }, ms);
+  };
 }
 /* ---------------- 语言切换 ---------------- */
 function applyLang(l) {
@@ -499,6 +522,11 @@ function renderSkeletons() {
 }
 /* ---------------- 数据加载 ---------------- */
 let loadSeq = 0;
+const DASH_REUSE_MS = 5000;  // 同口径复用窗口 (数据只在同步成功时变, 默认 300s 一轮)
+const DASH_CACHE_MAX = 8;  // 客户端复用条目上限 (账号/口径/排除集组合也不至于无界)
+const dashCache = new Map();  // dashboardQuery() -> {at, data}: 最近成功的同口径响应
+let dashInflight = null;  // 在途 dashboard 请求控制器: 口径变化时取消, 不再白等/白渲染
+let dashRendered = { page: "", key: "" };  // 已渲染到界面上的 (页面, 口径)
 /* dashboard 查询串: 统计页携带模型排除项 (环形图图例点击 → 全局联动), 其他页不带 */
 function dashboardQuery() {
   const params = new URLSearchParams();
@@ -508,21 +536,56 @@ function dashboardQuery() {
   }
   return params.toString();
 }
+/* 缓存内容是否已经渲染到当前页面: renderAll 只重建**可见页面**的图表
+   (隐藏页 canvas 尺寸为 0), 所以「页面」也是渲染态的一部分 —— 首页↔统计页同口径
+   切换必须用缓存补渲染, 否则统计页图表不会建出来 */
+function dashRenderedNow(key) {
+  return dashRendered.page === state.page && dashRendered.key === key;
+}
 /* 返回 true=已渲染 / false=请求失败 / undefined=被更新的请求取代 */
-async function loadDashboard(quiet = false) {
+async function loadDashboard(quiet = false, force = false) {
+  const key = dashboardQuery();
+  // 强制刷新 (同步完成 / 切换账号 / 手动刷新 / 导入备份): 数据必然已变, 整个客户端
+  // 复用表作废 —— 只清当前口径会让别的口径继续返回同步前的旧值.
+  if (force) dashCache.clear();
+  let hit = force ? null : dashCache.get(key);
+  if (hit && Date.now() - hit.at >= DASH_REUSE_MS) {
+    dashCache.delete(key);  // 过期条目顺手回收
+    hit = null;
+  }
+  // 同口径 5s 内直接复用, 不发请求 (20 万行档单次 dashboard 270~600ms).
+  // 前提是**当前没有在途请求**: 在途请求可能正带着刚同步完的新数据 (force 路径),
+  // 用缓存把它顶掉会退回旧值; 有在途时宁可走网络 (服务端同口径也命中它自己的缓存).
+  if (hit && !dashInflight) {
+    if (!dashRenderedNow(key)) {
+      renderAll(hit.data);  // 口径/页面变了没发请求: 用缓存补渲染, 界面与口径保持一致
+      dashRendered = { page: state.page, key };
+    }
+    showLoading(false);
+    return true;
+  }
   const seq = ++loadSeq;
+  if (dashInflight) dashInflight.abort();  // 取消在途旧请求: 口径已变, 旧响应无用
+  const ctrl = new AbortController();
+  dashInflight = ctrl;
   if (!state.data) renderSkeletons();
   showLoading(true);
   try {
-    const data = await api(`/api/dashboard?${dashboardQuery()}`);
+    const data = await api(`/api/dashboard?${key}`, { signal: ctrl.signal });
     if (seq !== loadSeq) return undefined;
+    dashCache.set(key, { at: Date.now(), data });
+    while (dashCache.size > DASH_CACHE_MAX) dashCache.delete(dashCache.keys().next().value);
+    dashRendered = { page: state.page, key };
     renderAll(data);
     showLoading(false);
     return true;
   } catch (e) {
+    if (e && e.cancelled) return undefined;  // 被新请求取消: 静默 (不弹 toast, 不关 loading)
     if (seq === loadSeq) showLoading(false);
     if (!quiet) toast(e.message || t("loadFailed"), "err");
     return false;
+  } finally {
+    if (dashInflight === ctrl) dashInflight = null;
   }
 }
 function showLoading(show) { $("top-loading").hidden = !show; }
@@ -537,7 +600,7 @@ function renderUsageBlocks(quota) {
     }
     if (state.quotaRetryTimer) clearTimeout(state.quotaRetryTimer);
     if (state.data && state.data.logged_in === false) return;  // 未登录: 不轮询重试
-    state.quotaRetryTimer = setTimeout(() => loadDashboard(true), 5000);
+    state.quotaRetryTimer = setTimeout(() => loadDashboard(true, true), 5000);
     row.innerHTML = `<div class="ub skeleton"><div class="sk-line w40"></div><div class="sk-line w20 lg"></div><div class="sk-bar"></div><div class="sk-line w60"></div></div>`.repeat(3);
     return;
   }
@@ -722,7 +785,18 @@ function heatmapSummaryHtml(metric, val) {
 let cModel = null;
 /* 图例点击 = 全页排除/恢复该模型 (顶部总卡 / Token 构成 / 排行 / 趋势一起变).
    扇区即时隐藏/显示, 图例项随之画删除线, 再点即加回; 统计数值等 dashboard
-   按排除集重载后统一渲染. */
+   按排除集重载后统一渲染.
+   连点合并成一次请求 (180ms 防抖): 语义上每次点击都要重算, 但连点不该发 N 次. */
+const legendReload = debounce(() => {
+  loadDashboard(true).then((ok) => {
+    if (ok !== false) return;  // 成功后 renderAll 重建图表并按排除集恢复隐藏态; 被更新的请求取代时由最新渲染兜底
+    // 请求失败: 以服务端回显的排除集为准整体回滚 (防抖期间可能连点了多个模型,
+    // 只回滚最后一个会让界面与数据脱节)
+    if (!state.data) return;
+    state.excludedModels = new Set(state.data.excluded_models || []);
+    renderAll(state.data);
+  });
+}, 180);
 function onModelLegendClick(evt, item, legend) {
   const chart = legend.chart;
   const model = chart.data.labels[item.index];
@@ -730,13 +804,7 @@ function onModelLegendClick(evt, item, legend) {
   chart.toggleDataVisibility(item.index);
   chart.update();
   toggleModelExclusion(model);
-  loadDashboard(true).then((ok) => {
-    if (ok !== false) return;  // 成功后 renderAll 重建图表并按排除集恢复隐藏态; 被更新的请求取代时由最新渲染兜底
-    // 请求失败: 回滚图例可见性与排除集, 避免界面与数据脱节
-    chart.toggleDataVisibility(item.index);
-    chart.update();
-    toggleModelExclusion(model);
-  });
+  legendReload();
 }
 function toggleModelExclusion(model) {
   if (state.excludedModels.has(model)) state.excludedModels.delete(model);
@@ -1109,7 +1177,7 @@ function pollUntilIdle() {
         clearInterval(state.syncTimer); state.syncTimer = null;
         $("tb-refresh").disabled = false;
         $("btn-full-sync").disabled = false;
-        await loadDashboard();
+        await loadDashboard(false, true);  // 同步刚结束: 数据必然已变, 绕过复用窗口
         if (state.page === "settings") renderSettings();
         if (state.page === "overview") loadOverview(true).catch(() => {});
       }
@@ -1392,7 +1460,7 @@ function showLoginDialog(mode, provider) {
       });
       cleanup();
       toast(t("switchedAccount"));
-      await loadDashboard();
+      await loadDashboard(false, true);  // 新增/切换账号: 强制刷新, 不走复用
       if (state.page === "settings") renderSettings().catch(() => {});
       if (state.page === "overview") loadOverview(true).catch(() => {});
     } catch (e) {
@@ -1424,7 +1492,7 @@ function startLoginWatch() {
       }
       if (sig !== baseline) {
         stopLoginWatch();
-        await loadDashboard();
+        await loadDashboard(false, true);  // 登录窗口已改变账号: 强制刷新
         if (state.page === "settings") renderSettings().catch(() => {});
         else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
         if (state.page === "overview") loadOverview(true).catch(() => {});
@@ -1432,7 +1500,7 @@ function startLoginWatch() {
     } catch (e) {
       if (!baselineReady && polls >= 5) {
         polls = 0;
-        await loadDashboard().catch(() => {});
+        await loadDashboard(false, true).catch(() => {});
       }
     }
   };
@@ -1491,7 +1559,7 @@ function renderUserMenu(accounts, activeId) {
       try {
         await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
         toast(t("switchedAccount"));
-        await loadDashboard();
+        await loadDashboard(false, true);  // 切换账号: 强制刷新, 不走复用
         if (state.page === "settings") renderSettings().catch(() => {});
         else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
         if (state.page === "overview") loadOverview(true).catch(() => {});
@@ -1539,7 +1607,7 @@ async function onUserRowAction(id, act) {
       await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
       toast(t("switchedAccount"));
       resetRecordFilters();  // 新账号可能没有旧筛选的模型: 复位避免列表恒空
-      await loadDashboard();
+      await loadDashboard(false, true);  // 切换账号: 强制刷新, 不走复用
       renderSettings().catch(() => {});
       if (state.page === "overview") loadOverview(true).catch(() => {});
     } catch (e) { toast(e.message || t("loadFailed"), "err"); }
@@ -1572,7 +1640,7 @@ async function onUserRowAction(id, act) {
           resetRecordFilters();
           const r = await api("/api/accounts").catch(() => ({ accounts: [] }));
           renderUsersList(r.accounts || [], r.active_id);
-          await loadDashboard();
+          await loadDashboard(false, true);  // 退出登录已清空本地明细: 强制刷新
           if (state.page === "overview") loadOverview(true).catch(() => {});  // 退出后账号卡片即时移除
           if (!(r.accounts || []).some((x) => x.has_token)) showLoginOverlay(true);  // 全部退出 -> 欢迎页
         } catch (e) { toast(e.message || t("loadFailed"), "err"); }
@@ -1593,7 +1661,7 @@ async function onUserRowAction(id, act) {
           await api("/api/accounts/rename", { method: "POST", body: JSON.stringify({ id, name: renamed }) });
           toast(t("userRenamed"));
           renderSettings().catch(() => {});
-          loadDashboard(true);
+          loadDashboard(true, true);  // 账号名变化也要落到顶栏, 绕过复用窗口
           if (state.page === "overview") loadOverview(true).catch(() => {});  // 卡片名称即时更新
         } catch (e) { toast(e.message || t("loadFailed"), "err"); }
       },
@@ -1615,7 +1683,7 @@ async function onUserRowAction(id, act) {
           const r = await api("/api/accounts/delete", { method: "POST", body: JSON.stringify({ id }) });
           toast(t("userDeleted"));
           resetRecordFilters();
-          await loadDashboard();
+          await loadDashboard(false, true);  // 删号已清空其明细: 强制刷新
           renderSettings().catch(() => {});
           if (state.page === "overview") loadOverview(true).catch(() => {});
           if ((r.remaining ?? 1) === 0) showLoginOverlay(true);
@@ -1639,7 +1707,7 @@ function showLoginOverlay(show) {
           clearInterval(loginPollTimer);
           loginPollTimer = null;
           showLoginOverlay(false);
-          await loadDashboard();
+          await loadDashboard(false, true);  // 登录成功: 强制刷新
           renderSettings().catch(() => {});
           if (state.page === "overview") loadOverview(true).catch(() => {});  // 新登录账号卡片即时出现
         }
@@ -1656,7 +1724,7 @@ async function checkState() {
     if (!st.logged_in) { showLoginOverlay(true); return; }
     showLoginOverlay(false);
     if (st.progress && st.progress.running) pollUntilIdle();
-    await loadDashboard();
+    await loadDashboard(false, true);  // 启动/状态复核: 强制取服务端真值
   } catch (e) { console.error("state check failed", e); }
 }
 /* 登录成功通知 (后端 evaluate_js 触发, 见 main.on_login_success):
@@ -1666,20 +1734,23 @@ window.gousageOnLoginSuccess = async function () {
     const st = await api("/api/state");
     if (st.logged_in) showLoginOverlay(false);  // 欢迎页场景: 直接进入面板
   } catch (e) { /* ignore */ }
-  loadDashboard().catch(() => {});
+  loadDashboard(false, true).catch(() => {});  // 登录成功回调: 强制刷新
   if (state.page === "settings") renderSettings().catch(() => {});
   else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
 };
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
   document.querySelectorAll(".side-item").forEach((btn) => btn.addEventListener("click", () => switchPage(btn.dataset.page)));
+  // range pill: 连点只发最后一次 (180ms 防抖) —— 每个 range 是不同口径, 5 次连点
+  // 以前会打 5 次聚合, 现在只打最后选中的那次
+  const reloadRangeDebounced = debounce(() => loadDashboard());
   document.querySelectorAll("#home-pills .pill").forEach((b) => b.addEventListener("click", () => {
     document.querySelectorAll("#home-pills .pill").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active"); state.range = b.dataset.r; loadDashboard();
+    b.classList.add("active"); state.range = b.dataset.r; reloadRangeDebounced();
   }));
   document.querySelectorAll("#stats-pills .pill").forEach((b) => b.addEventListener("click", () => {
     document.querySelectorAll("#stats-pills .pill").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active"); state.statsRange = b.dataset.r; loadDashboard();
+    b.classList.add("active"); state.statsRange = b.dataset.r; reloadRangeDebounced();
   }));
   $("mr-dim").addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
@@ -1731,7 +1802,7 @@ function bindEvents() {
       const r = await api("/api/backup/import", { method: "POST", body: JSON.stringify({ path }) });
       if (r.ok === false) throw new Error(r.error || t("exportFailed"));
       toast(t("importDone").replace("%1", fmtInt(r.records_added || 0)));
-      await loadDashboard();
+      await loadDashboard(false, true);  // 导入备份写入了明细: 强制刷新
     } catch (e) { toast(e.message || t("exportFailed"), "err"); }
   });
   $("tb-refresh").addEventListener("click", () => startSync("incremental"));

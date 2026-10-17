@@ -9,6 +9,8 @@ from __future__ import annotations
 import csv
 import gzip
 import json
+import os
+import stat
 import time
 from typing import Any
 
@@ -34,9 +36,12 @@ def export_csv(path: str) -> int:
         writer = csv.writer(fh)
         writer.writerow(CSV_HEADER)
         for acc in _logged_in_accounts():
-            offset = 0
+            # keyset 游标 (created_at, usg_id): offset 分页每页都要跳过前面全部行,
+            # 导出 20 万行是 O(页数²); 游标分页每页代价恒定 (实测 200k 行端到端
+            # 导出 13.5s → 1.8s).
+            after: tuple[str, str] | None = None
             while True:
-                page = db.export_page(EXPORT_PAGE, offset, acc["id"])
+                page = db.export_page(EXPORT_PAGE, account_id=acc["id"], after=after)
                 if not page:
                     break
                 for r in page:
@@ -50,10 +55,37 @@ def export_csv(path: str) -> int:
                         r.get("plan") or "", r.get("account_id", acc["id"]),
                     ])
                 rows_written += len(page)
-                offset += len(page)
                 if len(page) < EXPORT_PAGE:
                     break
+                after = (page[-1]["created_at"], page[-1]["usg_id"])
     return rows_written
+
+
+def _record_payload(r: dict[str, Any], fallback_account_id: Any) -> dict[str, Any]:
+    """备份记录的单条序列化形态 (Android 导入 parity).
+
+    字段名与**顺序**是外部契约 (两端 .json.gz 互导 + 字段顺序参与新旧实现逐字节
+    比对), 改动需同步 Android 端 BackupManager.
+    """
+    return {
+        "usgId": r["usg_id"],
+        "createdAt": r["created_at"],
+        "model": r["model"],
+        "provider": r.get("provider"),
+        "inputTokens": r.get("input_tokens", 0),
+        "outputTokens": r.get("output_tokens", 0),
+        "reasoningTokens": r.get("reasoning_tokens", 0),
+        "cacheReadTokens": r.get("cache_read_tokens", 0),
+        "cacheWrite5mTokens": r.get("cache_write_5m_tokens", 0) or 0,
+        "cacheWrite1hTokens": r.get("cache_write_1h_tokens", 0) or 0,
+        "costUsd": r.get("cost_usd", 0.0),
+        "costRaw": r.get("cost_raw", 0) or 0,
+        "keyId": r.get("key_id"),
+        "sessionId": r.get("session_id"),
+        "plan": r.get("plan"),
+        "localDate": r.get("local_date"),
+        "accountId": r.get("account_id", fallback_account_id),
+    }
 
 
 def export_backup(path: str) -> int:
@@ -62,6 +94,18 @@ def export_backup(path: str) -> int:
     只导出已登录账号: 未登录占位行 (如种子 Default) 没有数据也没有可迁移
     的凭证, 且其 workspace 常与真实账号相同, 会被导入端的 (provider,
     workspace_id) 去重抢先匹配导致记录错归账号。
+
+    **流式写出**: 逐账号、逐页 (keyset 游标) 取数, 每页序列化后立即写盘, 峰值
+    内存只与 EXPORT_PAGE 有关, 不随全库行数增长. 旧实现先把 16 键 dict 全堆进
+    list 再整串 json.dumps (两份完整副本), 20 万行实测峰值 340MB; 而
+    window_days=None 是合法配置, 100 万行会到 ~1.8GB —— 备份导出这台机器上
+    最可能 OOM 的路径.
+
+    输出与旧实现**逐字节一致** (同一份数据 + 同一 exportedAt 时刻): 头部由
+    json.dumps 生成后截掉收尾 '}' 再续写 records 数组, 页间用 ", " 连接,
+    因此键顺序/分隔符/ensure_ascii=False 全部继承 json.dumps 的默认行为,
+    不存在"手写 JSON 文本与 dumps 漂移"的风险. 落盘走同目录 .tmp + 原子替换,
+    失败时目标路径保持原样 (与旧的"最后一次性落盘"语义一致).
     """
     accounts = [
         {
@@ -73,48 +117,60 @@ def export_backup(path: str) -> int:
         }
         for a in _logged_in_accounts()
     ]
-    records: list[dict[str, Any]] = []
-    for acc in accounts:
-        offset = 0
-        while True:
-            page = db.export_page(EXPORT_PAGE, offset, acc["id"])
-            if not page:
-                break
-            for r in page:
-                records.append(
-                    {
-                        "usgId": r["usg_id"],
-                        "createdAt": r["created_at"],
-                        "model": r["model"],
-                        "provider": r.get("provider"),
-                        "inputTokens": r.get("input_tokens", 0),
-                        "outputTokens": r.get("output_tokens", 0),
-                        "reasoningTokens": r.get("reasoning_tokens", 0),
-                        "cacheReadTokens": r.get("cache_read_tokens", 0),
-                        "cacheWrite5mTokens": r.get("cache_write_5m_tokens", 0) or 0,
-                        "cacheWrite1hTokens": r.get("cache_write_1h_tokens", 0) or 0,
-                        "costUsd": r.get("cost_usd", 0.0),
-                        "costRaw": r.get("cost_raw", 0) or 0,
-                        "keyId": r.get("key_id"),
-                        "sessionId": r.get("session_id"),
-                        "plan": r.get("plan"),
-                        "localDate": r.get("local_date"),
-                        "accountId": r.get("account_id", acc["id"]),
-                    }
-                )
-            offset += len(page)
-            if len(page) < EXPORT_PAGE:
-                break
-    body = {
-        "app": "GoGauge",
-        "version": 1,
-        "exportedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "accounts": accounts,
-        "records": records,
-    }
-    with gzip.open(path, "wb", compresslevel=6) as fh:
-        fh.write(json.dumps(body, ensure_ascii=False).encode("utf-8"))
-    return len(records)
+    exported_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # head[:-1] 去掉 json.dumps 收尾的 '}': 紧随其后补 ", \"records\": [" 即与
+    # 旧实现 dumps 整个 body 的文本完全相同 (accounts 是最后一个键)
+    head = json.dumps(
+        {"app": "GoGauge", "version": 1, "exportedAt": exported_at, "accounts": accounts},
+        ensure_ascii=False,
+    )
+    written = 0
+    # 先写同目录临时文件, 成功后 os.replace 原子顶上目标路径. 旧实现是"先全部
+    # 物化、最后一次性 open(path)" —— 中途失败时目标文件根本没被碰过 (覆盖导出时
+    # 上一份好备份原样保留). 流式必须提前开文件, 若直接写 path, 中途失败会留下
+    # 半截 .gz 并顶掉旧备份; 用临时文件 + 原子替换可以完全复现旧实现的失败语义
+    # (目标路径要么是完整的新备份, 要么保持原样), 代价只是同目录多一个 .tmp 名字
+    # (进程被 SIGKILL 时可能残留, 不影响导入).
+    tmp_path = f"{path}.tmp"
+    try:
+        with gzip.open(tmp_path, "wb", compresslevel=6) as fh:
+            fh.write(head[:-1].encode("utf-8"))
+            fh.write(b', "records": [')
+            for acc in accounts:
+                after: tuple[str, str] | None = None
+                while True:
+                    page = db.export_page(EXPORT_PAGE, account_id=acc["id"], after=after)
+                    if not page:
+                        break
+                    # 一页一次 dumps (走 C 序列化器, 逐条 dumps 会慢 20%+), 内存
+                    # O(EXPORT_PAGE); 去掉外层方括号后与整体 dumps 的 records
+                    # 数组文本完全一致, 页间用 ", " 连接
+                    page_json = json.dumps(
+                        [_record_payload(r, acc["id"]) for r in page], ensure_ascii=False
+                    )
+                    fh.write(((", " if written else "") + page_json[1:-1]).encode("utf-8"))
+                    written += len(page)
+                    if len(page) < EXPORT_PAGE:
+                        break
+                    after = (page[-1]["created_at"], page[-1]["usg_id"])
+            fh.write(b"]}")
+        # 覆盖导出时沿用目标文件原有权限位: 旧实现就地截断写会保留 inode 与权限,
+        # 而 os.replace 是"按 umask 新建后替换", 会把用户手工收紧过的 0600 备份
+        # 放宽成 0644. 只处理常规文件 (符号链接会被 replace 替换掉, 不额外分支).
+        try:
+            if os.path.exists(path) and not os.path.islink(path):
+                os.chmod(tmp_path, stat.S_IMODE(os.stat(path).st_mode))
+        except OSError:
+            pass  # 权限沿用失败不影响备份内容
+        os.replace(tmp_path, path)
+    except Exception:
+        # 失败时清掉半截临时文件 (目标路径不动, 与旧实现一致)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    return written
 
 
 MAX_IMPORT_BYTES = 512 * 1024 * 1024  # 解压后 512 MiB 上限 (见 _read_gzip_capped)

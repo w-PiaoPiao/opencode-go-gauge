@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from email import utils as email_utils
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -235,14 +236,21 @@ def _record_cycle_bounds(account_id: int, quota: dict[str, Any]) -> None:
     「下次重置」的旧口径要靠回推推算, 而 Go 月度周期实测按自然月 (31 天), 回推
     30 天会得到未来起点、「本周期」筛出 0 条. 两者都记录: 真实周期缺位时
     (老接口/异常响应) 回推路径仍有新鲜的「下次重置」兜底.
+
+    计费周期起点是**聚合口径的一部分** (period="month" 的 WHERE 起点取自
+    monthly_cycle_start), 所以它一变就必须让聚合缓存失效: 否则首次拉到真实周期
+    后「本周期」还会停在按滚动 30 天算出的旧值.
     """
     try:
+        before = db.monthly_cycle_start(account_id)
         if quota.get("period_start") and quota.get("period_end"):
             db.record_period_bounds(account_id, quota["period_start"], quota["period_end"])
         for window in quota.get("windows") or []:
             if window.get("label") == "Monthly" and window.get("reset_at"):
                 db.record_monthly_reset(account_id, window["reset_at"])
                 break
+        if db.monthly_cycle_start(account_id) != before:
+            bump_data_generation(account_id)
     except Exception:  # noqa: BLE001 持久化失败不影响配额返回
         pass
 
@@ -289,6 +297,120 @@ def _attach_forecast(quota: Optional[dict[str, Any]]) -> Optional[dict[str, Any]
         )
         payload["windows"].append(item)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# usage 聚合缓存 (只缓存「由 usage 数据聚合出来的部分」)
+# ---------------------------------------------------------------------------
+#
+# dashboard 的 totals/today/daily/trend/today_trend/models、/api/heatmap、
+# /api/model_trend 与 list_models 都是对 usage_records/usage_charts 的纯聚合:
+# 20 万行档单次 dashboard 270~600ms, 而前端连点 range pill / 模型图例会重复打同一
+# 接口. 这里按「(账号, 口径) → 聚合结果」做进程内缓存.
+#
+# 边界 (最容易踩的坑): **只缓存聚合本身**. quota (来自 _quota_cache, 30s TTL)、
+# progress、sync、account、logged_in、accounts_*、exchange_rate、server_time
+# 一律每次请求实时计算再合并 —— 整包缓存会让配额条卡死在旧值、同步进度不动.
+#
+# 失效靠三层:
+#   1. 「数据代数」_agg_gen: 任何写 usage 数据的路径 (同步收尾 / 退出 / 删号 /
+#      导入备份 / 改同步窗口) bump 一次; 命中条件 = 键相同 **且** 代数相同;
+#   2. 缓存键带本地日期: today/7d/热力图等是 date('now','localtime') 相对窗口,
+#      跨零点必须整体失效, 否则「今天」会永远停在昨天;
+#   3. _AGG_CACHE_TTL 兜底: 未预期的时间相关输入 (计费周期滚动等) 最多陈旧 5 分钟.
+# 另外: 同步进行中不读不写缓存 (聚合结果正在滚动变化, 保持改动前的实时语义).
+
+_AGG_CACHE_MAX = 64  # 容量上限 (FIFO 淘汰): 防账号 × 口径组合无界增长
+_AGG_CACHE_TTL = 300.0  # 兜底 TTL (秒): 时间相关输入的最长陈旧时间
+_agg_lock = threading.Lock()  # ThreadingHTTPServer 每请求一线程, 缓存读写必须加锁
+_agg_cache: "OrderedDict[tuple, tuple[int, float, Any]]" = OrderedDict()  # key -> (gen, at, value)
+_agg_gen: dict[Any, int] = {}  # 数据代数 {account_id: gen} / {None: 全局 gen}
+
+
+def bump_data_generation(account_id: Optional[int] = None) -> None:
+    """数据代数 +1, 让相关聚合缓存整体失效 (任何写 usage 数据的路径都要调用).
+
+    account_id=None 表示全局失效 (导入备份等可能跨账号写入的路径).
+    """
+    key: Any = None if account_id is None else int(account_id)
+    with _agg_lock:
+        _agg_gen[key] = _agg_gen.get(key, 0) + 1
+
+
+def _agg_generation_locked(aid: Any) -> int:
+    gen = _agg_gen.get(None, 0)
+    if aid is not None:
+        gen += _agg_gen.get(aid, 0)
+    return gen
+
+
+def _agg_generation(aid: Any) -> int:
+    with _agg_lock:
+        return _agg_generation_locked(aid)
+
+
+def _sync_running() -> bool:
+    with _sync_lock:
+        return bool(_sync_state.get("running"))
+
+
+def _agg_day() -> str:
+    """缓存键的日期分量: 相对时间窗口 (今天 / 近 N 天) 跨零点必须失效."""
+    return time.strftime("%Y-%m-%d")
+
+
+def _agg_cached(key: tuple, producer: Callable[[], Any]) -> Any:
+    """读聚合缓存; 未命中则调用 producer 生成并回写. 线程安全 + 容量上限.
+
+    key[0] 必须是账号 id (失效代数按账号记账).
+    """
+    # 同步进行中: 聚合结果正随落库滚动变化, 不读也不写 —— 保持与改动前一致的实时语义
+    if _sync_running():
+        return producer()
+    aid = key[0]
+    gen = _agg_generation(aid)
+    now = time.time()
+    with _agg_lock:
+        hit = _agg_cache.get(key)
+        if hit is not None and hit[0] == gen and now - hit[1] < _AGG_CACHE_TTL:
+            _agg_cache.move_to_end(key)
+            return hit[2]
+    value = producer()
+    with _agg_lock:
+        # 生成期间数据变了 (代数前移) 就不写回: 否则同步前的旧值会被标成新代, 更陈旧
+        if _agg_generation_locked(aid) == gen:
+            _agg_cache[key] = (gen, time.time(), value)
+            _agg_cache.move_to_end(key)
+            while len(_agg_cache) > _AGG_CACHE_MAX:
+                _agg_cache.popitem(last=False)  # FIFO 淘汰最旧
+    return value
+
+
+def _dashboard_aggregates(
+    active_id: Optional[int], period: str, exclude_models: list[str]
+) -> dict[str, Any]:
+    """dashboard 里由 usage 数据聚合出来的部分 (可缓存); 易变字段由调用方实时合并."""
+    # 显式透传 active_id: 各聚合内部若收到 None 会各自重跑
+    # get_active_account_id() (settings 读取 + JSON 解析 + MIN(id) 查询),
+    # 一次 dashboard 会重复 7 次.
+    totals_period = db.totals(period, active_id, exclude_models)
+    # 首页默认 range 即 today: 此时 totals(period) 与 totals("today") 是同一个查询,
+    # 复用结果省一次聚合 (弱机上聚合是 dashboard 的 CPU 大头)
+    totals_today = (
+        totals_period if period == "today" else db.totals("today", active_id, exclude_models)
+    )
+    # 近 7 天趋势是 30 天序列的后缀子集: 一次聚合切片复用, 省一条按天 GROUP BY
+    daily30 = db.daily_stats(30, active_id, exclude_models)
+    return {
+        "totals": totals_period,
+        "today": totals_today,
+        "daily": daily30[-7:],  # 每日趋势固定显示近 7 天
+        "trend": daily30,  # 用量趋势 (费用/请求双轴)
+        "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势
+        # models 始终全量: 环形图需保留被排除模型 (图例删除线 + 点击即加回),
+        # 排行由前端按 excluded_models 过滤; 排除只作用于 totals/trend 聚合
+        "models": db.model_stats(period, active_id),
+    }
 
 
 def _ensure_quota_async(account_id: Optional[int] = None) -> None:
@@ -382,6 +504,10 @@ def _finish_sync(
     且失败信息不一致), 保证前端看到同一种状态形状. retention_days 是
     opencode 控制台接口上报的明细保留天数 (commandcode 无此概念, 传 None).
     """
+    # 本节已写入 usage 明细/聚合 (含按窗口裁剪): 聚合缓存必须失效, 否则同步
+    # 完成后 dashboard 仍是同步前的旧数. 三种收尾 (ok/partial/failed_pages) 都要失效,
+    # 所以放在最前面按账号 bump 一次.
+    bump_data_generation(account_id)
     if failed_pages:
         msg = "完成, 但翻页中断 (数据不完整, 可再次全量同步补全)"
         db.update_sync_state("partial", msg, total_inserted, account_id)
@@ -643,10 +769,15 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
         # 全部账号都失败才算整轮失败; 任一成功即为 partial (前端展示警告但不报错)
         if errors and len(errors) == len(targets):
             _set_phase("error", any_error)
+            # 同步出错收尾: 失败账号可能已落了一部分页 (如增量翻页中途失败),
+            # 明细不清空 -> 聚合缓存必须整体失效, 不能停在同步前的旧值.
+            bump_data_generation()
             return {"ok": False, "error": any_error, "partial_inserted": total_inserted}
         if partial or errors:
             msg = "部分账号同步异常" if errors else "完成, 但部分页面拉取失败"
             _set_phase("done", msg)
+            # 失败账号的半截落库同样要失效 (成功账号已在 _finish_sync 里 bump 过)
+            bump_data_generation()
             return {
                 "ok": True, "partial": True, "inserted": total_inserted,
                 "pages": pages, "errors": errors,
@@ -655,8 +786,14 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
         return {"ok": True, "inserted": total_inserted, "pages": pages}
     except Exception as exc:  # noqa: BLE001
         _set_phase("error", str(exc))
+        bump_data_generation()  # 异常收尾: 状态与数据都可能已变
         return {"ok": False, "error": str(exc)}
     finally:
+        # 收尾兜底: 无论走到哪个分支, 本轮之后都不允许再返回同步前的聚合
+        # (bump 幂等无害, 一轮里被调用多次只是代数前移).
+        # 先 bump 再放开 running: 期间到达的请求会走「同步中不读缓存」分支重算,
+        # 不会读到刚好在窗口里残留的旧条目.
+        bump_data_generation()
         with _sync_lock:
             _sync_state["running"] = False
 
@@ -878,17 +1015,13 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         slot = _quota_cache.get(active_id) or {}
         quota = slot.get("data") if token else None
         account = db.get_account()
-        # 显式透传 active_id: 各聚合内部若收到 None 会各自重跑
-        # get_active_account_id() (settings 读取 + JSON 解析 + MIN(id) 查询),
-        # 一次 dashboard 会重复 7 次.
-        totals_period = db.totals(period, active_id, exclude_models)
-        # 首页默认 range 即 today: 此时 totals(period) 与 totals("today") 是
-        # 同一个查询, 复用结果省一次聚合 (弱机上聚合是 dashboard 的 CPU 大头)
-        totals_today = (
-            totals_period if period == "today" else db.totals("today", active_id, exclude_models)
+        # 只有「由 usage 数据聚合出来的部分」进缓存 (键含账号 / 口径 / 排除项 /
+        # 本地日期); quota / progress / sync / account / 汇率 / 服务器时间等易变
+        # 字段一律在下面每次实时计算 —— 整包缓存会让配额条卡死、同步进度不动.
+        agg = _agg_cached(
+            (active_id, "dashboard", range_param, tuple(exclude_models), _agg_day()),
+            lambda: _dashboard_aggregates(active_id, period, exclude_models),
         )
-        # 近 7 天趋势是 30 天序列的后缀子集: 一次聚合切片复用, 省一条按天 GROUP BY
-        daily30 = db.daily_stats(30, active_id, exclude_models)
         _json_response(
             handler,
             {
@@ -898,14 +1031,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "accounts_total": db.count_accounts(),
                 "accounts_logged_in": db.count_logged_in_accounts(),
                 "quota": _attach_forecast(quota),
-                "totals": totals_period,
-                "today": totals_today,
-                "daily": daily30[-7:],  # 每日趋势固定显示近 7 天
-                "trend": daily30,  # 用量趋势 (费用/请求双轴)
-                "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势
-                # models 始终全量: 环形图需保留被排除模型 (图例删除线 + 点击即加回),
-                # 排行由前端按 excluded_models 过滤; 排除只作用于 totals/trend 聚合
-                "models": db.model_stats(period, active_id),
+                **agg,
                 "excluded_models": exclude_models,  # 回显生效的排除项
                 "sync": db.get_sync_state(active_id),
                 "progress": _sync_progress_snapshot(),
@@ -924,6 +1050,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         if aid:
             _quota_cache.pop(aid, None)
             _quota_refreshing.discard(aid)
+            bump_data_generation(aid)  # clear_account 删掉了该账号的 usage 明细/聚合
         _json_response(handler, {"ok": True})
         return
 
@@ -933,6 +1060,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             provider = PROVIDER_OPENCODE
         if _on_open_login:
             _on_open_login("relogin", provider)
+        bump_data_generation(db.get_active_account_id())  # 凭证变更: 口径可能随之变
         _json_response(handler, {"ok": True})
         return
 
@@ -1014,6 +1142,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 _json_response(handler, {"ok": False, "error": "该账号未登录"}, 400)
                 return
             db.set_active_account(aid)
+            # 切换账号: 聚合口径整体换人 (键里带 account_id, 但按约定在此显式失效)
+            bump_data_generation(aid)
             _json_response(handler, {"ok": True, "active_id": aid})
             return
 
@@ -1039,6 +1169,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 return
             _quota_cache.pop(aid, None)  # 清理该账号的配额缓存槽
             _key_names_fetched_at.pop(aid, None)  # key 名称刷新时间戳一并回收
+            bump_data_generation(aid)  # delete_account 删掉了该账号的 usage 明细/聚合
             _json_response(handler, {"ok": True, "remaining": remaining})
             return
 
@@ -1080,6 +1211,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             except Exception as exc:  # noqa: BLE001
                 _json_response(handler, {"ok": False, "error": str(exc)}, 500)
                 return
+            bump_data_generation(aid)  # 新凭证/新活跃账号: 聚合缓存按新账号重算
             _json_response(handler, {"ok": True, "id": aid, "provider": provider})
             return
 
@@ -1105,6 +1237,12 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         key_names = db.get_key_names()
         for rec in records:
             rec["key_name"] = key_names.get(rec.get("key_id") or "", "")
+        # 记录页每次翻页都在重算模型全集 (DISTINCT + UNION, 20 万行档不便宜),
+        # 而它只随 usage 数据变化 -> 按账号缓存
+        records_aid = db.get_active_account_id()
+        models = _agg_cached(
+            (records_aid, "models"), lambda: db.list_models(records_aid)
+        )
         _json_response(
             handler,
             {
@@ -1112,7 +1250,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "total": total,
                 "page": page,
                 "page_size": page_size,
-                "models": db.list_models(),
+                "models": models,
                 "filter": {"model": model, "days": days},
             },
         )
@@ -1158,7 +1296,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         except ValueError:
             days = 126
         active_id = db.get_active_account_id()
-        _json_response(handler, {"days": db.daily_stats(days, active_id)})
+        payload = _agg_cached(
+            (active_id, "heatmap", days, _agg_day()),
+            lambda: {"days": db.daily_stats(days, active_id)},
+        )
+        _json_response(handler, payload)
         return
 
     if route == "/api/model_trend" and method == "GET":
@@ -1170,7 +1312,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         except ValueError:
             days = 30
         active_id = db.get_active_account_id()
-        _json_response(handler, {"ok": True, **db.model_daily_stats(days, active_id)})
+        payload = _agg_cached(
+            (active_id, "model_trend", days, _agg_day()),
+            lambda: {"ok": True, **db.model_daily_stats(days, active_id)},
+        )
+        _json_response(handler, payload)
         return
 
     if route == "/api/export/csv" and method == "POST":
@@ -1216,6 +1362,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             return
         try:
             result = backup.import_backup(path)
+            # 导入可能跨账号写入 usage 明细 -> 全局失效 (不做按账号精细判断)
+            bump_data_generation()
             _json_response(handler, {"ok": True, **result})
         except Exception as exc:  # noqa: BLE001
             _json_response(handler, {"ok": False, "error": str(exc)}, 500)
@@ -1233,9 +1381,15 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         except Exception:  # noqa: BLE001
             _json_response(handler, {"ok": False, "error": "无效请求体"}, 400)
             return
-        old_autostart = bool(db.get_settings().get("autostart"))
+        old_settings = db.get_settings()
+        old_autostart = bool(old_settings.get("autostart"))
+        old_window_days = old_settings.get("window_days")
         saved = db.save_settings(body)
         new_autostart = bool(saved.get("autostart"))
+        # 同步窗口 (window_days) 变更会影响后续裁剪后的可见数据: 聚合缓存失效.
+        # 其余设置 (sync_interval_sec 等) 不影响聚合, 不必失效.
+        if saved.get("window_days") != old_window_days:
+            bump_data_generation()
         # 开机自启副作用: 设置变化时注册/注销 LaunchAgent (仅 mac 打包版实际生效)
         if new_autostart != old_autostart:
             try:
