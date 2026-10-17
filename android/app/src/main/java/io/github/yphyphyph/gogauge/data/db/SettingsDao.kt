@@ -225,15 +225,24 @@ abstract class SettingsDao {
  * 月度重置周期策略 — mirrors desktop db.monthly_cycle_start.
  *
  * - commandcode 等记录过真实计费周期的账号: 直接取 period_start; 周期已过期
- *   (配额未刷新) 时按周期跨度顺延到覆盖当前时刻的最近周期 (上限 1200 次防死循环,
- *   span<=0 视为非法数据回退); 无周期记录时为 null (调用方回退滚动 30 天).
+ *   (配额未刷新) 时顺延到覆盖当前时刻的最近周期 (自然月周期按日历月推进, 见
+ *   [rollPeriodStart]); 无周期记录时为 null (调用方回退滚动 30 天).
  * - opencode 无真实起点: 由下次重置时间回推 30 天 ("重置-30天" 规则).
+ * 两条路径都绝不返回未来起点 —— 未来起点会让「本周期」筛选恒为空.
  * 时间统一为 UTC "yyyy-MM-dd HH:mm:ss" 字符串, 与持久化格式一致.
  */
 object MonthlyCycle {
     const val PERIOD_DAYS = 30
     private val FMT = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     private const val MAX_PERIOD_ROLLS = 1200
+
+    // 记录跨度落在此区间视为自然月周期 (28~31 天 + 容差); 其余 (7/14/90 天等)
+    // 顺延走固定跨度, 以免改坏周套餐.
+    private const val CALENDAR_MONTH_SPAN_MIN_DAYS = 26L
+    private const val CALENDAR_MONTH_SPAN_MAX_DAYS = 32L
+
+    private fun toMs(dt: java.time.LocalDateTime): Long =
+        dt.atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
 
     /**
      * 归一化周期时间串: 接受 ISO (Z/偏移/毫秒) 与 "yyyy-MM-dd HH:mm:ss" 两种形态,
@@ -271,6 +280,39 @@ object MonthlyCycle {
     }
 
     /**
+     * 顺延到覆盖 [nowMs] 的那一个周期起点 (epoch ms); 数据非法 (end <= start) 返回 null.
+     *
+     * 自然月周期 (跨度 28~31 天, 实测 Go 月度 10-08 → 11-08) 按日历月推进: 用固定
+     * 跨度反复顺延会累积漂移 (31 天周期按 30 天跨度顺延, 每跨一个周期偏 1 天, 长期
+     * 未打开可偏出一周). plusMonths 必须从原始起点一次算出 —— 逐月累加会丢锚点
+     * (01-31 → 02-28 → 03-28, 此后永远停在 28 号). (desktop db._roll_period_start parity)
+     */
+    private fun rollPeriodStart(
+        start: java.time.LocalDateTime,
+        end: java.time.LocalDateTime,
+        nowMs: Long,
+    ): java.time.LocalDateTime? {
+        if (!end.isAfter(start)) return null
+        val spanDays = java.time.Duration.between(start, end).toDays()
+        if (spanDays in CALENDAR_MONTH_SPAN_MIN_DAYS..CALENDAR_MONTH_SPAN_MAX_DAYS) {
+            var rolled = 0L
+            while (rolled < MAX_PERIOD_ROLLS && toMs(start.plusMonths(rolled + 1)) <= nowMs) {
+                rolled++
+            }
+            return start.plusMonths(rolled)
+        }
+        var s = start
+        var e = end
+        val span = java.time.Duration.between(start, end)
+        repeat(MAX_PERIOD_ROLLS) {
+            if (toMs(e) > nowMs) return s
+            s = e
+            e = e.plus(span)
+        }
+        return s
+    }
+
+    /**
      * 统一入口: 优先真实计费周期 (commandcode), 无记录/串非法回退 monthly_reset 推算
      * (opencode), 两者皆无返回 null (调用方回退滚动 30 天)。周期串先经 [normalize]
      * 归一化, 存量 ISO 数据也能生效。
@@ -279,24 +321,15 @@ object MonthlyCycle {
         val ps = normalize(periodStart)
         if (ps != null) {
             return try {
-                var start = java.time.LocalDateTime.parse(ps, FMT)
-                    .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-                val pe = normalize(periodEnd)
-                if (pe != null) {
-                    var end = java.time.LocalDateTime.parse(pe, FMT)
-                        .atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-                    var rolled = 0
-                    // 顺延跨周期覆盖当前时刻; 上限兜底防异常数据死循环 (desktop parity:
-                    // 达到上限取最后起点, 仅 end<=start 非法数据回退 null)
-                    while (end <= nowMs && rolled < MAX_PERIOD_ROLLS) {
-                        val span = end - start
-                        if (span <= 0) return null
-                        start = end
-                        end += span
-                        rolled++
-                    }
-                }
-                fmtUtc(start)
+                val start = java.time.LocalDateTime.parse(ps, FMT)
+                // 未来起点 (接口给出尚未开始的周期 / 本机时钟落后于服务端): 返回它会让
+                // 「本周期」筛选恒为空 —— 与回退路径同一护栏: 绝不返回未来起点.
+                if (toMs(start) > nowMs) return null
+                // 周期终点缺失/非法: 正常路径 start+end 同时落库 (savePeriodBounds),
+                // 走到这里的只有手改库等异常数据 —— 无法顺延过期周期, 回退滚动 30 天
+                val pe = normalize(periodEnd) ?: return null
+                val rolled = rollPeriodStart(start, java.time.LocalDateTime.parse(pe, FMT), nowMs)
+                if (rolled == null) null else fmtUtc(toMs(rolled))
             } catch (e: Exception) {
                 null
             }

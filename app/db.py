@@ -16,6 +16,7 @@ PROVIDER_COMMANDCODE = "commandcode"
 ALL_PROVIDERS = (PROVIDER_OPENCODE, PROVIDER_COMMANDCODE)
 
 import base64
+import calendar
 import hashlib
 import json
 import os
@@ -576,14 +577,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         ch_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_charts)").fetchall()}
         if "local_date" not in ch_cols:
             conn.execute("ALTER TABLE usage_charts ADD COLUMN local_date TEXT")
-        # 存量回填 (仅未回填行; 幂等)
+        # 存量回填 (仅未回填行; 幂等). 取前 19 字符 ("YYYY-MM-DDTHH:MM:SS") 再交给
+        # date(): created_at 是 isoformat 产物 ("...T..Z", 6 位微秒), 末尾的 Z 只有
+        # SQLite ≥3.38 认; 旧版会整串解析失败返回 NULL, 该行便静默地不被任何周期
+        # 过滤命中 (local_date 全为 NULL 时「本周期」筛出 0 条). Android 侧同款做法.
         conn.execute(
-            "UPDATE usage_records SET local_date = date(created_at, 'localtime')"
-            " WHERE local_date IS NULL"
+            "UPDATE usage_records SET local_date = date(substr(created_at, 1, 19), 'localtime')"
+            " WHERE local_date IS NULL AND LENGTH(created_at) >= 19"
         )
         conn.execute(
-            "UPDATE usage_charts SET local_date = date(time_bucket, 'localtime')"
-            " WHERE local_date IS NULL"
+            "UPDATE usage_charts SET local_date = date(substr(time_bucket, 1, 19), 'localtime')"
+            " WHERE local_date IS NULL AND LENGTH(time_bucket) >= 19"
         )
         conn.executescript(
             """
@@ -1145,7 +1149,8 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
         " output_tokens, reasoning_tokens, cache_read_tokens, cache_write_5m_tokens,"
         " cache_write_1h_tokens, cost_raw, cost_usd, key_id, session_id, plan, synced_at,"
         " account_id, local_date)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date(?, 'localtime'))"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+        " date(substr(?, 1, 19), 'localtime'))"
         " ON CONFLICT(account_id, usg_id) DO UPDATE SET"
         " created_at = excluded.created_at, model = excluded.model,"
         " provider = excluded.provider,"
@@ -1232,7 +1237,8 @@ def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = 
         " input_cost, output_cost, cache_cost, total_cost, credits_total,"
         " tokens_in, tokens_out, tokens_total, cache_read_tokens, cache_creation_tokens,"
         " synced_at, local_date)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date(?, 'localtime'))"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+        " date(substr(?, 1, 19), 'localtime'))"
         " ON CONFLICT(account_id, model, time_bucket) DO UPDATE SET"
         " provider = excluded.provider, requests = excluded.requests,"
         " input_cost = excluded.input_cost, output_cost = excluded.output_cost,"
@@ -1587,6 +1593,47 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
 # (实测 Go 为 10-08 → 11-08) 会偏差一天, 由 monthly_cycle_start 兜底回退.
 _MONTHLY_PERIOD_DAYS = 30
 
+# 记录跨度落在此区间视为自然月周期 (28~31 天 + 容差). 顺延这类周期按日历月推进,
+# 其余 (7/14/90 天等) 退回固定跨度.
+_CALENDAR_MONTH_SPAN_DAYS = (26, 32)
+
+
+def _add_calendar_months(anchor: datetime, count: int) -> datetime:
+    """从锚点加 count 个自然月, 日号随锚点保持, 月末溢出钳到当月最后一天.
+
+    必须以锚点为基准一次算出, 不能逐月累加 —— 逐月会丢锚点
+    (01-31 → 02-28 → 03-28, 此后永远停在 28 号).
+    """
+    total = anchor.month - 1 + count
+    year, month = anchor.year + total // 12, total % 12 + 1
+    day = min(anchor.day, calendar.monthrange(year, month)[1])
+    return anchor.replace(year=year, month=month, day=day)
+
+
+def _roll_period_start(start: datetime, end: datetime, now: datetime) -> Optional[datetime]:
+    """把已过期的计费周期顺延到覆盖 now 的那一个, 返回其起点.
+
+    自然月周期 (跨度 28~31 天, 实测 Go 月度 10-08 → 11-08) 按日历月推进: 用固定
+    跨度反复顺延会累积漂移 (31 天周期按 30 天跨度顺延, 每跨一个周期偏 1 天,
+    长期未打开可偏出一周). 跨度明显不是自然月时保持固定跨度, 以免改坏周套餐等.
+    数据非法 (end <= start) 或顺延后仍不覆盖 now 时返回 None, 交调用方走滚动 30 天.
+    """
+    span = end - start
+    if span <= timedelta(0):
+        # 服务端返回 end<=start: 数据非法, 回退滚动 30 天口径
+        # (此处曾因 span<=0 时 end 永不前进而死循环挂死请求线程)
+        return None
+    if _CALENDAR_MONTH_SPAN_DAYS[0] <= span.days <= _CALENDAR_MONTH_SPAN_DAYS[1]:
+        rolled = 0
+        while rolled < 1200 and _add_calendar_months(start, rolled + 1) <= now:
+            rolled += 1
+        return _add_calendar_months(start, rolled)
+    for _ in range(1200):  # 顺延跨周期; 上限兜底防异常数据死循环
+        if end > now:
+            return start
+        start, end = end, end + span
+    return start
+
 
 def record_period_bounds(account_id: Optional[int], period_start: str, period_end: str) -> None:
     """记录账号当前计费周期的起止时间 (UTC "YYYY-MM-DD HH:MM:SS").
@@ -1666,9 +1713,11 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
     """当前计费周期起点 (UTC "YYYY-MM-DD HH:MM:SS"); 无任何周期记录时返回 None.
 
     - 记录过真实周期起止的账号 (Go 的 access.startsAt / GOAT 的 subscriptions):
-      直接取 period_start, 周期已结束时按记录的跨度顺延;
+      直接取 period_start, 周期已结束时顺延到覆盖当前时刻的那个周期 (自然月周期
+      按日历月推进, 见 _roll_period_start);
     - 只有「下次重置」的账号: 回推 30 天; 回推后仍不在过去 (真实周期 > 30 天,
-      如自然月 31 天) 则返回 None 让调用方走滚动 30 天 —— 绝不返回未来起点.
+      如自然月 31 天) 则返回 None 让调用方走滚动 30 天.
+    两条路径都绝不返回未来起点 —— 未来起点会让「本周期」窗口恒为空.
     """
     aid = _resolve_account_id(account_id)
     if not aid:
@@ -1684,26 +1733,23 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
         except ValueError:
             start = None
         if start is not None:
-            # 周期已过期 (配额未刷新), 以最近一个周期起点为准
+            # 未来起点 (接口给出尚未开始的周期 / 本机时钟落后于服务端): 返回它会让
+            # 「本周期」窗口恒为空 (local_date >= 未来日期 筛出 0 条) —— 与下面回退
+            # 路径同一护栏: 绝不返回未来起点, 交给调用方走滚动 30 天.
+            if start > now:
+                return None
+            # 周期已过期 (配额未刷新), 顺延到覆盖当前时刻的那一个周期
             if stored_end:
                 try:
                     end = datetime.strptime(str(stored_end), "%Y-%m-%d %H:%M:%S")
                 except ValueError:
                     end = None
                 if end is not None:
-                    for _ in range(1200):  # 顺延跨周期; 上限兜底防异常数据死循环
-                        if end > now:
-                            break
-                        span = end - start
-                        if span <= timedelta(0):
-                            # 服务端返回 end<=start: 数据非法, 回退滚动 30 天口径
-                            # (此处曾因 span<=0 时 end 永不前进而死循环挂死请求线程)
-                            return None
-                        start = end
-                        end = end + span
-                    return start.strftime("%Y-%m-%d %H:%M:%S")
-            # 周期终点缺失/非法: 正常路径 start+end 同时落库 (record_period_bounds),
-            # 走到这里的只有手改库等异常数据 —— 无法顺延过期周期, 回退 None 让
+                    rolled = _roll_period_start(start, end, now)
+                    if rolled is not None:
+                        return rolled.strftime("%Y-%m-%d %H:%M:%S")
+            # 周期终点缺失/非法, 或顺延后仍不覆盖 now: 正常路径 start+end 同时落库
+            # (record_period_bounds), 走到这里的只有手改库等异常数据 —— 回退 None 让
             # 调用方走 30 天滚动口径, 避免把上个周期拉进「本月」窗口
             return None
     # 无真实周期: 老规则, 由重置时间回推 (opencode)
@@ -1821,9 +1867,16 @@ def _charts_period_where(
 ) -> tuple[str, list[Any]]:
     """usage_charts 周期过滤 (与明细 _period_where 口径一致: UTC 存储 + localtime 日界).
 
-    与明细同款两段式: 先用 local_date 把行集收敛到窗口附近 (走
-    idx_charts_account_localdate 范围扫), 再叠加 datetime() 保留秒级精确口径 ——
-    直接 datetime(time_bucket) >= ... 包裹索引列, 每条 charts 聚合都按账号全量扫.
+    "5h" 与「有真实周期起点的 month」用两段式: 先用 local_date 把行集收敛到窗口
+    附近 (走 idx_charts_account_localdate 范围扫), 再叠加 datetime() 保留秒级精确
+    口径 —— 直接 datetime(time_bucket) >= ... 包裹索引列, 每条 charts 聚合都按账号
+    全量扫.
+
+    "Nd" 与「month 回退 (无周期记录)」**只用 local_date**, 与明细 _period_where 及
+    daily_stats / model_daily_stats / 热力图 完全同源. 这几张图按本地日分桶, 窗口
+    必须整天对齐; 多一条 datetime() 精筛会让总卡比趋势图少掉最早那半天的数据 ——
+    同一张 usage_charts 表上并存两套窗口, 实测 request_count 1 vs 101 (aa6cdbff
+    给本函数追加 local_date 索引收敛条件时, 明细分支是"替换"、此处是"追加", 遗留至今).
     """
     clauses = ["account_id = ?"]
     params: list[Any] = [account_id]
@@ -1842,16 +1895,12 @@ def _charts_period_where(
         else:
             clauses.append("local_date >= date('now', 'localtime', ?)")
             params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
-            clauses.append("datetime(time_bucket) >= datetime('now', ?)")
-            params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
     elif period != "all":
         days = 30
         match = _NUM_DAYS_RE.match(period or "")
         if match:
             days = max(1, int(match.group(1)))
         clauses.append("local_date >= date('now', 'localtime', ?)")
-        params.append(f"-{days} days")
-        clauses.append("datetime(time_bucket) >= datetime('now', ?)")
         params.append(f"-{days} days")
     ex_sql, ex_params = _exclude_clause(exclude_models)
     if ex_sql:
