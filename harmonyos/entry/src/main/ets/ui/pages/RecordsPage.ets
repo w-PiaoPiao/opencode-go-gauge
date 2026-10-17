@@ -5,7 +5,7 @@ import { Repo } from '../../data/repository/DashboardRepository'
 import { PageResult, SessionStat, UsageRecordRow } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
 import { AppPrefs } from '../../common/store/AppPrefs'
-import { ModelIcon, SectionCard } from '../components/Cards'
+import { ModelIcon } from '../components/Cards'
 import { I18n } from '../../common/i18n/I18n'
 import { Theme } from '../theme/Theme'
 
@@ -226,7 +226,7 @@ export struct RecordsPage {
         .fontSize(16)
         .width(40)
         .height(32)
-        .backgroundColor(page > 1 ? '#3B82F6' : '#D3D3D3')
+        .backgroundColor(page > 1 ? Theme.accent() : '#D3D3D3')
         .enabled(page > 1)
         .onClick(() => { onPage(Math.max(1, page - 1)) })
       Text(`${page} / ${this.totalPages(total)}`)
@@ -236,7 +236,7 @@ export struct RecordsPage {
         .fontSize(16)
         .width(40)
         .height(32)
-        .backgroundColor(page < this.totalPages(total) ? '#3B82F6' : '#D3D3D3')
+        .backgroundColor(page < this.totalPages(total) ? Theme.accent() : '#D3D3D3')
         .enabled(page < this.totalPages(total))
         .onClick(() => { onPage(Math.min(this.totalPages(total), page + 1)) })
       Blank()

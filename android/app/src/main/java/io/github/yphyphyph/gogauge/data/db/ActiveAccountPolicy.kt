@@ -29,7 +29,4 @@ object ActiveAccountPolicy {
         if (loggedMin != null) return loggedMin
         return accounts.minOfOrNull { it.id } ?: 0
     }
-
-    /** 解析结果是否需要回写 (DAO 层据此决定 persist)。 */
-    fun needsPersist(resolved: Int, storedActiveId: Int?): Boolean = resolved != (storedActiveId ?: 0)
 }

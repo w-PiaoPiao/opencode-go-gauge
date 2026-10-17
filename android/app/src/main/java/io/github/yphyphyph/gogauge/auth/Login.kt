@@ -1,5 +1,7 @@
 package io.github.yphyphyph.gogauge.auth
 
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_OPENCODE
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -14,21 +16,16 @@ import java.net.URLEncoder
  */
 object Login {
 
-    const val PROVIDER_OPENCODE = "opencode"
-    const val PROVIDER_COMMANDCODE = "commandcode"
-
     // ---- opencode (控制台改版后) ----
     const val CONSOLE_LOGIN_URL = "https://opencode.ai/console/login"
     const val LOGIN_NEXT_PATH = "/console/"
     /** 新版会话 cookie; 旧版 auth= 仅作历史账号兼容 (读/写都优先新版)。 */
     const val SESSION_COOKIE_NAME = "__Host-console_session"
     const val LEGACY_SESSION_COOKIE_NAME = "auth"
-    const val OPENDCODE_DOMAIN = "https://opencode.ai"
 
     // ---- commandcode (GOAT) — auth.py CC_* constants parity ----
     const val CC_LOGIN_BASE = "https://commandcode.ai/signin"
     const val CC_AUTH_COOKIE_NAME = "__Secure-commandcode_prod_.session_token"
-    const val CC_DOMAIN = "https://commandcode.ai"
 
     /** 登录页 URL 里的工作区提示 — 控制台改版后为 /console/wrk_xxx (旧 /workspace/ 兼容)。 */
     private val WORKSPACE_URL_RE = Regex("/(?:console|workspace)/(wrk_[A-Za-z0-9]+)")

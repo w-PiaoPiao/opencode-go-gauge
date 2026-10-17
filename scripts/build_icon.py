@@ -42,9 +42,6 @@ def main() -> None:
     sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     base.save(OUT, format="ICO", sizes=sizes)
     print("written:", os.path.abspath(OUT))
-    for s in sizes:
-        im = draw_logo(s[0])
-        im.save(OUT, format="ICO", append_images=[] if s == sizes[0] else None, sizes=[s]) if False else None
     # 校验
     chk = Image.open(OUT)
     print("ico sizes:", getattr(chk, "info", {}).get("sizes"), "| fmt:", chk.format)

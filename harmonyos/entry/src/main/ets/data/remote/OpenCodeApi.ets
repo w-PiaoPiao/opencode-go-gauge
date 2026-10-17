@@ -7,6 +7,7 @@
 import { HttpFetch } from './HttpFetch'
 import { QuotaParser } from './QuotaParser'
 import { UsageParser } from './UsageParser'
+import { Cookie } from '../../common/util/Cookie'
 import { QuotaResult, UsageRecord } from '../../common/model/Models'
 
 export class OpenCodeApi {
@@ -23,20 +24,12 @@ export class OpenCodeApi {
 
   /** 归一化 token 为 auth cookie 段。 */
   static buildCookieHeader(token: string): string {
-    let cookie = token.trim()
-    if (cookie.toLowerCase().startsWith('cookie:')) {
-      cookie = cookie.slice(7).trim()
+    const seg = Cookie.findSegment(token, 'auth')
+    if (seg.length > 0) {
+      return seg
     }
-    if (cookie.length === 0) {
-      return ''
-    }
-    for (const part of cookie.split(';')) {
-      const p = part.trim()
-      if (p.startsWith('auth=')) {
-        return p
-      }
-    }
-    return `auth=${cookie}`
+    const cookie = Cookie.stripPrefix(token)
+    return cookie.length === 0 ? '' : `auth=${cookie}`
   }
 
   private static argsToJson(args: Array<string | number | null>): string {

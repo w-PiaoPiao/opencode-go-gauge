@@ -10,6 +10,7 @@ import { SyncDao } from '../db/SyncDao'
 import { OpenCodeApi } from '../remote/OpenCodeApi'
 import { ExchangeApi } from '../remote/ExchangeApi'
 import { MonthlyCycle } from '../../common/util/MonthlyCycle'
+import { Fmt } from '../../common/util/Fmt'
 import {
   AccountInfo, AppSettings, DashboardData, DailyStat, HourStat, ModelStat, PageResult, QuotaResult,
   QuotaWindow, SessionStat, SyncProgress, SyncResult, SyncState, Totals, UsageRecord, UsageRecordRow,
@@ -70,10 +71,6 @@ export class DashboardRepository {
 
   async accounts(): Promise<AccountInfo[]> {
     return this.syncDao.listAccounts()
-  }
-
-  async countLoggedInAccounts(): Promise<number> {
-    return this.syncDao.countLoggedInAccounts()
   }
 
   async account(): Promise<AccountInfo | null> {
@@ -221,8 +218,7 @@ export class DashboardRepository {
 
   static fmtServerTime(): string {
     const d = new Date()
-    const p = (n: number): string => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    return `${d.getFullYear()}-${Fmt.pad2(d.getMonth() + 1)}-${Fmt.pad2(d.getDate())} ${Fmt.pad2(d.getHours())}:${Fmt.pad2(d.getMinutes())}:${Fmt.pad2(d.getSeconds())}`
   }
 
   async loadDashboard(range: string): Promise<DashboardData> {
@@ -571,10 +567,6 @@ export class DashboardRepository {
 
   async listModels(): Promise<string[]> {
     return this.usageDao.listModels(await this.syncDao.getActiveAccountId())
-  }
-
-  async syncState(): Promise<SyncState> {
-    return this.syncDao.getSyncState()
   }
 
   async settings(): Promise<AppSettings> {

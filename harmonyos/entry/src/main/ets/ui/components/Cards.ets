@@ -1,5 +1,4 @@
 /** 通用卡片组件 —— Compose Cards 的 ArkUI 移植。 */
-import { Fmt } from '../../common/util/Fmt'
 import { Theme } from '../theme/Theme'
 
 /** 区块容器: 标题 + 内容区 (由 @BuilderParam content 注入)。 */
@@ -115,9 +114,4 @@ export struct ModelIcon {
     }
     return '#64748B'
   }
-}
-
-/** 价格格式化快捷入口 (页面内复用)。 */
-export function fmtMoneyUsd(usd: number, currency: string, usdCny: number): string {
-  return Fmt.money(usd, currency, usdCny)
 }

@@ -17,18 +17,6 @@ export interface AccountRow {
   updatedAt: string
 }
 
-export interface SyncStateRow {
-  accountId: number
-  lastSyncAt: string | null
-  lastSyncStatus: string | null
-  lastSyncError: string | null
-  lastInsertedCount: number
-  deepestPageFetched: number
-  totalRecords: number
-  oldestRecordAt: string | null
-  newestRecordAt: string | null
-}
-
 function accountRowFromReader(r: RowReader): AccountRow {
   return {
     id: r.getLong('id'),
@@ -93,20 +81,12 @@ export class SyncDao {
     return v
   }
 
-  async minLoggedInId(): Promise<number> {
-    return (await this.scalarInt('SELECT MIN(id) FROM accounts WHERE TRIM(token) != \'\''))
-  }
-
   async minAnyId(): Promise<number> {
     return (await this.scalarInt('SELECT MIN(id) FROM accounts'))
   }
 
   async countAccounts(): Promise<number> {
     return this.scalarInt('SELECT COUNT(*) FROM accounts')
-  }
-
-  async countLoggedInAccounts(): Promise<number> {
-    return this.scalarInt('SELECT COUNT(*) FROM accounts WHERE TRIM(token) != \'\'')
   }
 
   /** desktop add_account 显式取 MAX(id)+1 作主键 (保持 id 连续)。 */
@@ -437,10 +417,6 @@ export class SyncDao {
     }
     r.close()
     return out
-  }
-
-  async getSyncState(): Promise<SyncState> {
-    return this.getSyncStateFor(await this.getActiveAccountId())
   }
 
   async getTokenFor(accountId: number): Promise<string> {

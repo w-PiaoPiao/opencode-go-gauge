@@ -55,7 +55,6 @@ import io.github.yphyphyph.gogauge.data.model.QuotaWindow
 import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.theme.CaptionLabel
 import io.github.yphyphyph.gogauge.ui.theme.Gg
-import io.github.yphyphyph.gogauge.ui.theme.GgDark
 import io.github.yphyphyph.gogauge.ui.theme.NUM_FEATURE_SETTINGS
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import io.github.yphyphyph.gogauge.util.Fmt
@@ -318,6 +317,16 @@ fun QuotaCard(
 }
 
 /**
+ * 配额窗口标签本地化 (Home / Overview 共用): 已知窗口名 → 本地化文案, 其余原样返回。
+ */
+fun quotaLabel(label: String, s: Strings): String = when (label) {
+    "5h Rolling" -> s.rolling
+    "Weekly" -> s.weekly
+    "Monthly" -> s.monthly
+    else -> label
+}
+
+/**
  * 配额窗口重置文案 (desktop resetText parity, 08dfca1):
  * 有重置时间照旧「重置于 X」; 无重置时间且 used=0 → 「窗口未开始」(5h 窗口空闲,
  * 接口不给 resetsAt); 无重置时间但 used>0 → 「重置时间未知」(Command Code 缺订阅响应).
@@ -431,10 +440,6 @@ object Accent {
     val cyan: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Cyan
     val slate: Color @Composable get() = io.github.yphyphyph.gogauge.ui.theme.Gg.Slate
 }
-
-/** Dark-aware accent helper */
-@Composable
-fun isDark(): Boolean = MaterialTheme.colorScheme.background == GgDark.Bg
 
 /* ================= 下拉刷新指示器 ================= */
 /*

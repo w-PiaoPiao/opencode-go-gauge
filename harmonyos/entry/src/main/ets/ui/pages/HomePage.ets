@@ -103,7 +103,7 @@ export struct HomePage {
     if (label.indexOf('Monthly') >= 0) {
       return '#10B981'
     }
-    return '#3B82F6'
+    return Theme.accent()
   }
 
   private resetCaption(sec: number): string {

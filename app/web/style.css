@@ -153,7 +153,6 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .sk-line.w20 { width: 20%; } .sk-line.w30 { width: 30%; } .sk-line.w40 { width: 40%; }
 .sk-line.w50 { width: 50%; } .sk-line.w60 { width: 60%; } .sk-line.w70 { width: 70%; }
 .sk-bar { height: 8px; border-radius: 99px; background: var(--muted); margin: 8px 0; }
-.sk-chart { height: 100%; min-height: 200px; border-radius: 8px; background: var(--muted); }
 .sk-box { position: relative; }
 .sk-box::after { content: ""; position: absolute; inset: 0; background: var(--muted); border-radius: 8px; }
 
@@ -224,7 +223,6 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .kpi-s { font-size: 11.5px; color: var(--text3); margin-top: 2px; font-variant-numeric: tabular-nums; }
 
 /* ---------- 今日用量 / 明细卡 ---------- */
-.today-cards { margin-bottom: 12px; padding-bottom: 12px; }
 .tc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 14px 4px; }
 .tc-grid.tc-6 { grid-template-columns: repeat(6, 1fr); }
 .tc { background: var(--muted); border-radius: 10px; padding: 10px 12px; }
@@ -237,7 +235,6 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 
 /* ---------- 统计页 ---------- */
 .two-col { display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; margin-bottom: 12px; }
-.bottom-col { grid-template-columns: 1fr 1fr; align-items: stretch; }
 .sessions { padding-bottom: 4px; margin-bottom: 12px; }
 #page-records .sessions, #page-records .records { margin-bottom: 0; }
 .sessions .pager, .records .pager { padding: 8px 0 6px; }

@@ -23,10 +23,6 @@ def supported() -> bool:
     return sys.platform == "darwin" and bool(getattr(sys, "frozen", False))
 
 
-def is_enabled() -> bool:
-    return supported() and os.path.isfile(_plist_path())
-
-
 def enable() -> bool:
     if not supported():
         return False

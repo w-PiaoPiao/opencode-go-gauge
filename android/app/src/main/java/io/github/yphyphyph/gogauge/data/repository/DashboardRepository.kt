@@ -14,10 +14,7 @@ import io.github.yphyphyph.gogauge.data.model.QuotaWindow
 import io.github.yphyphyph.gogauge.data.model.SessionStat
 import io.github.yphyphyph.gogauge.data.model.SyncProgress
 import io.github.yphyphyph.gogauge.data.model.SyncState
-import io.github.yphyphyph.gogauge.data.model.Totals
-import io.github.yphyphyph.gogauge.data.model.UsageRecord
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
-import io.github.yphyphyph.gogauge.data.model.UsageChartBucket
 import io.github.yphyphyph.gogauge.data.remote.AuthException
 import io.github.yphyphyph.gogauge.data.remote.CommandCodeApi
 import io.github.yphyphyph.gogauge.data.remote.ExchangeApi
@@ -1020,13 +1017,6 @@ class DashboardRepository(
         }
     }
 
-    fun syncAllAsync(scope: CoroutineScope, mode: String) {
-        scope.launch {
-            ensureQuota()
-            syncUsage(mode)
-        }
-    }
-
     // ------------------------------------------------------------------
     // Pages / settings / account (server.py API parity — 活跃账号)
     // ------------------------------------------------------------------
@@ -1098,9 +1088,6 @@ class DashboardRepository(
         if (aid != 0) clearQuotaSlot(aid)
         _quota.value = null
     }
-
-    @Deprecated("Use loginSuccess(token, hint, mode)", ReplaceWith("loginSuccess(token, workspaceHint, \"relogin\")"))
-    suspend fun saveLogin(token: String, workspaceHint: String) = loginSuccess(token, workspaceHint, "relogin")
 
     suspend fun checkUpdate(currentVersion: String): UpdateInfo = updateApi.checkUpdate(currentVersion)
 }

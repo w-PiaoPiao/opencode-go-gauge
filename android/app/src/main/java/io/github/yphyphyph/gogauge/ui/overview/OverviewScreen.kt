@@ -21,7 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -42,7 +41,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yphyphyph.gogauge.data.model.AccountOverview
 import io.github.yphyphyph.gogauge.data.model.DailyStat
 import io.github.yphyphyph.gogauge.ui.MainViewModel
-import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.components.Accent
 import io.github.yphyphyph.gogauge.ui.components.CardHeader
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
@@ -53,6 +51,7 @@ import io.github.yphyphyph.gogauge.ui.components.QuotaCard
 import io.github.yphyphyph.gogauge.ui.components.Sparkline
 import io.github.yphyphyph.gogauge.ui.components.TrendLineChart
 import io.github.yphyphyph.gogauge.ui.components.quotaForecastText
+import io.github.yphyphyph.gogauge.ui.components.quotaLabel
 import io.github.yphyphyph.gogauge.ui.components.quotaResetText
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import io.github.yphyphyph.gogauge.util.Fmt
@@ -362,14 +361,6 @@ private fun mergeDaily(lists: List<List<DailyStat>>): List<DailyStat> {
         )
     }
     return byDate.values.sortedBy { it.date }
-}
-
-@Composable
-private fun quotaLabel(label: String, s: Strings): String = when (label) {
-    "5h Rolling" -> s.rolling
-    "Weekly" -> s.weekly
-    "Monthly" -> s.monthly
-    else -> label
 }
 
 @Composable

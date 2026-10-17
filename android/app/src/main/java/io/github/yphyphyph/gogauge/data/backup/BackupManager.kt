@@ -4,9 +4,7 @@ import android.content.Context
 import android.net.Uri
 import io.github.yphyphyph.gogauge.data.db.AppDatabase
 import io.github.yphyphyph.gogauge.data.db.UsageRecordEntity
-import io.github.yphyphyph.gogauge.data.model.PROVIDER_OPENCODE
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.InputStreamReader

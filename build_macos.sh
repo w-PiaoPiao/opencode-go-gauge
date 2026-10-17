@@ -26,7 +26,6 @@ UPDATE_REPO="${GOUSAGE_UPDATE_REPO:-w-PiaoPiao/opencode-go-gauge}"
 cat > app/_build_info.py <<EOF
 """构建时自动生成 (gitignored): 打包产物元信息, 供更新检查使用."""
 UPDATE_REPO = "${UPDATE_REPO}"
-BUILD_VERSION = "${APP_VERSION}"
 EOF
 echo "    version=${APP_VERSION}  update_repo=${UPDATE_REPO}"
 
