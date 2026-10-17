@@ -94,6 +94,8 @@ const I18N = {
      loggedOut: "已退出登录",
     logoutUserConfirm: "将退出「{name}」并清除其本地用量数据与同步记录，确定？",
         heatmapTitle: "日历热力图", heatmapNoData: "本地暂无历史数据", fewer: "少", more: "多",
+    hmPeak: "峰值", hmCurStreak: "当前连续", hmMaxStreak: "最长连续", hmDay: "天", hmDayOne: "天",
+    trendHintGap: "30 天（{n} 天前无数据）",
     exportCsv: "导出 CSV", exportCsvDesc: "用量明细导出为表格文件（时间/模型/Token/费用）",
     exportBackup: "导出 JSON 备份", exportBackupDesc: "账号（不含凭证）与全部用量记录打包 (.json.gz)，与移动端互通",
     importBackup: "导入备份", importBackupDesc: "从 JSON 备份合并数据；凭证不可迁移，恢复后需重新登录",
@@ -190,6 +192,8 @@ const I18N = {
      loggedOut: "Signed out",
     logoutUserConfirm: "Sign out \"{name}\" and remove their local usage data and sync history?",
         heatmapTitle: "Daily Heatmap", heatmapNoData: "No local history yet", fewer: "less", more: "more",
+    hmPeak: "Peak", hmCurStreak: "Current streak", hmMaxStreak: "Longest streak", hmDay: "days", hmDayOne: "day",
+    trendHintGap: "30 days (no data for the first {n} days)",
     exportCsv: "Export CSV", exportCsvDesc: "Export usage records as a spreadsheet (time/model/tokens/cost)",
     exportBackup: "Export JSON Backup", exportBackupDesc: "Pack accounts (no tokens) and all usage records (.json.gz), interchangeable with mobile",
     importBackup: "Import Backup", importBackupDesc: "Merge data from a JSON backup; tokens can't migrate — re-login after restore",
@@ -203,7 +207,7 @@ let state = {
   range: "today",
   statsRange: "7d",
   modelDim: "input",
-  heatmapDim: "cost",
+  heatmapDim: "tokens",
   // 首页今日趋势口径: plain=未缓存输入/输出两列 (旧行为); total=含缓存总 TOKEN 单列
   ttMode: "plain",
   data: null,
@@ -675,8 +679,11 @@ function renderHeatmap() {
   const max = Math.max(...heatmapDays.map(val), 1);
   const first = new Date(heatmapDays[0].date + "T00:00:00");
   const leadingBlanks = (first.getDay() + 6) % 7;  // 周一为首行
+  const cols = Math.ceil((leadingBlanks + heatmapDays.length) / 7);
   // 列式网格 (每列一周), 横向滚动 — GitHub contribution 布局
-  let html = `<div class="hm-scroll"><div class="hm-grid" style="--hm-cols:${Math.ceil((leadingBlanks + heatmapDays.length) / 7)}">`;
+  // --hm-w = 网格实际像素宽 (12px 格 + 3px 间距, 与 .hm-grid 同步): 左侧最小宽,
+  // 窗口不够时右侧摘要换行而不是把网格挤成横向滚动条
+  let html = `<div class="hm-left" style="--hm-w:${cols * 12 + (cols - 1) * 3}px"><div class="hm-scroll"><div class="hm-grid" style="--hm-cols:${cols}">`;
   for (let i = 0; i < leadingBlanks; i++) html += `<div class="hcell empty"></div>`;
   for (const d of heatmapDays) {
     const v = val(d);
@@ -686,8 +693,30 @@ function renderHeatmap() {
   }
   html += `</div></div><div class="hm-legend"><span>${t("fewer")}</span>`;
   for (let i = 0; i < 5; i++) html += `<div class="hcell lv${i}"></div>`;
-  html += `<span>${t("more")}</span></div>`;
+  html += `<span>${t("more")}</span></div></div>`;
+  html += heatmapSummaryHtml(metric, val);
   body.innerHTML = html;
+}
+/* 热力图右侧摘要 (峰值 / 当前连续 / 最长连续) — 峰值随所选指标变,
+   连续天数以"当天有请求"为准 (与指标无关: 免费模型也可能成本为 0) */
+function heatmapSummaryHtml(metric, val) {
+  let peakV = -1, peakDate = "";
+  heatmapDays.forEach((d) => { const v = val(d); if (v > peakV) { peakV = v; peakDate = d.date; } });
+  const on = heatmapDays.map((d) => (d.request_count || 0) > 0);
+  let longest = 0, run = 0;
+  for (const v of on) { run = v ? run + 1 : 0; if (run > longest) longest = run; }
+  // 当前连续从最后一天回溯; 今天还没用量时从昨天起算, 否则每天零点后都会显示 0
+  let i = on.length - 1;
+  if (i >= 0 && !on[i]) i -= 1;
+  let cur = 0;
+  while (i >= 0 && on[i]) { cur += 1; i -= 1; }
+  const fmt = (v) => metric === "cost" ? fmtMoney(v) : metric === "requests" ? fmtInt(v) : fmtTokens(v);
+  const days = (n) => `${n}<small>${n === 1 ? t("hmDayOne") : t("hmDay")}</small>`;
+  return `<div class="hm-stats">
+      <div class="hm-stat"><div class="hm-stat-l">${t("hmPeak")} · ${peakDate.slice(5)}</div><div class="hm-stat-v">${fmt(peakV)}</div></div>
+      <div class="hm-stat"><div class="hm-stat-l">${t("hmCurStreak")}</div><div class="hm-stat-v">${days(cur)}</div></div>
+      <div class="hm-stat"><div class="hm-stat-l">${t("hmMaxStreak")}</div><div class="hm-stat-v">${days(longest)}</div></div>
+    </div>`;
 }
 /* ---------------- 统计页: 模型用量 ---------------- */
 let cModel = null;
@@ -811,13 +840,21 @@ function chartModelTrend(rangeModels) {
       return oa !== ob ? oa - ob : b.total - a.total;
     })
     .slice(0, 6);
-  const labels = modelTrendData.days.map((d) => d.slice(5));  // MM-DD
+  // 前置空档不画 (与用量趋势同口径): 从可见模型里第一天有量的开始, 中间/末尾的 0 保留.
+  // 判定用 input/output/cost 任一非零 —— 与当前维度无关, 换维度时起点不会跳;
+  // 排除集是用户显式过滤, 所以只看可见模型 (top6 截取属展示细节, 不参与判定)
+  const visSeries = modelTrendData.series.filter((s) => !state.excludedModels.has(s.model));
+  const firstOn = modelTrendData.days.findIndex((_, i) => visSeries.some((s) =>
+    (s.input?.[i] || 0) + (s.output?.[i] || 0) + (s.cost?.[i] || 0) > 0));
+  const from = firstOn > 0 ? firstOn : 0;
+  const labels = modelTrendData.days.slice(from).map((d) => d.slice(5));  // MM-DD
   const datasets = ranked.map((x, i) => ({
     label: x.s.model,
-    data: x.s[dim] || labels.map(() => 0),
+    data: x.s[dim] ? x.s[dim].slice(from) : labels.map(() => 0),
     backgroundColor: MODEL_PALETTE[i],
     stack: "s", borderRadius: 2, barPercentage: 0.9, categoryPercentage: 0.9,
   }));
+  $("mt-hint").textContent = trendHintText(from);
   cModelTrend = new Chart(canvas, {
     type: "bar",
     data: { labels, datasets },
@@ -838,17 +875,33 @@ function chartModelTrend(rangeModels) {
 }
 /* ---------------- 统计页: 用量趋势 ---------------- */
 let cTrend = null;
+/* 趋势图右上角提示: 窗口天数 (+ 被裁掉的前置无数据天数)。
+   leadDays <= 0 (窗口开头就有量) 时只显示窗口本身 */
+function trendHintText(leadDays) {
+  return leadDays > 0 ? t("trendHintGap").replace("{n}", leadDays) : t("trendHint");
+}
 function chartTrend(trend) {
   const canvas = $("trend-chart");
   if (cTrend) cTrend.destroy();
-  if (!trend || !trend.length) { cTrend = null; return; }
+  if (!trend || !trend.length) {
+    cTrend = null;
+    $("trend-hint").textContent = t("trendHint");
+    return;
+  }
+  // 前置补 0 不画: 从第一个有量的那天起画 —— 否则开头的空窗期会拉出一条长平线,
+  // 把真实波动压扁。中间与末尾的 0 仍保留 (折线不断档、缺口可见);
+  // 整段都没有量时退回原样, 保持原有的平线表现
+  const firstOn = trend.findIndex((d) => d.request_count > 0 || d.total_cost_usd > 0
+    || d.total_input_tokens + d.total_output_tokens + d.total_reasoning_tokens > 0);
+  const days = firstOn > 0 ? trend.slice(firstOn) : trend;
+  $("trend-hint").textContent = trendHintText(firstOn);
   cTrend = new Chart(canvas, {
     data: {
-      labels: trend.map((d) => d.date.slice(5)),
+      labels: days.map((d) => d.date.slice(5)),
       datasets: [
-        { type: "line", label: t("totalCost"), data: trend.map((d) => d.total_cost_usd), borderColor: COLOR.input, borderWidth: 2, pointRadius: 1.5, tension: 0.3, yAxisID: "y" },
-        { type: "line", label: t("totalRequests"), data: trend.map((d) => d.request_count), borderColor: COLOR.output, borderWidth: 2, pointRadius: 1.5, tension: 0.3, yAxisID: "y1", borderDash: [4, 3] },
-        { type: "line", label: t("totalTokens"), data: trend.map((d) => d.total_input_tokens + d.total_output_tokens + d.total_reasoning_tokens), borderColor: COLOR.reasoning, borderWidth: 2, pointRadius: 1.5, tension: 0.3, yAxisID: "y2" },
+        { type: "line", label: t("totalCost"), data: days.map((d) => d.total_cost_usd), borderColor: COLOR.input, borderWidth: 2, pointRadius: 1.5, tension: 0.3, yAxisID: "y" },
+        { type: "line", label: t("totalRequests"), data: days.map((d) => d.request_count), borderColor: COLOR.output, borderWidth: 2, pointRadius: 1.5, tension: 0.3, yAxisID: "y1", borderDash: [4, 3] },
+        { type: "line", label: t("totalTokens"), data: days.map((d) => d.total_input_tokens + d.total_output_tokens + d.total_reasoning_tokens), borderColor: COLOR.reasoning, borderWidth: 2, pointRadius: 1.5, tension: 0.3, yAxisID: "y2" },
       ],
     },
     options: {
@@ -992,7 +1045,6 @@ function renderAll(data) {
     renderDetail6(data.totals);
     chartModel(data.models);
     chartTrend(data.trend);
-    $("trend-hint").textContent = t("trendHint");
   }
   const sync = data.sync || {};
   // GOAT (commandcode): 明细仅最近 24h/100 条, 同步状态展示全周期聚合请求数

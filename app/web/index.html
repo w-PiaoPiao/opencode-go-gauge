@@ -100,11 +100,11 @@
       </div>
       <div class="two-col" id="heatmap-row" hidden>
         <div class="card" id="heatmap-card">
-          <div class="card-h"><h3 data-i18n="heatmapTitle">日历热力图</h3><div class="seg" id="hm-dim"><button class="active" data-dim="cost" data-i18n="cost">成本</button><button data-dim="requests" data-i18n="totalRequests">总请求</button><button data-dim="tokens" data-i18n="totalTokens">总 TOKEN</button></div></div>
+          <div class="card-h"><h3 data-i18n="heatmapTitle">日历热力图</h3><div class="seg" id="hm-dim"><button class="active" data-dim="tokens" data-i18n="totalTokens">总 TOKEN</button><button data-dim="requests" data-i18n="totalRequests">总请求</button><button data-dim="cost" data-i18n="cost">成本</button></div></div>
           <div class="hm-body" id="heatmap-body"></div>
         </div>
         <div class="card model-trend-card">
-          <div class="card-h"><h3 data-i18n="mtTitle">模型用量趋势</h3><span class="hint" data-i18n="trendHint">30 天</span></div>
+          <div class="card-h"><h3 data-i18n="mtTitle">模型用量趋势</h3><span class="hint" id="mt-hint" data-i18n="trendHint">30 天</span></div>
           <div class="chart-box" style="min-height:170px"><canvas id="mt-chart"></canvas></div>
         </div>
       </div>
