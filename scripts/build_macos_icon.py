@@ -7,7 +7,6 @@
      -> assets/GoGauge.png (512)
      -> assets/GoGauge.icns (16/32/64/128/256/512 + Retina)
 """
-import math
 import os
 
 from PIL import Image, ImageDraw, ImageFont

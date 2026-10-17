@@ -37,7 +37,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import io.github.yphyphyph.gogauge.data.model.PageResult
 import io.github.yphyphyph.gogauge.data.model.SessionStat
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
 import io.github.yphyphyph.gogauge.ui.MainViewModel

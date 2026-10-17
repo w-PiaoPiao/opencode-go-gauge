@@ -139,12 +139,17 @@ def session_cookie_names(provider: str) -> tuple[str, ...]:
 
 
 def _pick_session_cookie(cookies, provider: str = PROVIDER_OPENCODE) -> Optional[tuple[str, str]]:
-    """按优先级挑选 provider 的会话 cookie, 返回 (cookie名, 值)."""
-    jar = dict(_cookie_entries(cookies or []))
+    """按优先级挑选 provider 的会话 cookie, 返回 (cookie名, 值).
+
+    先按 session_cookie_names 的优先级挑名字 (新名 __Host-console_session 必须压过
+    旧名 auth, 否则残留的历史 cookie 会盖掉当前会话); 同一名字出现多条时取**先出现**
+    的那条 —— cookie store 里同名多值只可能来自不同 path/domain, 先到的即当前生效值.
+    """
+    entries = _cookie_entries(cookies or [])
     for name in session_cookie_names(provider):
-        value = jar.get(name) or ""
-        if value.strip():
-            return name, value
+        for entry_name, value in entries:
+            if entry_name == name and value.strip():
+                return entry_name, value
     return None
 
 
@@ -896,8 +901,11 @@ def read_provider_cookie(win, provider: str, timeout: float = COOKIE_READ_TIMEOU
     open_login 卡死在"启动监听"之前.
 
     读不到 (超时/异常)返回 None, 由调用方的旧凭证指纹继续兜底.
+
+    选取走 _pick_session_cookie: 按 session_cookie_names 的**优先级**取, 而不是
+    按 get_cookies 返回顺序取 —— 两者都存在时新名 __Host-console_session 必须压过
+    旧名 auth, 否则残留的历史 cookie 会盖掉当前会话.
     """
-    targets = session_cookie_names(provider)
     box: dict[str, Optional[str]] = {}
 
     def worker() -> None:
@@ -905,10 +913,9 @@ def read_provider_cookie(win, provider: str, timeout: float = COOKIE_READ_TIMEOU
             cookies = win.get_cookies() or []
         except Exception:  # noqa: BLE001 窗口未加载完成/已销毁
             return
-        for name, value in _cookie_entries(cookies):
-            if name in targets and value:
-                box["value"] = value
-                return
+        picked = _pick_session_cookie(cookies, provider)
+        if picked:
+            box["value"] = picked[1]
 
     reader = threading.Thread(target=worker, daemon=True, name="gousage-cookie-read")
     reader.start()
@@ -1080,7 +1087,7 @@ class LoginWatcher:
             else:
                 try:
                     url = self.win.get_current_url() or ""
-                except Exception as exc:  # noqa: BLE001 窗口未加载完成或已销毁
+                except Exception:  # noqa: BLE001 窗口未加载完成或已销毁
                     if not self._window_alive():
                         _log("[login] window closed, watcher exits")
                         break

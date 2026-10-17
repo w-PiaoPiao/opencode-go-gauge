@@ -25,16 +25,6 @@ abstract class ChartDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun upsertAll(rows: List<UsageChartEntity>)
 
-    /**
-     * 删除该账号的全部聚合行.
-     *
-     * 与明细表不同, charts 此前从无清理路径 (deleteAccount/clearAccount 只删 records),
-     * 造成两个问题: 按 (模型 × 5min 桶) 无上限增长; 且退出登录再登录后
-     * chartsReady() 仍非空, 仪表盘会继续用上一个计费周期的陈旧聚合值.
-     */
-    @Query("DELETE FROM usage_charts WHERE account_id = :accountId")
-    abstract suspend fun deleteForAccount(accountId: Int)
-
     @Query("SELECT 1 FROM usage_charts WHERE account_id = :accountId LIMIT 1")
     abstract suspend fun chartsReady(accountId: Int): Int?
 

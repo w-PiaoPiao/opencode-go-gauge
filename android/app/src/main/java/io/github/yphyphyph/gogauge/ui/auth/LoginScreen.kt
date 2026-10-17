@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yphyphyph.gogauge.auth.Login
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApi
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import kotlinx.coroutines.CancellationException
@@ -119,7 +119,7 @@ fun LoginScreen(vm: MainViewModel = viewModel(), onCancel: () -> Unit) {
         val url = wv.url ?: return false
         // provider 感知: commandcode (GOAT) 与 opencode 的目标域/cookie 名不同
         val provider = Login.normalizeProvider(vm.pendingLoginProvider)
-        val isCC = provider == Login.PROVIDER_COMMANDCODE
+        val isCC = provider == PROVIDER_COMMANDCODE
         if (isCC) {
             if (!Login.isOnCommandcodeDomain(url)) return false
         } else if (!Login.isOnOpencodeDomain(url)) {

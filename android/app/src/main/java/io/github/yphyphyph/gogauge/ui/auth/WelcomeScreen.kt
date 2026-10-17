@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -31,7 +30,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yphyphyph.gogauge.R
-import io.github.yphyphyph.gogauge.auth.Login
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.theme.TitleSerif
 
@@ -116,7 +115,7 @@ fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Uni
 
     if (goatDialog) {
         LoginMethodDialog(
-            provider = Login.PROVIDER_COMMANDCODE,
+            provider = PROVIDER_COMMANDCODE,
             s = s,
             busy = vm.pasteLoginStatus == s.cookieChecking,
             status = vm.pasteLoginStatus.takeIf { it.isNotEmpty() && it != s.cookieChecking } ?: "",
@@ -129,7 +128,7 @@ fun WelcomeScreen(vm: MainViewModel, onLogin: () -> Unit, onLoginGoat: () -> Uni
                 onLoginGoat()
             },
             onPaste = { token ->
-                vm.pasteLogin(token, Login.PROVIDER_COMMANDCODE) { ok -> if (ok) goatDialog = false }
+                vm.pasteLogin(token, PROVIDER_COMMANDCODE) { ok -> if (ok) goatDialog = false }
             },
         )
     }

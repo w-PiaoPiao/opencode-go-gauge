@@ -10,7 +10,7 @@ import csv
 import gzip
 import json
 import time
-from typing import Any, Optional
+from typing import Any
 
 from . import db
 

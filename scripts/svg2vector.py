@@ -83,8 +83,6 @@ def grad_fill(gid, svg):
 
 def convert(name: str) -> str:
     svg = (SRC / f"{name}.svg").read_text()
-    vb = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg)
-    vw, vh = vb.group(1), vb.group(2)
     root_fill_m = re.search(r'<svg[^>]*\bfill="(#[0-9A-Fa-f]{6}|currentColor)"', svg)
     root_fill = root_fill_m.group(1) if root_fill_m else None
     evenodd = 'fill-rule="evenodd"' in svg

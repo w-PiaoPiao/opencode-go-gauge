@@ -18,6 +18,11 @@ const APP_VERSION = '1.0.0'
 // 会污染真实统计且此前无清除入口
 const SHOW_DEBUG_TOOLS: boolean = BuildProfile.DEBUG
 
+// 同步间隔 / 窗口天数的可选取值 —— 选项、索引、标签三处共用同一份, 避免漂移
+const SYNC_INTERVALS: number[] = [60, 300, 900, 1800]
+const SYNC_INTERVAL_LABELS: string[] = ['1', '5', '15', '30']
+const WINDOW_DAY_OPTIONS: Array<number | null> = [30, 60, 90, 180, null]
+
 @Component
 export struct SettingsPage {
   @State private accounts: AccountInfo[] = []
@@ -246,8 +251,7 @@ export struct SettingsPage {
             .selected(this.intervalIndex())
             .value(this.intervalLabel())
             .onSelect((idx: number) => {
-              const values: number[] = [60, 300, 900, 1800]
-              this.settings.syncIntervalSec = values[idx]
+              this.settings.syncIntervalSec = SYNC_INTERVALS[idx]
               this.saveSettings()
             })
             .width(120)
@@ -263,8 +267,7 @@ export struct SettingsPage {
             .selected(this.rangeIndex())
             .value(this.rangeLabel())
             .onSelect((idx: number) => {
-              const values: Array<number | null> = [30, 60, 90, 180, null]
-              this.settings.windowDays = values[idx]
+              this.settings.windowDays = WINDOW_DAY_OPTIONS[idx]
               this.saveSettings()
             })
             .width(120)
@@ -279,7 +282,7 @@ export struct SettingsPage {
           }
           .alignItems(HorizontalAlign.Start)
           .layoutWeight(1)
-          Button(this.syncing ? I18n.t('sync_running') : I18n.t('sync'))
+          Button(this.syncing ? I18n.t('syncing') : I18n.t('sync'))
             .fontSize(12)
             .height(32)
             .enabled(!this.syncing)
@@ -424,19 +427,13 @@ export struct SettingsPage {
   }
 
   private intervalIndex(): number {
-    const values: number[] = [60, 300, 900, 1800]
-    const i = values.indexOf(this.settings.syncIntervalSec)
+    const i = SYNC_INTERVALS.indexOf(this.settings.syncIntervalSec)
     return i >= 0 ? i : 1
   }
 
   private intervalLabel(): string {
-    const labels: Array<[number, string]> = [[60, '1'], [300, '5'], [900, '15'], [1800, '30']]
-    for (const p of labels) {
-      if (p[0] === this.settings.syncIntervalSec) {
-        return `${p[1]} min`
-      }
-    }
-    return '5 min'
+    const i = SYNC_INTERVALS.indexOf(this.settings.syncIntervalSec)
+    return i >= 0 ? `${SYNC_INTERVAL_LABELS[i]} min` : '5 min'
   }
 
   private rangeOptions(): Array<SelectOption> {
@@ -446,8 +443,7 @@ export struct SettingsPage {
   }
 
   private rangeIndex(): number {
-    const values: Array<number | null> = [30, 60, 90, 180, null]
-    const i = values.indexOf(this.settings.windowDays)
+    const i = WINDOW_DAY_OPTIONS.indexOf(this.settings.windowDays)
     return i >= 0 ? i : 1
   }
 

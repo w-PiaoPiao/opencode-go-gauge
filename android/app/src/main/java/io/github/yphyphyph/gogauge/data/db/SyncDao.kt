@@ -5,17 +5,13 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Transaction
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
-import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
 import io.github.yphyphyph.gogauge.data.model.PROVIDER_OPENCODE
 import io.github.yphyphyph.gogauge.data.model.SyncState
 import io.github.yphyphyph.gogauge.data.model.accountDisplayName
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.time.Instant
 
 /**
@@ -212,8 +208,6 @@ abstract class SyncDao {
     suspend fun getAccount(): AccountInfo? = accountRowById(requireActiveId())?.toInfo()
 
     suspend fun listAccounts(): List<AccountInfo> = listAccountRows().map { it.toInfo() }
-
-    suspend fun countAccounts(): Int = countAccountsRaw()
 
     suspend fun countLoggedInAccounts(): Int = countLoggedInAccountsRaw()
 
@@ -442,14 +436,7 @@ abstract class SyncDao {
     // 凭据快捷读取 (活跃账号; desktop db.get_token/get_workspace_hint parity)
     // ------------------------------------------------------------------
 
-    suspend fun getToken(): String = accountRowById(getActiveAccountId())?.token?.trim() ?: ""
-
     suspend fun getTokenFor(accountId: Int): String = accountRowById(accountId)?.token?.trim() ?: ""
-
-    suspend fun getWorkspaceHint(): String {
-        val row = accountRowById(getActiveAccountId()) ?: return "Default"
-        return row.resolvedWorkspaceId ?: row.workspaceId.ifBlank { "Default" }
-    }
 
     suspend fun getWorkspaceHintFor(accountId: Int): String {
         val row = accountRowById(accountId) ?: return "Default"

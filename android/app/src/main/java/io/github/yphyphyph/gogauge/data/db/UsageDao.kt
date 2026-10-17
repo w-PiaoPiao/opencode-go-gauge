@@ -490,12 +490,6 @@ abstract class UsageDao {
     @Query("SELECT DISTINCT model FROM usage_records WHERE account_id = :accountId ORDER BY model")
     abstract suspend fun listModels(accountId: Int): List<String>
 
-    @Query(
-        "SELECT COUNT(*) AS count, MIN(created_at) AS oldest, MAX(created_at) AS newest" +
-            " FROM usage_records WHERE account_id = :accountId"
-    )
-    abstract suspend fun recordBounds(accountId: Int): BoundsRow
-
     // ------------------------------------------------------------------
     // Export (v2.2.0b — CSV/JSON 备份的分页遍历)
     // ------------------------------------------------------------------
@@ -506,9 +500,6 @@ abstract class UsageDao {
             " ORDER BY created_at ASC LIMIT :limit OFFSET :offset"
     )
     abstract suspend fun exportPage(accountId: Int, limit: Int, offset: Int): List<UsageRecordEntity>
-
-    @Query("SELECT COUNT(*) FROM usage_records WHERE account_id = :accountId")
-    abstract suspend fun countRecords(accountId: Int): Int
 
     // ------------------------------------------------------------------
     // Row projections

@@ -9,9 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app import commandcode_api as cc
 from app.commandcode_api import (
-    AuthError,
     CommandCodeAPIError,
     build_cookie_header,
     parse_credits_response,

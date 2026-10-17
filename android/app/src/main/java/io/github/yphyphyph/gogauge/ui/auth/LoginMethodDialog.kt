@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yphyphyph.gogauge.auth.Login
+import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
 import io.github.yphyphyph.gogauge.ui.Strings
 
 /**
@@ -42,7 +43,7 @@ fun LoginMethodDialog(
 ) {
     val context = LocalContext.current
     var cookieText by remember { mutableStateOf("") }
-    val isGoat = provider == Login.PROVIDER_COMMANDCODE
+    val isGoat = provider == PROVIDER_COMMANDCODE
 
     AlertDialog(
         onDismissRequest = onDismiss,

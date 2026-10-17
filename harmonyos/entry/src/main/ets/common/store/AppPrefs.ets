@@ -15,7 +15,6 @@ import { preferences } from '@kit.ArkData'
 export class AppPrefs {
   static readonly PREFS_NAME: string = 'gogauge'
 
-  static readonly KEY_WORKSPACE_HINT: string = 'workspace_hint' // "wrk_xxx" | "Default"
   static readonly KEY_LANGUAGE: string = 'language'             // 'zh' | 'en'
   static readonly KEY_DARK_MODE: string = 'dark_mode'           // '0' | '1'
   static readonly KEY_CURRENCY: string = 'currency'             // 'USD' | 'CNY'
@@ -32,18 +31,6 @@ export class AppPrefs {
     } catch (e) {
       AppPrefs.store = null
     }
-  }
-
-  static getWorkspaceHint(): string {
-    if (AppPrefs.store === null) {
-      return 'Default'
-    }
-    const v = AppPrefs.store.getSync(AppPrefs.KEY_WORKSPACE_HINT, 'Default') as string
-    return v.length > 0 ? v : 'Default'
-  }
-
-  static setWorkspaceHint(value: string): void {
-    AppPrefs.put(AppPrefs.KEY_WORKSPACE_HINT, value)
   }
 
   // ------------------------------------------------------------------

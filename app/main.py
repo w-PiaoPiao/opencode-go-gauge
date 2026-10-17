@@ -821,7 +821,6 @@ class WindowApi:
 
     def close(self) -> bool:
         """关闭按钮: 托盘可用时最小化到托盘, 否则真正关闭."""
-        global _quitting, _tray_ready
         if not self._win:
             return True
         if _quitting or not _tray_ready:
@@ -911,8 +910,6 @@ def _log_runtime_banner() -> None:
 
 
 def main() -> None:
-    global _quitting
-
     # HTTPS 根证书兜底: 冻结包内 OpenSSL 只认构建机的编译期 CA 路径, 用户机
     # 缺该路径时所有请求 CERTIFICATE_VERIFY_FAILED (见 app/https_ca.py).
     # 必须早于任何网络操作 (配额拉取/同步/更新检查) 安装.

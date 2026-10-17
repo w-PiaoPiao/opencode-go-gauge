@@ -67,19 +67,6 @@ export class Fmt {
     return soon
   }
 
-  /** 完整时间 yyyy-MM-dd HH:mm:ss (ISO → 本地时区)。 */
-  static dateTime(iso: string | null): string {
-    if (iso === null || iso.length === 0) {
-      return '—'
-    }
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) {
-      return '—'
-    }
-    return Fmt.pad2(d.getFullYear()) + '-' + Fmt.pad2(d.getMonth() + 1) + '-' + Fmt.pad2(d.getDate()) +
-      ' ' + Fmt.pad2(d.getHours()) + ':' + Fmt.pad2(d.getMinutes()) + ':' + Fmt.pad2(d.getSeconds())
-  }
-
   /** 短时间 MM-dd HH:mm。 */
   static dateTimeShort(iso: string | null): string {
     if (iso === null || iso.length === 0) {
@@ -93,7 +80,8 @@ export class Fmt {
       ' ' + Fmt.pad2(d.getHours()) + ':' + Fmt.pad2(d.getMinutes())
   }
 
-  private static pad2(n: number): string {
+  /** 两位数补零 —— 全仓唯一的 pad2 实现, 供各 DAO/仓库复用。 */
+  static pad2(n: number): string {
     return n < 10 ? `0${n}` : `${n}`
   }
 

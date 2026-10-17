@@ -4,7 +4,8 @@
 #   ./build.sh test   -> 本地单元测试 (hypium)
 # 环境: 自动探测 DevEco; 可用 DEVECO_HOME/DEVECO_SDK_HOME/NODE_HOME 覆盖。
 set -euo pipefail
-cd "$(dirname "$0")"
+# 脚本在 scripts/ 下, hvigorw 在工程根 —— 必须先回到根目录, 否则 ./hvigorw 找不到
+cd "$(dirname "$0")/.."
 
 DEVECO_HOME="${DEVECO_HOME:-/Applications/DevEco-Studio.app}"
 export DEVECO_SDK_HOME="${DEVECO_SDK_HOME:-$DEVECO_HOME/Contents/sdk}"

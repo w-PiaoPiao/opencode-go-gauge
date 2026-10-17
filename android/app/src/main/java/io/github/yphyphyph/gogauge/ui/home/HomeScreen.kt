@@ -67,6 +67,7 @@ import io.github.yphyphyph.gogauge.ui.components.QuotaCard
 import io.github.yphyphyph.gogauge.ui.components.SegButtons
 import io.github.yphyphyph.gogauge.ui.components.TodayBarChart
 import io.github.yphyphyph.gogauge.ui.components.quotaForecastText
+import io.github.yphyphyph.gogauge.ui.components.quotaLabel
 import io.github.yphyphyph.gogauge.ui.components.quotaResetText
 import io.github.yphyphyph.gogauge.util.Fmt
 
@@ -299,15 +300,6 @@ private fun AccountSwitcher(vm: MainViewModel, s: Strings, onManageUsers: () -> 
         }
     }
 }
-
-@Composable
-private fun quotaLabel(label: String, s: Strings): String = when (label) {
-    "5h Rolling" -> s.rolling
-    "Weekly" -> s.weekly
-    "Monthly" -> s.monthly
-    else -> label
-}
-
 
 @Composable
 private fun QuotaSkeleton() {

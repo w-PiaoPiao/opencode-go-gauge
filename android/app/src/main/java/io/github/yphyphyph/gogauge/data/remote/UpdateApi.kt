@@ -11,7 +11,6 @@ import okhttp3.Request
 import org.w3c.dom.Element
 import java.io.ByteArrayInputStream
 import java.io.IOException
-import java.util.concurrent.TimeUnit
 import javax.xml.parsers.DocumentBuilderFactory
 
 /** GitHub release check result. */

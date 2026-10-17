@@ -192,7 +192,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var autoSyncJob: Job? = null
-    private var quotaRefreshJob: Job? = null
     private var runningAutoSyncKey: String? = null
 
     // 账户总览: 序号守卫丢弃过期响应 + 5s 静默重拉 (desktop ovSeq/ovRetryTimer parity)

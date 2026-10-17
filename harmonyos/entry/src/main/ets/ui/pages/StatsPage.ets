@@ -5,7 +5,7 @@ import { Repo } from '../../data/repository/DashboardRepository'
 import { DashboardData, ModelStat } from '../../common/model/Models'
 import { Fmt } from '../../common/util/Fmt'
 import { AppPrefs } from '../../common/store/AppPrefs'
-import { KpiCard, ModelIcon, SectionCard } from '../components/Cards'
+import { ModelIcon, SectionCard } from '../components/Cards'
 import { I18n } from '../../common/i18n/I18n'
 import { DonutChart, TrendLine, TrendPointSeries } from '../components/Charts'
 import { Theme } from '../theme/Theme'
@@ -106,7 +106,7 @@ export struct StatsPage {
       }
     }
     return [
-      { name: '费用', color: '#3B82F6', values: costV },
+      { name: '费用', color: Theme.accent(), values: costV },
       { name: '请求', color: '#10B981', values: reqV },
       { name: 'TOKEN', color: '#F59E0B', values: tokV },
     ]
@@ -122,7 +122,7 @@ export struct StatsPage {
             Row({ space: 12 }) {
               DonutChart({ percent: this.donutPercent(), centerLabel: `${Fmt.tokens(this.data!.totals.totalTokens)}` })
               Column({ space: 6 }) {
-                this.compositionRow(I18n.t('input'), this.data!.totals.totalInputTokens, '#3B82F6')
+                this.compositionRow(I18n.t('input'), this.data!.totals.totalInputTokens, Theme.accent())
                 this.compositionRow(I18n.t('output'), this.data!.totals.totalOutputTokens, '#FFB74D')
                 this.compositionRow(I18n.t('reasoning'), this.data!.totals.totalReasoningTokens, '#A78BFA')
                 this.compositionRow(I18n.t('cache_hit'), this.data!.totals.cacheHitTokens, '#10B981')
@@ -162,7 +162,7 @@ export struct StatsPage {
                       .fontWeight(FontWeight.Medium)
                       .fontColor(Theme.text())
                       .maxLines(1)
-                    Text(`${I18n.t('hitRate')} ${m.hitRate.toFixed(1)}%`)
+                    Text(`${I18n.t('hit_rate')} ${m.hitRate.toFixed(1)}%`)
                       .fontSize(11)
                       .fontColor(Theme.sub())
                       .maxLines(1)
@@ -181,7 +181,7 @@ export struct StatsPage {
           SectionCard({ title: I18n.t('trend_title'), subtitle: I18n.t('days30') }) {
             TrendLine({ series: this.trendSeries(), chartHeight: 150 })
             Row({ space: 14 }) {
-              this.legend('#3B82F6', I18n.t('cost'))
+              this.legend(Theme.accent(), I18n.t('cost'))
               this.legend('#10B981', I18n.t('req_unit'))
               this.legend('#F59E0B', I18n.t('by_tokens'))
             }
@@ -213,7 +213,7 @@ export struct StatsPage {
       .fontSize(12)
       .fontColor(this.sortBy === key ? Theme.surface() : Theme.sub())
       .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-      .backgroundColor(this.sortBy === key ? '#3B82F6' : '#F0F0F0')
+      .backgroundColor(this.sortBy === key ? Theme.accent() : '#F0F0F0')
       .borderRadius(12)
       .onClick(() => {
         this.sortBy = key

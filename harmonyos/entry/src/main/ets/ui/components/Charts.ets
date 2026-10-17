@@ -11,7 +11,7 @@ export struct QuotaRing {
   @Prop percent: number = 0
   @Prop label: string = ''
   @Prop caption: string = ''
-  @Prop accent: string = '#3B82F6'
+  @Prop accent: string = Theme.accent()
 
   build() {
     Column({ space: 6 }) {
@@ -132,7 +132,7 @@ export struct BarChart24h {
 export struct DonutChart {
   @Prop percent: number = 0
   @Prop centerLabel: string = ''
-  @Prop accent: string = '#3B82F6'
+  @Prop accent: string = Theme.accent()
 
   build() {
     Stack({ alignContent: Alignment.Center }) {

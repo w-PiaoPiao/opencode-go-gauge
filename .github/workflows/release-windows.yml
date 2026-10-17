@@ -27,11 +27,9 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install -q -r requirements-windows.lock.txt
-          $ver = python -c "from app import __version__; print(__version__)"
           @"
           """构建时自动生成 (gitignored): 打包产物元信息, 供更新检查使用."""
           UPDATE_REPO = "${{ github.repository }}"
-          BUILD_VERSION = "$ver"
           "@ | Out-File -Encoding utf8 app/_build_info.py
           python -m PyInstaller --noconfirm --clean --onefile --noconsole --name GoGauge `
             --add-data "app/web;app/web" `

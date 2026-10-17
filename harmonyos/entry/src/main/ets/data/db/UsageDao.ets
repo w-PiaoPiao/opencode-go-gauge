@@ -5,6 +5,7 @@
 import { relationalStore } from '@kit.ArkData'
 import { AppDb } from './AppDb'
 import { RowReader } from './RowReader'
+import { Fmt } from '../../common/util/Fmt'
 import { MonthlyCycle } from '../../common/util/MonthlyCycle'
 import { DailyStat, HourStat, ModelStat, SessionStat, Totals, UsageRecordRow } from '../../common/model/Models'
 
@@ -26,12 +27,6 @@ export interface UsageRecordEntity {
   plan: string | null
   syncedAt: string
   accountId: number
-}
-
-interface BoundsRow {
-  count: number
-  oldest: string | null
-  newest: string | null
 }
 
 export class UsageDao {
@@ -110,10 +105,6 @@ export class UsageDao {
       `DELETE FROM usage_records WHERE account_id = ? AND datetime(created_at) < datetime('now', ?)`,
       [accountId, intervalArg],
     )
-  }
-
-  async deleteAll(): Promise<void> {
-    await this.store().executeSql('DELETE FROM usage_records')
   }
 
   // ------------------------------------------------------------------
@@ -269,7 +260,7 @@ export class UsageDao {
     const now = new Date()
     for (let i = clamped; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
-      const key = `${d.getFullYear()}-${UsageDao.pad2(d.getMonth() + 1)}-${UsageDao.pad2(d.getDate())}`
+      const key = `${d.getFullYear()}-${Fmt.pad2(d.getMonth() + 1)}-${Fmt.pad2(d.getDate())}`
       const existing = byDate.get(key)
       if (existing !== undefined) {
         out.push(existing)
@@ -289,10 +280,6 @@ export class UsageDao {
       }
     }
     return out
-  }
-
-  private static pad2(n: number): string {
-    return n < 10 ? `0${n}` : `${n}`
   }
 
   /** 今日 24 小时趋势 (零填充) —— db.today_trend (按账号)。 */
@@ -511,24 +498,6 @@ export class UsageDao {
     const out: string[] = []
     while (reader.next()) {
       out.push(reader.getStr('model'))
-    }
-    reader.close()
-    return out
-  }
-
-  async recordBounds(accountId: number): Promise<BoundsRow> {
-    const rs = await this.store().querySql(
-      `SELECT COUNT(*) AS count, MIN(created_at) AS oldest, MAX(created_at) AS newest
-       FROM usage_records WHERE account_id = ?`, [accountId.toString()],
-    )
-    const reader = new RowReader(rs)
-    let out: BoundsRow = { count: 0, oldest: null, newest: null }
-    if (reader.next()) {
-      out = {
-        count: reader.getLong('count'),
-        oldest: reader.isNull('oldest') ? null : reader.getStr('oldest'),
-        newest: reader.isNull('newest') ? null : reader.getStr('newest'),
-      }
     }
     reader.close()
     return out

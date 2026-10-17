@@ -16,13 +16,12 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
@@ -30,7 +29,6 @@ from typing import Any, Optional
 # ---------------------------------------------------------------------------
 
 API_BASE = "https://api.commandcode.ai/internal"
-LOGIN_HOST = "commandcode.ai"
 AUTH_COOKIE_NAME = "__Secure-commandcode_prod_.session_token"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -502,14 +500,6 @@ def fetch_usage_page(
     limit = max(1, min(int(limit), MAX_LIMIT))
     data = _get("/usage", token, {"limit": limit, "cursor": cursor})
     return parse_usage_response(data)
-
-
-def fetch_usage_summary(token: str) -> dict[str, Any]:
-    """拉取当前计费周期汇总 (totalCost/totalTokens/totalCount...)."""
-    data = _get("/usage/summary", token)
-    if not isinstance(data, dict):
-        return {}
-    return data
 
 
 # ---------------------------------------------------------------------------

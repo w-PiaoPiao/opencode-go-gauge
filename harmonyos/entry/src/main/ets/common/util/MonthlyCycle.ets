@@ -11,6 +11,8 @@
  * 而非固定 30 天 —— Go 月度实测就是自然月 (10-08 → 11-08), 固定 30 天会偏 1 天、
  * 丢掉周期首日的用量。
  */
+import { Fmt } from './Fmt'
+
 export class MonthlyCycle {
   static readonly PERIOD_DAYS: number = 30
 
@@ -26,9 +28,8 @@ export class MonthlyCycle {
 
   static fmtUtc(ms: number): string {
     const d = new Date(ms)
-    const p = (n: number): string => String(n).padStart(2, '0')
-    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}` +
-      ` ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
+    return `${d.getUTCFullYear()}-${Fmt.pad2(d.getUTCMonth() + 1)}-${Fmt.pad2(d.getUTCDate())}` +
+      ` ${Fmt.pad2(d.getUTCHours())}:${Fmt.pad2(d.getUTCMinutes())}:${Fmt.pad2(d.getUTCSeconds())}`
   }
 
   /**

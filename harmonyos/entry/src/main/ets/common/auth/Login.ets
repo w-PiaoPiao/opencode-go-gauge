@@ -4,13 +4,7 @@
  * 流程: Web 组件加载 buildLoginUrl() → 登录完成后页面位于 opencode.ai 域,
  * 轮询 WebCookieManager 读取 HttpOnly 的 auth cookie, 并从 URL 提取工作区 hint。
  */
-
-export interface LoginResult {
-  /** 形如 "auth=<value>" 的 cookie 段, 供构造请求 Cookie 头 */
-  cookie: string
-  /** 工作区 hint: /workspace/wrk_xxx 或 "Default" */
-  workspaceHint: string
-}
+import { Cookie } from '../util/Cookie'
 
 export class Login {
   static readonly LOGIN_BASE: string = 'https://auth.opencode.ai/authorize'
@@ -35,17 +29,7 @@ export class Login {
 
   /** 从 cookie 头中提取 "auth=<value>" 段 —— build_cookie_header 的逆操作。 */
   static extractAuthCookie(cookieHeader: string): string {
-    let cookie: string = cookieHeader.trim()
-    if (cookie.toLowerCase().startsWith('cookie:')) {
-      cookie = cookie.slice(7).trim()
-    }
-    for (const part of cookie.split(';')) {
-      const p: string = part.trim()
-      if (p.startsWith(`${Login.AUTH_COOKIE_NAME}=`)) {
-        return p
-      }
-    }
-    return ''
+    return Cookie.findSegment(cookieHeader, Login.AUTH_COOKIE_NAME)
   }
 
   /** 从登录页 URL 提取工作区 hint —— _WORKSPACE_URL_RE 移植。 */

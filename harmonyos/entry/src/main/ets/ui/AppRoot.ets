@@ -147,10 +147,10 @@ export struct AppRoot {
     Column({ space: 2 }) {
       Text(this.tabIcon(key))
         .fontSize(18)
-        .fontColor(this.tab === key ? '#3B82F6' : '#999999')
+        .fontColor(this.tab === key ? Theme.accent() : '#999999')
       Text(label)
         .fontSize(11)
-        .fontColor(this.tab === key ? '#3B82F6' : '#999999')
+        .fontColor(this.tab === key ? Theme.accent() : '#999999')
     }
     .layoutWeight(1)
     .height(52)
@@ -184,7 +184,7 @@ export struct AppRoot {
   sideItem(key: string, label: string) {
     Text(label)
       .fontSize(14)
-      .fontColor(this.tab === key ? '#3B82F6' : '#555555')
+      .fontColor(this.tab === key ? Theme.accent() : '#555555')
       .fontWeight(this.tab === key ? FontWeight.Medium : FontWeight.Normal)
       .width('100%')
       .padding({ left: 12, top: 10, bottom: 10 })

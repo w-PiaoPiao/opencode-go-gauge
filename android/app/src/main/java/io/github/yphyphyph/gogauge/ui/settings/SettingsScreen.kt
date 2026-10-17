@@ -43,7 +43,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
-import io.github.yphyphyph.gogauge.data.model.AppSettings
 import io.github.yphyphyph.gogauge.BuildConfig
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.Strings
