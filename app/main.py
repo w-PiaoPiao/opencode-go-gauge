@@ -567,54 +567,98 @@ class TrayIcon:
     """
 
     _REFRESH_SEC = 30  # 面板数据刷新间隔
+    # 面板固定槽位数: 1 行今日用量 + 最多 3 条配额窗口行 (见 _fetch_rows)
+    _PANEL_SLOTS = 4
+    # 首次刷新前的让位时间: 等 pystray 自己的 _mark_ready()->update_menu() 落地,
+    # 避免启动瞬间两个线程同时重建原生菜单 (Win32 DestroyMenu/CreatePopupMenu
+    # 不是线程安全的). 面板数据晚 0.5s 出现, 之后每 _REFRESH_SEC 刷新一次.
+    _STARTUP_GRACE_SEC = 0.5
 
     def __init__(self, icon_path: str) -> None:
         self._icon_path = icon_path
         self._icon = None
         self._win_getter = None
         self._lang = "zh"
+        # 面板行文本缓存: 仅刷新线程整体替换, 菜单 callable 只读 (见 _info_items)
+        self._rows: list[str] = []
 
     def bind_window(self, getter) -> None:
         self._win_getter = getter
 
-    def _info_items(self, pystray) -> list:
-        """今日用量快捷面板行 (灰显不可点): 免开主窗即可瞄一眼用量."""
+    def _fetch_rows(self) -> list[str]:
+        """构建面板行文本 (取数集中在这里, 只在后台刷新线程调用).
+
+        与旧 _info_items 的取数与文案完全一致: 未登录只出一行提示, 已登录出
+        用量行 + 最多 3 条配额窗口行; 异常吞掉 (数据未就绪时面板行省略).
+        """
         t = _TRAY_I18N.get(self._lang, _TRAY_I18N["zh"])
-        rows: list = []
+        rows: list[str] = []
         try:
             if db.get_token():
                 today = db.totals("today") or {}
                 cost = float(today.get("total_cost_usd") or 0.0)
                 req = int(today.get("request_count") or 0)
-                rows.append(pystray.MenuItem(
-                    f"{t['today_label']}: ${cost:.2f} · {req} {t['req_unit']}",
-                    None, enabled=False))
+                rows.append(f"{t['today_label']}: ${cost:.2f} · {req} {t['req_unit']}")
                 # 读 server 配额缓存 (只读跨线程安全); 未就绪时自然缺省.
                 # 缓存结构为 {account_id: {at, data}}, 需按活跃账号取内层
                 quota = (getattr(server, "_quota_cache", {})
                          .get(db.get_active_account_id()) or {}).get("data") or {}
-                for w in (quota.get("windows") or [])[:3]:
+                for w in (quota.get("windows") or [])[: self._PANEL_SLOTS - 1]:
                     label = str(w.get("label") or "").strip()
                     remaining = w.get("remaining")
                     if label and isinstance(remaining, (int, float)):
-                        rows.append(pystray.MenuItem(
-                            f"{label}: {t['remaining_prefix']}{remaining:.0f}%",
-                            None, enabled=False))
+                        rows.append(f"{label}: {t['remaining_prefix']}{remaining:.0f}%")
             else:
-                rows.append(pystray.MenuItem(t["not_login"], None, enabled=False))
+                rows.append(t["not_login"])
         except Exception:  # noqa: BLE001  数据未就绪时面板行省略
             pass
-        return rows
+        return rows[: self._PANEL_SLOTS]
+
+    def _info_items(self, pystray) -> list:
+        """今日用量快捷面板行 (灰显不可点): 免开主窗即可瞄一眼用量.
+
+        固定 _PANEL_SLOTS 个槽位, text/visible 均为 callable: pystray 只在
+        update_menu() 时求值它们 (_base.MenuItem.text -> _wrap, Menu.items ->
+        _visible_items), 所以刷新只需换掉 self._rows, 菜单描述本身不必重建.
+        求值发生在重建/打开菜单时 (macOS 在 AppKit 侧), 因此这里只允许读内存
+        缓存 —— 绝不执行 SQL 或原生调用.
+
+        空槽位 visible=False: 行数不足时不渲染 (pystray 顺带合并相邻分隔符,
+        面板整体为空时的菜单形态与旧实现相同).
+        """
+        def make(idx: int):
+            def text(_item=None) -> str:
+                rows = self._rows  # 单次取引用: 刷新线程整体替换, 不会读到半更新状态
+                return rows[idx] if idx < len(rows) else ""
+
+            def visible(_item=None) -> bool:
+                return idx < len(self._rows)
+
+            return pystray.MenuItem(text, None, enabled=False, visible=visible)
+
+        return [make(i) for i in range(self._PANEL_SLOTS)]
+
+    def _refresh_once(self) -> None:
+        """取数 -> 换缓存 -> 重建菜单 (cocoa 的 NSMenu 是快照, 必须重建才重新求值).
+
+        异常一律吞掉: 离线/DB 未就绪只让面板行短暂缺失, 不能拖死刷新线程.
+        """
+        try:
+            self._rows = self._fetch_rows()
+        except Exception:  # noqa: BLE001
+            self._rows = []
+        try:
+            if self._icon and not _quitting:
+                self._icon.update_menu()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _refresh_loop(self) -> None:
-        """周期 update_menu 让动态行取到最新数据 (cocoa 的 NSMenu 是快照)."""
+        """周期刷新面板数据: 取数在后台线程, 菜单 callable 只读缓存."""
+        time.sleep(self._STARTUP_GRACE_SEC)
         while not _quitting:
+            self._refresh_once()
             time.sleep(self._REFRESH_SEC)
-            try:
-                if self._icon and not _quitting:
-                    self._icon.update_menu()
-            except Exception:  # noqa: BLE001
-                pass
 
     def start(self) -> bool:
         global _tray_ready
@@ -627,6 +671,9 @@ class TrayIcon:
             img = Image.open(self._icon_path).convert("RGBA")
             self._lang = _tray_lang()
             t = _TRAY_I18N.get(self._lang, _TRAY_I18N["zh"])
+            # 首帧用空占位行建菜单 (self._rows 此时为空, 槽位 visible=False 不渲染):
+            # 托盘取数全部由 _refresh_loop 在后台线程完成, 启动路径不因 DB/钥匙串
+            # 阻塞主线程; 数据就绪后再 update_menu() 让 callable 文本生效.
             menu = pystray.Menu(
                 pystray.MenuItem(t["show"], self._show, default=True),
                 pystray.Menu.SEPARATOR,
@@ -909,6 +956,20 @@ def _log_runtime_banner() -> None:
         _mlog("[main] runtime: " + " ".join(parts))
 
 
+def _arm_watcher_fallback(watcher: dict, w) -> None:
+    """兜底: shown 事件在打包环境可能不触发, 3s 后无条件启动登录监听.
+
+    带当前 watcher 校验: 被 recreate 取代的旧 Timer 不拉起过期 watcher.
+    daemon 必须设置 —— 用户在 3s 内退出时, 未触发的 Timer 若为普通线程会被
+    threading._shutdown 一直 join 到自然结束: 实测让进程退出多等 3031 ms
+    (daemon 版 18 ms). 注意 Timer 不接受 name/daemon 关键字参数 (Py3.9 实测
+    TypeError), 属性只能在实例上设置 (同 _arm_quit_fallback).
+    """
+    timer = threading.Timer(3.0, lambda: watcher.get("ref") is w and w.start())
+    timer.daemon = True
+    timer.start()
+
+
 def main() -> None:
     # HTTPS 根证书兜底: 冻结包内 OpenSSL 只认构建机的编译期 CA 路径, 用户机
     # 缺该路径时所有请求 CERTIFICATE_VERIFY_FAILED (见 app/https_ca.py).
@@ -1146,9 +1207,9 @@ def main() -> None:
                 lw.events.shown += on_shown
             except Exception as exc:  # noqa: BLE001
                 _mlog(f"  shown event register error: {exc}")
-        # 兜底: shown 事件在打包环境可能不触发, 3s 后无条件启动监听
-        # (同样带当前 watcher 校验: 被 recreate 取代的旧 Timer 不拉起过期 watcher)
-        threading.Timer(3.0, lambda: watcher.get("ref") is w and w.start()).start()
+        # 兜底: shown 事件在打包环境可能不触发, 3s 后无条件启动监听 (带当前
+        # watcher 校验, 且 Timer 必须 daemon —— 见 _arm_watcher_fallback)
+        _arm_watcher_fallback(watcher, w)
 
     def _login_win_alive() -> bool:
         """只读检查登录窗是否存活 (不触发创建副作用, 否则恒为 True 使重建分支失效)."""

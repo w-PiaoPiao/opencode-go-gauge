@@ -310,7 +310,7 @@ def _log_throttled(msg: str) -> None:
         return
     _core_read_log_at = now
     _log(msg)
-def login_entry_lost(win, provider: str) -> bool:
+def login_entry_lost(win, provider: str, url: Optional[str] = None) -> bool:
     """登录窗口是否被残留会话带离了登录入口.
 
     仅 commandcode 判定: 其登录入口就是 ``/signin`` 单页, 若页面加载完却停在
@@ -322,13 +322,18 @@ def login_entry_lost(win, provider: str) -> bool:
     回调 —— 服务端正要据此种会话, 此刻判偏离会把刚建立的会话清掉, 直接
     打断登录. (失败回调带 error= 不带 code=, 不豁免 —— 清会话拉回登录页
     正是期望行为.)
+
+    url: 调用方本轮已读到的窗口 URL (可选). 传入即复用, 不再做一次原生往返 ——
+    轮询路径上这正是每轮第二次读 URL (同一轮内 URL 不会变, 已由超时包裹);
+    None 表示未提供, 本函数按老路自己读一次 (带 _bounded_call 超时保护).
     """
     if provider != PROVIDER_COMMANDCODE:
         return False
-    got = _bounded_call(win.get_current_url, COOKIE_READ_TIMEOUT)
-    if got is None:  # 窗口未就绪/已销毁: 不判定偏离
-        return False
-    url = got or ""
+    if url is None:
+        got = _bounded_call(win.get_current_url, COOKIE_READ_TIMEOUT)
+        if got is None:  # 窗口未就绪/已销毁: 不判定偏离
+            return False
+        url = got or ""
     host = provider_host(provider)
     if not url.startswith("https://" + host):
         return False
@@ -1071,28 +1076,19 @@ class LoginWatcher:
             if not self._window_alive():
                 _log("[login] window gone, watcher exits")
                 break
-            # Windows 也走 pywebview 的 get_current_url (上游做法), 但带超时:
-            # 它内部用无超时信号量等 UI 线程回调, UI 线程被页面加载占住时会永久
-            # 挂起本线程 (单飞守卫随之卡死, 用户无法再次登录).
-            if sys.platform == "win32":
-                got = _bounded_call(self.win.get_current_url, COOKIE_READ_TIMEOUT)
-                if got is None:
-                    # 读不到分两种: 页面还没落地 (正常, 下一轮再看) / 窗口已销毁
-                    if not self._window_alive():
-                        _log("[login] window closed, watcher exits")
-                        break
-                    self._stop.wait(1.0)
-                    continue
-                url = got or ""
-            else:
-                try:
-                    url = self.win.get_current_url() or ""
-                except Exception:  # noqa: BLE001 窗口未加载完成或已销毁
-                    if not self._window_alive():
-                        _log("[login] window closed, watcher exits")
-                        break
-                    self._stop.wait(1.0)
-                    continue
+            # Windows 与 macOS(cocoa) 后端都走 pywebview 的 get_current_url
+            # (上游做法), 且都必须带超时: 它内部用无超时信号量等 UI 线程回调
+            # (cocoa.py:869-877 的 acquire 无 timeout), UI 线程被页面加载占住时
+            # 会永久挂起本线程 (单飞守卫随之卡死, 用户无法再次登录).
+            got = _bounded_call(self.win.get_current_url, COOKIE_READ_TIMEOUT)
+            if got is None:
+                # 读不到分两种: 页面还没落地 (正常, 下一轮再看) / 窗口已销毁
+                if not self._window_alive():
+                    _log("[login] window closed, watcher exits")
+                    break
+                self._stop.wait(1.0)
+                continue
+            url = got or ""
 
             if url != self._last_nav:  # 任意域名的 URL 变化都记录 (暴露监听盲区)
                 _log(f"[login] nav: {url[:180]}")
@@ -1101,7 +1097,8 @@ class LoginWatcher:
             if url.startswith("https://" + target_host):
                 if self._capture_session(url, targets):
                     return
-                self._check_entry_drift()
+                # 复用本轮已读到的 url: 同一轮内 URL 不会变, 省掉第二次原生往返
+                self._check_entry_drift(url)
             elif _GITHUB_HOST_RE.match(url):
                 # 两个 provider 的登录页都有 "Continue with GitHub": GitHub 侧
                 # 2FA 后丢 return_to 卡死在无关页面的问题与续跑手段完全一致
@@ -1112,7 +1109,7 @@ class LoginWatcher:
         if not self.done and self.on_cancelled:
             self.on_cancelled()
 
-    def _check_entry_drift(self) -> None:
+    def _check_entry_drift(self, url: str) -> None:
         """登录窗口被残留会话带离登录入口时, 随轮询持续拉回 (commandcode).
 
         _arm_login_window 的自愈只在页面加载完成时检查一两次, 覆盖不到
@@ -1120,10 +1117,13 @@ class LoginWatcher:
         到残留会话并跳去官网, 此后没有任何东西把窗口拉回来, 监听器只能在
         原地永远等新凭证 (真机表现为"打开官网后卡住"). 这里每轮轮询判定,
         偏离即重置会话并拉回; 限流防与 arm 侧自愈 / 连续偏离打环.
+
+        url: _run 本轮已读到的窗口 URL, 直接复用做偏离判定 (同一轮内不会变,
+        省掉每轮第二次原生往返; 最坏情况晚一轮 1s 发现偏离).
         """
         if self.done:
             return
-        if not login_entry_lost(self.win, self.provider):
+        if not login_entry_lost(self.win, self.provider, url):
             return
         now = time.monotonic()
         if (
