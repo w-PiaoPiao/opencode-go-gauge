@@ -43,6 +43,13 @@ abstract class ChartDao {
 
     // ------------------------------------------------------------------
     // 周期条件 (与 UsageDao.periodClause 口径一致: UTC 存储 + localtime 日界)
+    //
+    // "5h" 与「有真实周期起点的 month」用两段式: local_date 先把行集收敛到窗口附近
+    // (走 idx_charts_account_localdate), 再叠加 datetime() 保留精确口径.
+    // "Nd" 与「month 回退」只用 local_date (日历日口径) —— 与 UsageDao.periodClause /
+    // dailyStats / modelDailyStats 完全同源. 这几张图按本地日分桶, 窗口必须整天对齐;
+    // 原先此处只按 datetime(time_bucket) 精确 N×24h, 同一张 usage_charts 表上并存两套
+    // 窗口, 总卡比趋势图少掉最早半天的数据 (desktop db._charts_period_where 同款遗留).
     // ------------------------------------------------------------------
 
     private fun periodClause(period: String, cycleStart: String?): Pair<String?, Array<Any>> {
@@ -50,7 +57,8 @@ abstract class ChartDao {
         val args: Array<Any>
         when (period) {
             "5h" -> {
-                clause = "datetime(time_bucket) >= datetime('now', '-5 hours')"
+                clause = "local_date >= date('now', 'localtime', '-1 day')" +
+                    " AND datetime(time_bucket) >= datetime('now', '-5 hours')"
                 args = emptyArray()
             }
             "today" -> {
@@ -59,16 +67,17 @@ abstract class ChartDao {
                 args = emptyArray()
             }
             "month" -> if (cycleStart != null) {
-                clause = "datetime(time_bucket) >= datetime(?)"
-                args = arrayOf(cycleStart)
+                clause = "local_date >= date(?, 'localtime')" +
+                    " AND datetime(time_bucket) >= datetime(?)"
+                args = arrayOf(cycleStart, cycleStart)
             } else {
-                clause = "datetime(time_bucket) >= datetime('now', ?)"
+                clause = "local_date >= date('now', 'localtime', ?)"
                 args = arrayOf("-${MonthlyCycle.PERIOD_DAYS} days")
             }
             "all" -> return null to emptyArray()
             else -> {
                 val days = Regex("^(\\d+)d$").find(period)?.groupValues?.get(1)?.toIntOrNull()?.coerceIn(1, 365) ?: 30
-                clause = "datetime(time_bucket) >= datetime('now', ?)"
+                clause = "local_date >= date('now', 'localtime', ?)"
                 args = arrayOf("-${days} days")
             }
         }

@@ -120,6 +120,13 @@ export class UsageDao {
   // Aggregations
   // ------------------------------------------------------------------
 
+  /**
+   * 周期过滤 (desktop db._period_where / android UsageDao.periodClause parity)。
+   *
+   * "Nd" 与「month 回退」走日历日口径 —— 与 dailyStats / todayTrend 同源. 这几张图
+   * 按本地日分桶, 窗口必须整天对齐; 原先按 datetime() 精确 N×24h, 总卡会比趋势图
+   * 少掉最早半天的数据.
+   */
   private static periodClause(period: string, cycleStart: string | null = null): [string | null, Array<string>] {
     switch (period) {
       case '5h':
@@ -132,7 +139,8 @@ export class UsageDao {
         if (cycleStart !== null && cycleStart.length > 0) {
           return [`datetime(created_at) >= datetime(?)`, [cycleStart]]
         }
-        return [`datetime(created_at) >= datetime('now', ?)`, [`-${MonthlyCycle.PERIOD_DAYS} days`]]
+        return [`substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)`,
+          [`-${MonthlyCycle.PERIOD_DAYS} days`]]
       case 'all':
         return [null, []]
       default: {
@@ -144,7 +152,8 @@ export class UsageDao {
             days = Math.min(365, Math.max(1, n))
           }
         }
-        return [`datetime(created_at) >= datetime('now', ?)`, [`-${days} days`]]
+        return [`substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)`,
+          [`-${days} days`]]
       }
     }
   }

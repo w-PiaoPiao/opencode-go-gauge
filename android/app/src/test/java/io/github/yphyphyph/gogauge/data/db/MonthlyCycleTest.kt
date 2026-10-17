@@ -64,10 +64,53 @@ class MonthlyCycleTest {
 
     @Test
     fun `active period - start used directly`() {
+        // 周期已开始且未结束: 直接返回记录的真实起点, 不做顺延
         assertEquals(
-            "2026-09-02 01:03:43",
+            "2026-08-20 01:03:43",
+            MonthlyCycle.startWithPeriod(
+                "2026-08-20 01:03:43", "2026-09-20 01:03:43", null, nowMs,
+            ),
+        )
+    }
+
+    @Test
+    fun `future period start - never returned`() {
+        // 起点在未来 (接口给出尚未开始的周期 / 本机时钟落后于服务端): 返回它会让
+        // 「本周期」筛选恒为空 (local_date >= 未来日期 筛出 0 条) → 回退滚动 30 天
+        assertNull(
             MonthlyCycle.startWithPeriod(
                 "2026-09-02 01:03:43", "2026-10-02 01:03:43", null, nowMs,
+            ),
+        )
+    }
+
+    @Test
+    fun `missing period end - falls back to null`() {
+        // 终点缺失: 无法顺延过期周期, 回退滚动 30 天 (避免把上个周期拉进「本月」)
+        assertNull(MonthlyCycle.startWithPeriod("2026-08-20 01:03:43", null, null, nowMs))
+    }
+
+    @Test
+    fun `natural month span rolls by calendar month`() {
+        // 31 天自然月周期 (实测 Go 月度 10-08 → 11-08) 按日历月推进: 用固定跨度反复
+        // 顺延会累积漂移, 日号必须随锚点保持 (now = 2026-08-29 12:00)
+        assertEquals(
+            "2026-08-08 01:03:43",
+            MonthlyCycle.startWithPeriod(
+                "2026-01-08 01:03:43", "2026-02-08 01:03:43", null, nowMs,
+            ),
+        )
+    }
+
+    @Test
+    fun `month end anchor is not degraded`() {
+        // 锚点 01-31: 逐月累加会丢锚点 (02-28 → 03-28, 此后永远停在 28 号), 必须从
+        // 原始起点一次算出 (plusMonths). 周期序列 01-31 → 02-28 → 03-31 → 04-30 →
+        // 05-31 → 06-30 → 07-31 → 08-31; now = 08-29 落在 [07-31, 08-31) 内.
+        assertEquals(
+            "2026-07-31 00:00:00",
+            MonthlyCycle.startWithPeriod(
+                "2026-01-31 00:00:00", "2026-02-28 00:00:00", null, nowMs,
             ),
         )
     }
