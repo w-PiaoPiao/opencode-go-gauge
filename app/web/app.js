@@ -800,7 +800,7 @@ function chartModel(models) {
     <span class="mr-val" title="${escapeHtml(fmtInt(getVal(m)))}">${fmt(getVal(m))}</span></div>`).join("")
     : `<div class="mr-empty">${t("noData")}</div>`;
 }
-/* ---------------- 统计页: 模型用量趋势 (堆叠柱) ---------------- */
+/* ---------------- 统计页: 模型用量趋势 (按天归一的堆叠面积) ---------------- */
 /* 环形图是「分布 Now」, 这里是「分布随时间」: 同维度 / 同排除集 / 同色序联动.
    数据独立端点 (/api/model_trend), 切到统计页时拉取, 不随 dashboard 每次刷新重拉 */
 let cModelTrend = null;
@@ -848,26 +848,44 @@ function chartModelTrend(rangeModels) {
     (s.input?.[i] || 0) + (s.output?.[i] || 0) + (s.cost?.[i] || 0) > 0));
   const from = firstOn > 0 ? firstOn : 0;
   const labels = modelTrendData.days.slice(from).map((d) => d.slice(5));  // MM-DD
+  const raw = ranked.map((x) => (x.s[dim] || []).slice(from));
+  // 按天归一 (堆叠面积): 每天合计=100%, 看的是构成变化而非绝对量 —— 绝对量由
+  // 旁边的「用量趋势」卡片负责。基数只取参与绘制的模型 (与环形图同口径: 环形图
+  // 也只画 top6, 其百分比同样是 top6 内部占比); 全天无量的日子整片塌到 0
+  const dayTotals = labels.map((_, k) => raw.reduce((a, v) => a + (v[k] || 0), 0));
   const datasets = ranked.map((x, i) => ({
     label: x.s.model,
-    data: x.s[dim] ? x.s[dim].slice(from) : labels.map(() => 0),
+    data: labels.map((_, k) => dayTotals[k] > 0 ? raw[i][k] / dayTotals[k] * 100 : 0),
+    _raw: raw[i],  // 提示框里同时给出占比与原始值
     backgroundColor: MODEL_PALETTE[i],
-    stack: "s", borderRadius: 2, barPercentage: 0.9, categoryPercentage: 0.9,
+    borderColor: MODEL_PALETTE[i],
+    fill: true, stack: "s",
+    borderWidth: 1, pointRadius: 0, pointHoverRadius: 3,
+    // 稀疏尖峰数据: 默认的 Catmull-Rom 平滑会过冲 (画出负值/高于真实峰值的假峰),
+    // monotone 保形插值不会
+    cubicInterpolationMode: "monotone",
   }));
   $("mt-hint").textContent = trendHintText(from);
   cModelTrend = new Chart(canvas, {
-    type: "bar",
+    type: "line",
     data: { labels, datasets },
     options: {
       responsive: false, maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
       plugins: {
         legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 7, boxHeight: 7, font: { size: 10 }, color: cssVar("--text3"), padding: 7 } },
-        tooltip: { callbacks: { label: (it) => ` ${it.dataset.label}: ${fmtV(it.parsed.y)}` } },
+        tooltip: {
+          callbacks: {
+            label: (it) => {
+              const v = it.dataset._raw ? it.dataset._raw[it.dataIndex] : 0;
+              return ` ${it.dataset.label}: ${it.parsed.y.toFixed(1)}% · ${fmtV(v)}`;
+            },
+          },
+        },
       },
       scales: {
-        x: { stacked: true, grid: { display: false }, ticks: { color: cssVar("--text3"), font: { size: 10 }, maxTicksLimit: 8 } },
-        y: { stacked: true, grid: { color: cssVar("--grid") }, ticks: { color: cssVar("--text3"), font: { size: 10 }, maxTicksLimit: 4, callback: (v) => fmtV(v) } },
+        x: { grid: { display: false }, ticks: { color: cssVar("--text3"), font: { size: 10 }, maxTicksLimit: 8 } },
+        y: { stacked: true, min: 0, max: 100, grid: { color: cssVar("--grid") }, ticks: { color: cssVar("--text3"), font: { size: 10 }, maxTicksLimit: 5, callback: (v) => v + "%" } },
       },
     },
   });
