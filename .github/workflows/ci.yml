@@ -32,20 +32,28 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      # checkout v5+ / setup-python v6+ 起改用 Node 24 运行时, 消掉 "Node.js 20 is
+      # deprecated" 注解 (该注解本身不判失败, 属顺手收尾).
+      - uses: actions/checkout@v5
         with:
           # 只跑测试, 不需要写 token; 也不把 token 落进 .git/config
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install test dependencies
-        # 只装 pytest: 被测模块 (db/server/auth/backup/updater/api) 除 auth.py 顶层
-        # 的 webview 外全是标准库, 而测试用空模块占位绕过 webview (见
-        # tests/test_auth_login.py). 装 pywebview/pystray 只会给 Linux runner 拖来
-        # GTK/X11 一类图形依赖, 徒增失败面.
+        # 只装 requirements-dev.txt (不装 requirements.txt): 被测模块 (db/server/auth/
+        # backup/updater/api) 除 auth.py 顶层的 webview 外全是标准库, 而测试用空模块
+        # 占位绕过 webview (见 tests/test_auth_login.py); pywebview 的图形栈没有必要
+        # 拖进 runner.
+        #
+        # 例外是 pystray: tests/test_perf_runtime_opt.py 的托盘面板用例必须用真实
+        # pystray 验证 callable/visible 求值语义, 占位模块验不出来, 故写进
+        # requirements-dev.txt 由这里装上 (Windows/macOS 上真跑).
+        # Linux 注意: 无头 runner 没有 appindicator/GTK/X, pystray import 时挑后端
+        # 可能失败 —— 那两个用例对这种情况 pytest.skip (带原因), 不判失败.
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
