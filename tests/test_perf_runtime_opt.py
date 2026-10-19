@@ -49,17 +49,20 @@ def _isolated_login_log(tmp_path, monkeypatch):
 def pystray_mod():
     """真实 pystray (托盘用例要验证它的 callable/visible 求值语义).
 
-    pystray 在 import 时就按平台挑后端, Linux 上依次试 appindicator/gtk/xorg, 而
-    xorg 后端 import 期间就连接 X 服务器 —— 没有图形栈的机器 (典型如无头 CI
-    runner) 上 ``import pystray`` 会抛 ImportError. 那种环境跳过后两个托盘用例
-    即可: 二者只验证菜单描述 (text/visible callable 的求值时机), 与后端无关;
-    Windows/macOS 上 pystray 恒可导入, 断言照常真跑.
+    pystray 在 import 时就按平台挑后端, Linux 上依次试 appindicator/gtk/xorg.
+    没有图形栈的机器 (典型如无头 CI runner) 上 ``import pystray`` 会失败, 但抛的
+    未必是 ImportError: pystray 的候选循环只捕获 ImportError, 而 ``_xorg`` 后端在
+    模块顶层就 ``Xlib.display.Display()`` —— 没有 $DISPLAY 时抛的是
+    ``Xlib.error.DisplayNameError``, 谁的 except 都不接, 会直接穿透出来
+    (2026-10-19 ubuntu-latest 实测: 2 errors). 因此这里捕获 Exception 而非只捕
+    ImportError. 那种环境跳过后两个托盘用例即可: 二者只验证菜单描述 (text/visible
+    callable 的求值时机), 与后端无关; Windows/macOS 上 pystray 恒可导入, 断言照常真跑.
     module 作用域: 跳过按用例记, 不把整个测试文件拖成 error.
     """
     try:
         import pystray  # noqa: PLC0415  仅托盘用例需要; 不涉及 Icon/窗口创建
-    except ImportError as exc:  # 无图形栈 (无 X/AppIndicator/GTK) 的 Linux
-        pytest.skip(f"本机没有可用的 pystray 后端 ({exc}); 托盘用例需要真实 pystray")
+    except Exception as exc:  # noqa: BLE001  无图形栈时后端探测的抛法不止一种
+        pytest.skip(f"本机没有可用的 pystray 后端 ({type(exc).__name__}: {exc}); 托盘用例需要真实 pystray")
 
     return pystray
 
