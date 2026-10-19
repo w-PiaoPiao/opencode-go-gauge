@@ -893,10 +893,18 @@ def test_export_backup_tmp_is_replaced_atomically(tmp_db, monkeypatch):
 
 
 def test_export_backup_preserves_existing_file_mode(tmp_db, monkeypatch):
-    """覆盖导出沿用既有备份的权限位 (os.replace 按 umask 新建, 无守卫会把 0600 放宽成 0644)."""
+    """覆盖导出沿用既有备份的权限位 (os.replace 按 umask 新建, 无守卫会把 0600 放宽成 0644).
+
+    POSIX 专属: Windows 上 os.chmod 只切只读位, 权限位是合成的 (文件固定报
+    0666/0444), 0600 根本无法表达 —— 守约 (app/backup.py 里抄 S_IMODE) 也只会
+    抄到合成的 0666, 该断言在 Windows 上不可满足, 不能当成产品缺陷.
+    """
     import os
     import stat
+    import sys
 
+    if sys.platform == "win32":
+        pytest.skip("Windows 无 POSIX 权限位 (os.chmod 只切只读位, stat 报合成 0666/0444), 0600 不可表达")
     monkeypatch.setattr(backup, "EXPORT_PAGE", 7)
     aid = _account()
     _seed_tied_records(aid, n=30)

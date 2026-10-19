@@ -1,1 +1,15 @@
+# CI / 本地测试依赖.
+#
+# CI 只装本文件, 不装 requirements.txt: 被测模块的运行时依赖多数能用占位模块/
+# 假对象隔离, 不必把 pywebview 的图形栈拖进 runner. 例外是要验证"真实上游语义"
+# 的用例 —— 它们依赖的包在此显式列出.
 pytest>=8
+# 真实 pystray: tests/test_perf_runtime_opt.py 的托盘面板用例要验证 pystray 自身
+# 的 callable/visible 求值语义 (MenuItem.text / Menu.items -> _visible_items),
+# 占位模块验不出来 (见该文件 pystray_mod fixture). 这些用例只构造 Menu/MenuItem,
+# 不创建 Icon, 因此不需要显示环境. Pillow/six 由 pystray 自动携带.
+pystray>=0.19
+# 注意: pystray 在 Linux 上按 appindicator -> gtk -> xorg 依次挑后端, 而 xorg
+# 后端在 import 期就会连 X 服务器 (pystray/_xorg.py: Xlib.display.Display()).
+# 没有图形栈的机器 (如 ubuntu-latest runner) 上包里能装, 但 import 可能失败;
+# 托盘用例对这种环境 pytest.skip, 不判失败; Windows/macOS 上照常真跑.
