@@ -722,6 +722,17 @@ async function loadHeatmap() {
     renderHeatmap();
   } catch (e) { /* 统计页非关键块: 静默 */ }
 }
+/* 热力图行的显隐会改变上方「模型用量 | 用量趋势」两栏的可用高度, 而统计页图表是
+   responsive:false (创建时按当时容器定尺寸, 只在窗口 resize 时手动重算), 不会跟随
+   容器自动缩放. 布局落定后不补一次 resize, 环形图就会按旧高度绘制, 溢出的扇区直接
+   盖住下面的模型排行列表 (截图里"环压排行"就是这么来的). */
+function resizeStatsCharts() {
+  requestAnimationFrame(() => {
+    safeResize(cModel);
+    safeResize(cModelTrend);
+    safeResize(cTrend);
+  });
+}
 function renderHeatmap() {
   const row = $("heatmap-row");
   const body = $("heatmap-body");
@@ -730,6 +741,7 @@ function renderHeatmap() {
     // 无历史数据: 整行 (热力图 + 模型用量趋势) 保持隐藏, 只在有内容时才占位
     if (row) row.hidden = true;
     body.innerHTML = `<div class="hint" style="padding:12px 16px">${t("heatmapNoData")}</div>`;
+    resizeStatsCharts();
     return;
   }
   // 整行初始为 hidden, 数据到位后才显示 —— 否则永远不可见 (整行连带
@@ -759,6 +771,7 @@ function renderHeatmap() {
   html += `<span>${t("more")}</span></div></div>`;
   html += heatmapSummaryHtml(metric, val);
   body.innerHTML = html;
+  resizeStatsCharts();
 }
 /* 热力图右侧摘要 (峰值 / 当前连续 / 最长连续) — 峰值随所选指标变,
    连续天数以"当天有请求"为准 (与指标无关: 免费模型也可能成本为 0) */
