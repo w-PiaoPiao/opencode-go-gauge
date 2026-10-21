@@ -956,6 +956,12 @@ function chartModelTrend(rangeModels) {
       plugins: {
         legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 7, boxHeight: 7, font: { size: 10 }, color: cssVar("--text3"), padding: 7 } },
         tooltip: {
+          // 只列当日有用量的模型: 堆叠面积按天归一, 当天没量的模型在提示框里只是
+          // 「0.0% · 0」噪声 (图例仍是整段窗口的模型集, 不随悬停日变化)
+          filter: (item) => {
+            const raw = item.dataset._raw;
+            return !raw || Number(raw[item.dataIndex]) > 0;
+          },
           callbacks: {
             label: (it) => {
               const v = it.dataset._raw ? it.dataset._raw[it.dataIndex] : 0;
