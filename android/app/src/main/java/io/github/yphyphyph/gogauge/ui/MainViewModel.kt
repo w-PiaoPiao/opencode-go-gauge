@@ -86,7 +86,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /** 热力图指标: cost / requests / tokens。 */
-    var heatmapDim by mutableStateOf("cost")
+    var heatmapDim by mutableStateOf("tokens")  // desktop default (c866440): 总 TOKEN
         private set
 
     /** 模型用量趋势数据 (近 30 天, 与 statsRange 无关) — desktop /api/model_trend parity。 */
