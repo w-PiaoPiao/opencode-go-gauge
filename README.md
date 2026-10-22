@@ -16,6 +16,7 @@
 > 🔀 本仓库 fork 自 [yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge)，
 > 在原 Windows 版基础上新增 **macOS** 与 **Android** 平台支持。
 > 全平台安装包（Windows / macOS / Android）均发布在本仓库 [Releases](releases)。
+> 同一版本的所有平台安装包放在**同一个 Release** 里（一个版本 tag，如 `v2.2.1d`），发布流程见 [docs/release.md](docs/release.md)。
 
 ## 🗺 平台支持
 

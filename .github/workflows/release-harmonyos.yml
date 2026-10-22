@@ -1,4 +1,5 @@
 # HarmonyOS HAP 自动构建: 推送 v*-harmony tag 时触发 (镜像 release-android.yml)。
+# 注: 鸿蒙暂未纳入统一发布 (release.yml), 仍走本单平台流程。
 #
 # ⚠️ 前提 (公共 runner 需要):
 #   1. 安装 HarmonyOS 命令行工具链 (hvigor/ohpm/node) 与 SDK (API 24) —

@@ -44,8 +44,10 @@ class UpdateApi(
         // fork 发布仓库: 安卓 APK 由本 fork 的 release 分发, 更新检查指向 fork
         const val REPO = "w-PiaoPiao/opencode-go-gauge"
         // 列表接口而非 /releases/latest: 仓库 Latest 是全平台共享的一个标记,
-        // 其他平台 (-macos/-windows) 发布后占据 Latest 会把安卓更新判断带偏
-        // (tag 后缀被剥掉后版本比较失真). 这里只认 -android 条目 — desktop updater.py parity.
+        // 其他平台发布后占据 Latest 会把安卓更新判断带偏. 现在统一发布 (同一
+        // release 内含全平台资产) 与旧式 v*-android tag 并存: 遍历列表, 用
+        // 「旧式平台 tag 或统一 release 且资产里有 APK」过滤, 再按版本号取最大
+        // — desktop updater.py parity.
         const val RELEASES_URL = "https://api.github.com/repos/$REPO/releases?per_page=30"
         const val ATOM_URL = "https://github.com/$REPO/releases.atom"
         const val RELEASE_PAGE_URL = "https://github.com/$REPO/releases/latest"
@@ -62,6 +64,58 @@ class UpdateApi(
         private val TAG_RE = Regex("""^v?(\d+)\.(\d+)\.(\d+)([a-z])?(?:[-+].*)?$""")
         private val HTML_TAG_RE = Regex("<[^>]*>")
         private val WS_RE = Regex("\\s+")
+
+        // 已知平台后缀: 统一发布用不带后缀的版本 tag (如 v2.2.1d), 旧式
+        // v*-android tag 继续兼容 — desktop updater.py parity
+        private val KNOWN_SUFFIXES = listOf("-windows", "-macos", "-android", "-harmony")
+
+        /** 四元组比较 (字母后缀按 a=1,b=2... 计入第四位, 无后缀=0) — desktop _parse_version parity. 公开供单测. */
+        internal fun parseVersion(text: String): List<Int>? {
+            val m = TAG_RE.matchEntire(text.trim()) ?: return null
+            val suffix = m.groupValues[4]
+            val letterRank = if (suffix.isEmpty()) 0 else suffix[0] - 'a' + 1
+            return listOf(
+                m.groupValues[1].toInt(),
+                m.groupValues[2].toInt(),
+                m.groupValues[3].toInt(),
+                letterRank,
+            )
+        }
+
+        /** 旧式平台 tag (如 v2.1.0-android): 版本前缀合法且带 -android 后缀. */
+        internal fun isPlatformTag(tag: String): Boolean {
+            val t = tag.trim().lowercase()
+            return t.endsWith(PLATFORM_SUFFIX) && parseVersion(t) != null
+        }
+
+        /** 统一发布 tag (如 v2.2.1d): 版本前缀合法且不带任何已知平台后缀. */
+        internal fun isUnifiedTag(tag: String): Boolean {
+            val t = tag.trim().lowercase()
+            return KNOWN_SUFFIXES.none { t.endsWith(it) } && parseVersion(t) != null
+        }
+
+        /** 从资产名挑本平台 APK (优先 -android.apk, 退而求其次任意 .apk). */
+        internal fun pickAssetName(names: List<String>): String? {
+            val cleaned = names.filter { it.isNotBlank() }
+            return cleaned.firstOrNull { it.lowercase().endsWith("-android.apk") }
+                ?: cleaned.firstOrNull { it.lowercase().endsWith(".apk") }
+        }
+
+        /**
+         * release 是否提供 Android 安装包:
+         * - 旧式 v*-android tag 直接认 (兼容历史上只发单平台的 release);
+         * - 统一 release 必须在资产里找到 APK, 否则跳过 (例如只发桌面的 release).
+         */
+        internal fun releaseApplies(tag: String, assetNames: List<String>): Boolean =
+            isPlatformTag(tag) || (isUnifiedTag(tag) && pickAssetName(assetNames) != null)
+
+        /** 版本比较 (公开供单测). */
+        internal fun isNewer(latest: List<Int>, current: List<Int>): Boolean {
+            for (i in latest.indices) {
+                if (latest[i] != current[i]) return latest[i] > current[i]
+            }
+            return false
+        }
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -81,35 +135,11 @@ class UpdateApi(
         @SerialName("assets") val assets: List<AssetResponse> = emptyList(),
     )
 
-    /** 从资产列表挑本平台 APK (名字以 -android.apk 结尾优先, 退而求其次任意 .apk). */
-    private fun pickAsset(assets: List<AssetResponse>): AssetResponse? =
-        assets.firstOrNull { it.name.lowercase().endsWith("-android.apk") && it.downloadUrl.isNotBlank() }
-            ?: assets.firstOrNull { it.name.lowercase().endsWith(".apk") && it.downloadUrl.isNotBlank() }
-
-    /** 四元组比较 (字母后缀按 a=1,b=2... 计入第四位, 无后缀=0) — desktop _parse_version parity. */
-    private fun parseVersion(text: String): List<Int>? {
-        val m = TAG_RE.matchEntire(text.trim()) ?: return null
-        val suffix = m.groupValues[4]
-        val letterRank = if (suffix.isEmpty()) 0 else suffix[0] - 'a' + 1
-        return listOf(
-            m.groupValues[1].toInt(),
-            m.groupValues[2].toInt(),
-            m.groupValues[3].toInt(),
-            letterRank,
-        )
-    }
-
-    /** tag 是否为本平台 release (如 v2.1.0-android): 版本前缀合法且带 -android 后缀. */
-    private fun isPlatformTag(tag: String): Boolean {
-        val t = tag.trim().lowercase()
-        return t.endsWith(PLATFORM_SUFFIX) && parseVersion(t) != null
-    }
-
-    private fun isNewer(latest: List<Int>, current: List<Int>): Boolean {
-        for (i in latest.indices) {
-            if (latest[i] != current[i]) return latest[i] > current[i]
-        }
-        return false
+    /** 从资产列表挑本平台 APK (统一/旧式命名都兼容). */
+    private fun pickAsset(assets: List<AssetResponse>): AssetResponse? {
+        val usable = assets.filter { it.downloadUrl.isNotBlank() }
+        val name = pickAssetName(usable.map { it.name }) ?: return null
+        return usable.firstOrNull { it.name == name }
     }
 
     /** 请求 URL 返回文本, 网络/HTTP 失败自动重试; 重试耗尽抛最后一次错误. */
@@ -145,7 +175,13 @@ class UpdateApi(
         return t.trim()
     }
 
-    /** 从 Releases Atom 流解析最新的本平台 (-android) release (desktop _fetch_latest_atom parity). */
+    /**
+     * 从 Releases Atom 流解析最新的可用 release (desktop _fetch_latest_atom parity).
+     *
+     * Atom 条目不含资产列表, 只能按 tag 判定: 本平台旧式后缀, 或统一发布
+     * (无平台后缀; 约定统一 release 必带全平台资产). 多个候选取版本最大 ——
+     * Atom 按发布时间倒序, 但混排各平台 tag 时不能直接取首条.
+     */
     private fun parseAtom(text: String): Triple<String, String, String> {
         val factory = DocumentBuilderFactory.newInstance()
         factory.isNamespaceAware = true
@@ -162,13 +198,17 @@ class UpdateApi(
             throw OpenCodeApiException("GitHub Releases 订阅流为空，未获取到版本信息")
         }
 
-        // 流内混排各平台 release, 逐条过滤, 首个本平台条目即最新
+        var best: Triple<String, String, String>? = null
+        var bestVer: List<Int>? = null
         for (i in 0 until entries.length) {
             val entry = entries.item(i) as? Element ?: continue
 
             val idEl = entry.getElementsByTagNameNS(ATOM_NS, "id").item(0) as? Element
             val tag = idEl?.textContent?.trim()?.substringAfterLast('/') ?: ""
-            if (!isPlatformTag(tag)) continue
+            val ver = parseVersion(tag) ?: continue
+            if (!isPlatformTag(tag) && !isUnifiedTag(tag)) continue
+            val seen = bestVer
+            if (seen != null && !isNewer(ver, seen)) continue
 
             var releaseUrl = RELEASE_PAGE_URL
             val links = entry.getElementsByTagNameNS(ATOM_NS, "link")
@@ -182,8 +222,10 @@ class UpdateApi(
 
             val contentEl = entry.getElementsByTagNameNS(ATOM_NS, "content").item(0) as? Element
             val notes = contentEl?.textContent?.let { stripHtml(it) } ?: ""
-            return Triple(tag, releaseUrl, notes)
+            bestVer = ver
+            best = Triple(tag, releaseUrl, notes)
         }
+        best?.let { return it }
         throw OpenCodeApiException("Releases 订阅流中暂无 $PLATFORM_SUFFIX 版本")
     }
 
@@ -199,21 +241,28 @@ class UpdateApi(
         var digest: String? = null
 
         try {
-            // API 按创建时间倒序返回, 首个本平台 (-android) 条目即最新 (desktop parity)
+            // 统一 release 与旧式平台 tag 混排: 遍历取版本最大 (创建时间顺序 ≠ 版本顺序)
             val data = json.decodeFromString<List<ReleaseResponse>>(
                 fetchText(RELEASES_URL, "application/vnd.github+json", ua)
             )
+            var bestVer: List<Int>? = null
             for (rel in data) {
-                if (!isPlatformTag(rel.tagName)) continue
+                val ver = parseVersion(rel.tagName) ?: continue
+                if (!releaseApplies(rel.tagName, rel.assets.map { it.name })) continue
+                val seen = bestVer
+                if (seen != null && !isNewer(ver, seen)) continue
+                bestVer = ver
                 tag = rel.tagName
                 releaseUrl = rel.htmlUrl
                 notes = (rel.body ?: "").trim().take(600)
+                assetName = null
+                downloadUrl = null
+                digest = null
                 pickAsset(rel.assets)?.let {
                     assetName = it.name
                     downloadUrl = it.downloadUrl
                     digest = it.digest
                 }
-                break
             }
         } catch (e: Exception) {
             // 首次失败仅记录, 交由 Atom 兜底 (desktop parity)

@@ -16,6 +16,7 @@
 > 🔀 This repository is a fork of [yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge),
 > adding **macOS** and **Android** support on top of the original Windows app.
 > All platform packages (Windows / macOS / Android) are published in this repo's [Releases](releases).
+> Every version ships as a **single Release** containing all platform assets (one tag, e.g. `v2.2.1d`) — see [docs/release.md](docs/release.md).
 
 ## 🗺 Platform Support
 

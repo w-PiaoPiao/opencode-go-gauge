@@ -10,6 +10,7 @@ import html as _html
 import hashlib
 import json
 import os
+import platform
 import re
 import sys
 import time
@@ -43,16 +44,20 @@ def _resolve_repo() -> str:
 
 REPO = _resolve_repo()
 # 列表接口而非 /releases/latest: 仓库 Latest 是全平台共享的一个标记,
-# android/windows 版发布后占据 Latest 会把 mac 更新判断带偏 (tag 后缀被
-# 剥掉后 0.1.0-android < 当前版本 → 误判"已是最新"). 这里只认 -macos 条目.
+# 其它平台发布后占据 Latest 会把本平台判断带偏. 现在统一发布 (同一 release
+# 内含全平台资产) 与旧式平台 tag 并存: 遍历列表, 用「旧式平台 tag 或统一
+# release 且内含本平台资产」过滤, 再按版本号取最大.
 RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
 ATOM_URL = f"https://github.com/{REPO}/releases.atom"
 RELEASE_PAGE_URL = f"https://github.com/{REPO}/releases/latest"
 # 平台后缀/资产扩展名: 更新检查与下载按运行平台分流 (-macos .zip / -windows .exe)
 _IS_WIN = sys.platform == "win32"
 _PLATFORM_SUFFIX = "-windows" if _IS_WIN else "-macos"
+_PLATFORM_NAME = "Windows" if _IS_WIN else "macOS"
 _ASSET_EXT = ".exe" if _IS_WIN else ".zip"
-_ASSET_NAME = f"gogauge{_PLATFORM_SUFFIX}{_ASSET_EXT}"  # release 资产的标准文件名 (小写比较)
+# 已知平台后缀: 统一发布用不带后缀的版本 tag (如 v2.2.1d), 旧式按平台发布的
+# tag (v2.2.1d-macos / -windows / -android / -harmony) 继续兼容.
+_KNOWN_SUFFIXES = ("-windows", "-macos", "-android", "-harmony")
 _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 _TIMEOUT = 8  # 秒; GitHub 直连可能超时, 快速失败避免卡住 UI
 _MAX_ATTEMPTS = 3  # 境内直连 GitHub 间歇性 502/超时/重置, 自动重试提高成功率
@@ -121,9 +126,11 @@ def _strip_html(text: str) -> str:
 
 
 def _fetch_latest_atom() -> dict[str, str]:
-    """从 Releases Atom 流解析最新 release (不受 GitHub API 限流).
+    """从 Releases Atom 流解析最新可用 release (不受 GitHub API 限流).
 
-    只认本平台 (-macos) 条目: 流内混排各平台 release, 逐条过滤.
+    Atom 条目不含资产列表, 只能按 tag 判定: 本平台旧式后缀, 或统一发布
+    (无平台后缀; 约定统一 release 必带全平台资产). 多个候选取版本最大 ——
+    Atom 按发布时间倒序, 但混排各平台 tag 时不能直接取首条.
 
     Returns:
         {"tag": str, "release_url": str, "notes": str}
@@ -136,12 +143,17 @@ def _fetch_latest_atom() -> dict[str, str]:
     if not entries:
         raise RuntimeError("GitHub Releases 订阅流为空，未获取到版本信息")
 
+    best_ver: Optional[tuple[int, int, int, int]] = None
+    best: Optional[dict[str, str]] = None
     for entry in entries:
         tag = ""
         id_el = entry.find("a:id", _ATOM_NS)
         if id_el is not None and id_el.text:
             tag = id_el.text.rsplit("/", 1)[-1].strip()
-        if not _is_platform_tag(tag):
+        ver = _parse_version(tag)
+        if ver is None or not (_is_platform_tag(tag) or _is_unified_tag(tag)):
+            continue
+        if best_ver is not None and ver <= best_ver:
             continue
 
         release_url = f"https://github.com/{REPO}/releases/tag/{tag}"
@@ -156,9 +168,12 @@ def _fetch_latest_atom() -> dict[str, str]:
         if content is not None and content.text:
             notes = _strip_html(content.text)
 
-        return {"tag": tag, "release_url": release_url, "notes": notes}
+        best_ver = ver
+        best = {"tag": tag, "release_url": release_url, "notes": notes}
 
-    raise RuntimeError(f"Releases 订阅流中暂无 {_PLATFORM_SUFFIX} 版本")
+    if best is not None:
+        return best
+    raise RuntimeError(f"Releases 订阅流中暂无 {_PLATFORM_NAME} 版本")
 
 
 def _parse_version(text: str) -> Optional[tuple[int, int, int, int]]:
@@ -172,35 +187,113 @@ def _parse_version(text: str) -> Optional[tuple[int, int, int, int]]:
 
 
 def _is_platform_tag(tag: str) -> bool:
-    """tag 是否为本平台 release (如 v1.0.2-macos): 版本前缀合法且带 -macos 后缀."""
+    """旧式平台 tag (如 v1.0.2-macos): 版本前缀合法且带本平台后缀."""
     t = (tag or "").strip().lower()
     return t.endswith(_PLATFORM_SUFFIX) and _parse_version(t) is not None
 
 
-def _fetch_latest_platform_release() -> dict[str, str]:
-    """从 Releases 列表取最新的本平台 (-macos) release.
+def _is_unified_tag(tag: str) -> bool:
+    """统一发布 tag (如 v2.2.1d): 版本前缀合法且不带任何已知平台后缀.
 
-    API 按创建时间倒序返回, 首个匹配即最新; 各平台 tag 互不干扰.
+    统一 release 约定内含 Windows / macOS / Android 全部资产, 所以 Atom 兜底
+    (看不到资产列表) 只能信任该约定; API 列表路径会再校验资产是否真的存在.
+    """
+    t = (tag or "").strip().lower()
+    return not t.endswith(_KNOWN_SUFFIXES) and _parse_version(t) is not None
+
+
+def _asset_name_matches_platform(name: str) -> bool:
+    """资产名是否属于运行平台 (统一发布 / 旧式发布命名都兼容).
+
+    旧式: GoGauge-v2.2.1a-macos.zip / GoGauge-v2.1.0b-windows.exe
+    统一: GoGauge-v2.2.1d-macos-arm64.zip / GoGauge-v2.2.1d-windows.exe
+    """
+    n = (name or "").strip().lower()
+    if _IS_WIN:
+        return n.endswith(".exe") and "windows" in n
+    return n.endswith(".zip") and "macos" in n
+
+
+def _pick_platform_asset(assets: Any) -> Optional[dict[str, Any]]:
+    """从 release 资产列表挑运行平台安装包; macOS 按 CPU 架构优先.
+
+    Args:
+        assets: GitHub API 的 assets 数组 (容错非 dict / 空下载地址)
+
+    Returns:
+        匹配的资产对象; 没有时返回 None
+    """
+    candidates = [
+        a for a in (assets or [])
+        if isinstance(a, dict)
+        and _asset_name_matches_platform(str(a.get("name") or ""))
+        and str(a.get("browser_download_url") or "")
+    ]
+    if not candidates:
+        return None
+    if not _IS_WIN:
+        machine = platform.machine().lower()
+        prefer = (
+            ("arm64", "aarch64")
+            if machine in ("arm64", "aarch64")
+            else ("x86_64", "x64", "amd64", "intel")
+        )
+        for asset in candidates:
+            name = str(asset.get("name") or "").lower()
+            if any(token in name for token in prefer):
+                return asset
+    return candidates[0]
+
+
+def _release_applies(rel: dict[str, Any]) -> bool:
+    """release 是否提供运行平台的安装包.
+
+    - 旧式平台 tag: 直接认 (兼容历史上只发单平台的 release);
+    - 统一 tag: 必须能在资产里找到本平台安装包, 否则跳过 —— 例如只含 Android
+      APK 的 release 不能让桌面端误报有更新.
+    """
+    tag = str(rel.get("tag_name") or "").strip()
+    if _is_platform_tag(tag):
+        return True
+    return _is_unified_tag(tag) and _pick_platform_asset(rel.get("assets")) is not None
+
+
+def _fetch_latest_platform_release() -> dict[str, str]:
+    """从 Releases 列表取最新的可用 release (兼容统一发布与旧式平台 tag).
+
+    遍历全部条目按版本号取最大 (而不是取首条): 统一 release 与旧式平台 tag
+    混排在同一列表里, 创建时间顺序不等于版本顺序.
 
     Returns:
         {"tag": str, "release_url": str, "notes": str}
 
     Raises:
-        RuntimeError: 列表为空或无平台条目
+        RuntimeError: 列表为空或无可用条目
     """
     data = _fetch_json(RELEASES_URL)
-    if isinstance(data, list):
-        for rel in data:
-            tag = str(rel.get("tag_name") or "").strip()
-            if not _is_platform_tag(tag):
-                continue
-            return {
-                "tag": tag,
-                "release_url": rel.get("html_url")
-                or f"https://github.com/{REPO}/releases/tag/{tag}",
-                "notes": str(rel.get("body") or "").strip(),
-            }
-    raise RuntimeError(f"Releases 中暂无 {_PLATFORM_SUFFIX} 版本")
+    if not isinstance(data, list):
+        raise RuntimeError("GitHub Releases 响应格式异常")
+    best_ver: Optional[tuple[int, int, int, int]] = None
+    best: Optional[dict[str, str]] = None
+    for rel in data:
+        if not isinstance(rel, dict):
+            continue
+        tag = str(rel.get("tag_name") or "").strip()
+        ver = _parse_version(tag)
+        if ver is None or not _release_applies(rel):
+            continue
+        if best_ver is not None and ver <= best_ver:
+            continue
+        best_ver = ver
+        best = {
+            "tag": tag,
+            "release_url": rel.get("html_url")
+            or f"https://github.com/{REPO}/releases/tag/{tag}",
+            "notes": str(rel.get("body") or "").strip(),
+        }
+    if best is not None:
+        return best
+    raise RuntimeError(f"Releases 中暂无 {_PLATFORM_NAME} 版本")
 
 
 def check_update() -> dict[str, Any]:
@@ -250,8 +343,9 @@ def check_update() -> dict[str, Any]:
 def fetch_asset_info(tag: str) -> tuple[str, str]:
     """取指定 release 中本平台分发包的下载直链与官方摘要.
 
-    优先精确匹配标准资产名, 否则回退任一本平台扩展名的资产.
-    GitHub API 的 assets[].digest 形如 "sha256:<hex>" (无摘要时为空串).
+    按资产名识别平台 (旧式 -macos/-windows 命名与统一发布命名都兼容),
+    macOS 优先匹配当前 CPU 架构; GitHub API 的 assets[].digest 形如
+    "sha256:<hex>" (无摘要时为空串).
 
     Returns:
         (browser_download_url, digest); 找不到资产时 url 为空串
@@ -264,21 +358,12 @@ def fetch_asset_info(tag: str) -> tuple[str, str]:
         data = _fetch_json(f"https://api.github.com/repos/{REPO}/releases/tags/{tag}")
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"无法获取 release {tag} 的资产信息: {exc}") from exc
-    fallback = ("", "")
-    for asset in data.get("assets") or []:
-        name = str(asset.get("name") or "").strip().lower()
-        url = str(asset.get("browser_download_url") or "")
-        digest = str(asset.get("digest") or "").strip().lower()
-        if not url:
-            continue
-        if name == _ASSET_NAME:
-            return url, digest
-        if not fallback[0] and (
-            name.endswith(_PLATFORM_SUFFIX + _ASSET_EXT)
-            or (not _IS_WIN and name.endswith(".zip"))
-        ):
-            fallback = (url, digest)
-    return fallback
+    asset = _pick_platform_asset(data.get("assets") if isinstance(data, dict) else None)
+    if asset is None:
+        return "", ""
+    url = str(asset.get("browser_download_url") or "")
+    digest = str(asset.get("digest") or "").strip().lower()
+    return url, digest
 
 
 def _verify_digest(path: str, digest: str) -> None:
@@ -337,7 +422,7 @@ def download_update(dest_dir: str) -> dict[str, Any]:
         url, digest = fetch_asset_info(result["latest"])
         if not url:
             result["state"] = "no_asset"
-            result["error"] = f"release {result['latest']} 中未找到 {_ASSET_NAME}"
+            result["error"] = f"release {result['latest']} 中未找到本平台安装包"
             return result
         os.makedirs(dest_dir, exist_ok=True)
         # tag 来自远端 API, 仅做白名单字符过滤后再拼路径: _TAG_RE 的尾部

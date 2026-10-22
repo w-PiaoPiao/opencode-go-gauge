@@ -1,4 +1,5 @@
-# Android APK 自动构建: 推送 v*-android tag 时触发, 构建产物自动附到同名 release.
+# Android APK 自动构建 (旧式单平台发布; 统一发布见 release.yml): 推送 v*-android tag 时触发,
+# 构建产物自动附到同名 release.
 # 签名使用仓库内 debug.keystore (个人侧载用; 上架 Play 需替换正式 keystore).
 name: release-android
 
