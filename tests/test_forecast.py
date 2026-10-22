@@ -31,13 +31,28 @@ class TestWindowForecast:
         assert fc == {"state": "fill", "sec": 8286}
 
     def test_no_fill_when_pace_too_slow(self):
-        # 已过 6000s 仅用 10%: 剩余 90% 需 54000s, 远超 12000s 重置
+        # 已过 6000s 仅用 10%: 按均值到重置只用到 30%, 不会打满
         fc = window_forecast(used=10, reset_in_sec=12000, window_len=FIVE_HOUR_SEC)
-        assert fc == {"state": "no_fill"}
+        assert fc == {"state": "no_fill", "pct": 30}
 
     def test_no_fill_on_zero_usage(self):
         fc = window_forecast(used=0, reset_in_sec=12000, window_len=FIVE_HOUR_SEC)
-        assert fc == {"state": "no_fill"}
+        assert fc == {"state": "no_fill", "pct": 0}
+
+    def test_no_fill_projects_usage_at_reset(self):
+        # 月窗口 31 天, 已过 13 天用 41%: 41 × 31 ÷ 13 ≈ 97.8% → 98 (重置前不会打满)
+        month = 31 * 86400
+        elapsed = 13 * 86400
+        fc = window_forecast(used=41, reset_in_sec=month - elapsed, window_len=month)
+        assert fc == {"state": "no_fill", "pct": 98}
+
+    def test_no_fill_pct_rounds_half_up(self):
+        # 32.4 × 18000 ÷ 6000 = 97.2% → 97; 32.5 × 18000 ÷ 6000 = 97.5% → 98
+        # (四舍五入, 与 Android Forecast.kt 同口径)
+        fc = window_forecast(used=32.4, reset_in_sec=12000, window_len=FIVE_HOUR_SEC)
+        assert fc == {"state": "no_fill", "pct": 97}
+        fc = window_forecast(used=32.5, reset_in_sec=12000, window_len=FIVE_HOUR_SEC)
+        assert fc == {"state": "no_fill", "pct": 98}
 
     def test_none_when_sample_too_small(self):
         # 窗口刚重置 (elapsed=0) 或已过不足 1% 时间: 不给预测
@@ -64,9 +79,9 @@ class TestWindowForecast:
 
     def test_boundary_exhaust_equals_reset(self):
         # 耗尽时刻恰好等于重置时刻: 不算打满 (需严格早于重置)
-        # used=50, elapsed=1000 → exhaust=1000; reset=1000 → no_fill
+        # used=50, elapsed=1000 → exhaust=1000; reset=1000 → no_fill; 预测 100% 封顶为 99
         fc = window_forecast(used=50, reset_in_sec=1000, window_len=2000)
-        assert fc == {"state": "no_fill"}
+        assert fc == {"state": "no_fill", "pct": 99}
 
     def test_string_inputs_tolerated(self):
         fc = window_forecast(used="42", reset_in_sec="12000", window_len=FIVE_HOUR_SEC)

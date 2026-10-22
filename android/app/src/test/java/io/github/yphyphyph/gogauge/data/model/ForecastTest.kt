@@ -22,13 +22,41 @@ class ForecastTest {
 
     @Test
     fun `no fill when rate too slow`() {
+        // 5h 窗口已过 3h 用 10%: 按均值到 5h 结束只用到 16.7% → 17%
         val fc = Forecast.windowForecast(used = 10.0, resetInSec = 2 * 3600, windowLen = fiveH)!!
         assertEquals("no_fill", fc.state)
+        assertEquals(17, fc.pct)
     }
 
     @Test
     fun `zero usage never fills`() {
-        assertEquals("no_fill", Forecast.windowForecast(0.0, 2 * 3600, fiveH)!!.state)
+        val fc = Forecast.windowForecast(0.0, 2 * 3600, fiveH)!!
+        assertEquals("no_fill", fc.state)
+        assertEquals(0, fc.pct)
+    }
+
+    @Test
+    fun `no fill projects usage at reset`() {
+        // 月窗口 30 天, 已过 13 天用 42%: 42 × 30 ÷ 13 ≈ 96.9% → 97% (与桌面 forecast.py 同口径)
+        val month = 30 * 86400.0
+        val elapsed = 13 * 86400.0
+        val fc = Forecast.windowForecast(
+            used = 42.0, resetInSec = (month - elapsed).toInt(), windowLen = month,
+        )!!
+        assertEquals("no_fill", fc.state)
+        assertEquals(97, fc.pct)
+    }
+
+    @Test
+    fun `no fill pct rounds half up and caps at 99`() {
+        // 32.5 × 18000 ÷ 6000 = 97.5% → 98 (四舍五入)
+        val half = Forecast.windowForecast(used = 32.5, resetInSec = 12000, windowLen = fiveH)!!
+        assertEquals("no_fill", half.state)
+        assertEquals(98, half.pct)
+        // 边界: 耗尽时刻恰等于重置 (预测 100%) —— 封顶 99, 避免「不会打满（100%）」
+        val edge = Forecast.windowForecast(used = 50.0, resetInSec = 1000, windowLen = 2000.0)!!
+        assertEquals("no_fill", edge.state)
+        assertEquals(99, edge.pct)
     }
 
     @Test

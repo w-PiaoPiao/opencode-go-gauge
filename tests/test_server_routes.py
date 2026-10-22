@@ -164,7 +164,7 @@ def test_attach_forecast_annotates_windows_without_mutating_cache():
     out = server._attach_forecast(quota)
     assert out["windows"][0]["forecast"] == {"state": "fill", "sec": 8286}
     assert out["windows"][1]["forecast"] == {"state": "fill", "sec": 4 * 86400}
-    assert out["windows"][2]["forecast"] == {"state": "no_fill"}
+    assert out["windows"][2]["forecast"] == {"state": "no_fill", "pct": 93}
     assert out is not quota
     assert all("forecast" not in w for w in quota["windows"])
 
@@ -183,7 +183,7 @@ def test_attach_forecast_skips_window_without_reset():
     }
     out = server._attach_forecast(quota)
     assert out["windows"][0]["forecast"] is None
-    assert out["windows"][1]["forecast"] == {"state": "no_fill"}
+    assert out["windows"][1]["forecast"] == {"state": "no_fill", "pct": 93}
 
 
 def test_attach_forecast_passthrough_when_unavailable():

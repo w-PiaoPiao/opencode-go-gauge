@@ -347,7 +347,7 @@ object ZhStrings : Strings(
     importDone = "导入完成，新增 %1\$d 条记录",
     busyWorking = "处理中…",
     windowNotStarted = "窗口未开始", resetUnknown = "重置时间未知",
-    fcExhaust = "预计耗尽于 %1\$s", fcNeverFull = "预计不会打满",
+    fcExhaust = "预计耗尽于 %1\$s", fcNeverFull = "预计不会打满（%1\$d%%）",
     ttPlain = "不含缓存", ttTotal = "含缓存",
     mtTitle = "模型用量趋势",
 )
@@ -466,7 +466,7 @@ object EnStrings : Strings(
     importDone = "Imported, %1\$d new records",
     busyWorking = "Working…",
     windowNotStarted = "Window not started", resetUnknown = "Reset time unknown",
-    fcExhaust = "Runs out in %1\$s", fcNeverFull = "Won't fill before reset",
+    fcExhaust = "Runs out in %1\$s", fcNeverFull = "Won't fill before reset (%1\$d%%)",
     ttPlain = "Excl. cache", ttTotal = "Incl. cache",
     mtTitle = "Model Usage Trend",
 )

@@ -56,7 +56,7 @@ const I18N = {
     rolling: "滚动用量", weekly: "每周用量", monthly: "每月用量",
     remaining: "剩余", used: "已用", resetsIn: "重置于",
     windowIdle: "窗口未开始", resetUnknown: "重置时间未知",
-    fcExhaust: "预计耗尽于 %1", fcNeverFull: "预计不会打满",
+    fcExhaust: "预计耗尽于 %1", fcNeverFull: "预计不会打满（%1%）",
     hitRate: "缓存命中率", hitAmount: "缓存命中量", totalTokens: "总 TOKEN 消耗",
     totalRequests: "总请求", totalCost: "总费用", sessions: "会话数",
     hit: "命中", miss: "未命中", pctOfInput: "占输入", inclCache: "含缓存命中",
@@ -154,7 +154,7 @@ const I18N = {
     rolling: "Rolling Usage", weekly: "Weekly Usage", monthly: "Monthly Usage",
     remaining: "Remaining", used: "Used", resetsIn: "Resets in",
     windowIdle: "Window not started", resetUnknown: "Reset time unknown",
-    fcExhaust: "Runs out in %1", fcNeverFull: "Won't fill before reset",
+    fcExhaust: "Runs out in %1", fcNeverFull: "Won't fill before reset (%1%)",
     hitRate: "Cache Hit Rate", hitAmount: "Cache Hits", totalTokens: "Total Tokens",
     totalRequests: "Requests", totalCost: "Total Cost", sessions: "Sessions",
     hit: "hit", miss: "missed", pctOfInput: "of input", inclCache: "incl. cache hits",
@@ -624,13 +624,14 @@ function renderUsageBlocks(quota) {
       <div class="ub-meta"><span>${t("used")} ${b.used.toFixed(0)}%${b.fc}</span><span>${b.reset}</span></div>
     </div>`).join("");
 }
-/* 配额条预测小字 (后端 app/forecast.py): 会打满 →「预计耗尽于 X」, 按当前速率
-   重置前用不完 →「预计不会打满」; 样本不足/已打满 (forecast 为 null) → 不显示.
+/* 配额条预测小字 (后端 app/forecast.py): 会打满 →「预计耗尽于 X」; 按当前速率
+   重置前用不完 →「预计不会打满（X%）」, X = 按本周期前段平均速率外推到重置时的
+   用量百分比; 样本不足/已打满 (forecast 为 null) → 不显示.
    格式与「重置于」同用 fmtDur, 数值与显示同源可直比 */
 function forecastText(fc) {
   if (!fc) return "";
   if (fc.state === "fill") return ` · <span class="ub-fc">${t("fcExhaust").replace("%1", fmtDur(fc.sec))}</span>`;
-  if (fc.state === "no_fill") return ` · <span class="ub-fc">${t("fcNeverFull")}</span>`;
+  if (fc.state === "no_fill") return ` · <span class="ub-fc">${t("fcNeverFull").replace("%1", fc.pct)}</span>`;
   return "";
 }
 /* ---------------- 首页: 用量概览 6 格 ---------------- */
