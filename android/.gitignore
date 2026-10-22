@@ -2,6 +2,7 @@
 .gradle/
 build/
 .gradle-home/
+.kotlin/
 
 # Android
 local.properties

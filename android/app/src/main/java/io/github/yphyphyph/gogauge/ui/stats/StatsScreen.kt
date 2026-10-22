@@ -42,6 +42,8 @@ import io.github.yphyphyph.gogauge.ui.components.EditorialGrid
 import io.github.yphyphyph.gogauge.ui.components.GgPullIndicator
 import io.github.yphyphyph.gogauge.ui.components.GgCard
 import io.github.yphyphyph.gogauge.ui.components.CalendarHeatmap
+import io.github.yphyphyph.gogauge.ui.components.modelTrendLeadIndex
+import io.github.yphyphyph.gogauge.ui.components.usageTrendLeadIndex
 import io.github.yphyphyph.gogauge.ui.components.Hint
 import io.github.yphyphyph.gogauge.ui.components.KpiCard
 import io.github.yphyphyph.gogauge.ui.components.ModelIcon
@@ -205,11 +207,15 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                 }
             }
 
-            // usage trend
+            // usage trend (前置无数据段裁掉 — desktop c866440 parity)
+            val usageLead = usageTrendLeadIndex(d.trend)
             GgCard {
-                CardHeader(s.usageTrend, trailing = { Hint(s.trendHint) })
+                CardHeader(
+                    s.usageTrend,
+                    trailing = { Hint(if (usageLead > 0) s.trendHintGap.format(usageLead) else s.trendHint) },
+                )
                 TrendLineChart(
-                    trend = d.trend,
+                    trend = if (usageLead > 0) d.trend.drop(usageLead) else d.trend,
                     s = s,
                     labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     gridLineColor = MaterialTheme.colorScheme.outline,
@@ -225,7 +231,7 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                     s.heatmapTitle,
                     trailing = {
                         SegButtons(
-                            options = listOf("cost" to s.cost, "requests" to s.totalRequests, "tokens" to s.totalTokens),
+                            options = listOf("tokens" to s.totalTokens, "requests" to s.totalRequests, "cost" to s.cost),
                             selected = vm.heatmapDim,
                             onSelect = vm::changeHeatmapDim,
                         )
@@ -245,6 +251,7 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
                         metric = vm.heatmapDim,
                         currency = vm.currency,
                         usdCny = d.usdCny,
+                        s = s,
                     )
                     Spacer(Modifier.height(10.dp))
                 }
@@ -254,8 +261,13 @@ fun StatsScreen(vm: MainViewModel = viewModel()) {
             // 30 天口径独立于页签 range; 无数据时整卡隐藏
             val modelTrend = vm.modelTrend
             if (modelTrend != null && modelTrend.series.isNotEmpty()) {
+                // 前置无数据段裁掉 + 右上角标注被裁天数 (desktop c866440 parity)
+                val mtLead = modelTrendLeadIndex(modelTrend.days, modelTrend.series, vm.excludedModels)
                 GgCard {
-                    CardHeader(s.mtTitle, trailing = { Hint(s.trendHint) })
+                    CardHeader(
+                        s.mtTitle,
+                        trailing = { Hint(if (mtLead > 0) s.trendHintGap.format(mtLead) else s.trendHint) },
+                    )
                     ModelTrendChart(
                         data = modelTrend,
                         models = d.models,

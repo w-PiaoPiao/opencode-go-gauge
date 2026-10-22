@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
@@ -32,6 +33,9 @@ import androidx.compose.ui.unit.sp
 import io.github.yphyphyph.gogauge.data.model.DailyStat
 import io.github.yphyphyph.gogauge.ui.theme.Gg
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.util.Fmt
 import java.time.LocalDate
 import kotlin.math.ceil
@@ -48,6 +52,7 @@ fun CalendarHeatmap(
     metric: String, // "cost" | "requests" | "tokens"
     currency: String,
     usdCny: Double,
+    s: Strings,
     modifier: Modifier = Modifier,
 ) {
     val cell = 11.dp
@@ -60,7 +65,7 @@ fun CalendarHeatmap(
         return
     }
 
-    val values = days.map { metricValue(it, metric) }
+    val values = days.map { dailyMetricValue(it, metric) }
     val maxValue = max(values.max(), 1.0)
     val firstDate = LocalDate.parse(days.first().date)
     // 首格按星期几对齐行位 (周一为首行): 前面留空格
@@ -165,13 +170,10 @@ fun CalendarHeatmap(
                 Text("多", fontSize = 10.sp, color = trackText)
             }
         }
+        // 摘要 (峰值/当前连续/最长连续) — desktop heatmapSummaryHtml parity
+        Spacer(Modifier.height(10.dp))
+        HeatmapSummaryRow(days = days, metric = metric, s = s, currency = currency, usdCny = usdCny)
     }
-}
-
-private fun metricValue(d: DailyStat, metric: String): Double = when (metric) {
-    "cost" -> d.totalCostUsd
-    "requests" -> d.requestCount.toDouble()
-    else -> (d.totalInputTokens + d.totalOutputTokens + d.totalReasoningTokens).toDouble()
 }
 
 /** 值强度 (0-1) → 颜色: 空档 tile, 其余沿暖橙梯度加深。 */
@@ -188,4 +190,49 @@ private fun heatColor(intensity: Double, empty: androidx.compose.ui.graphics.Col
     val i = t.toInt().coerceAtMost(stops.size - 2)
     val f = (t - i).toFloat()
     return androidx.compose.ui.graphics.lerp(stops[i], stops[i + 1], f)
+}
+
+/** 热力图摘要行 (desktop heatmapSummaryHtml parity): 峰值随所选指标, 连续天数只看「当天有请求」. */
+@Composable
+private fun HeatmapSummaryRow(
+    days: List<DailyStat>,
+    metric: String,
+    s: Strings,
+    currency: String,
+    usdCny: Double,
+) {
+    val summary = remember(days, metric) { heatmapSummary(days, metric) }
+    val peakText = when (metric) {
+        "cost" -> Fmt.money(summary.peakValue, currency, usdCny)
+        "requests" -> Fmt.int(summary.peakValue.toLong())
+        else -> Fmt.tokens(summary.peakValue.toLong())
+    }
+    fun streakText(n: Int): String = (if (n == 1) s.hmDayOne else s.hmDays).format(n)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
+        HeatmapStat("${s.hmPeak} · ${summary.peakDate.takeLast(5)}", peakText, Modifier.weight(1f))
+        HeatmapStat(s.hmCurStreak, streakText(summary.currentStreak), Modifier.weight(1f))
+        HeatmapStat(s.hmMaxStreak, streakText(summary.longestStreak), Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun HeatmapStat(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(
+            label,
+            fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            value,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = NumFontFamily,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }

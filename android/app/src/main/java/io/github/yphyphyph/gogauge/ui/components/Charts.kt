@@ -19,7 +19,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -58,6 +61,17 @@ import io.github.yphyphyph.gogauge.data.model.ModelTrendSeries
 import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.ui.theme.GgChart
 import io.github.yphyphyph.gogauge.util.Fmt
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import java.util.Locale
+import kotlin.math.roundToInt
 
 private fun Color.toArgbInt(): Int = android.graphics.Color.argb(
     (this.alpha * 255).toInt(), (this.red * 255).toInt(), (this.green * 255).toInt(), (this.blue * 255).toInt()
@@ -448,12 +462,18 @@ private fun ModelTrendSeries.totalFor(dim: String): Double = when (dim) {
 }
 
 /**
- * 模型用量趋势堆叠柱 — desktop chartModelTrend (v2.2.1a).
+ * 模型用量趋势 (按天归一的堆叠面积) — desktop chartModelTrend aa389b7 / df22e97 parity.
  *
- * 模型集取本图自身 30 天口径 (与 statsRange 无关): 排序以环形图当前顺序为配色基准
- * (两图同模型同色), 环形图没有的模型按自身用量续后; 排除集即时过滤 (不重查数据).
- * dim 与环形图联动: input=含缓存总输入 / output / cost.
+ * MPAndroidChart 的折线不支持堆叠, 这里改用 Canvas 手绘: 每天合计归一到 100%,
+ * 看的是构成变化而非绝对量 (绝对量由同页「用量趋势」承担)。层间连接用直线而不是
+ * Catmull-Rom 平滑 —— 稀疏尖峰数据下平滑会过冲 (画出负值/高于真实峰值的假峰);
+ * 桌面用 monotone 保形插值避免过冲, 直线同样不会过冲 (视觉上更硬朗一点)。
+ *
+ * 交互: 点击某天显示提示框 (占比 + 原始值), 只列当天该维度有用量的模型
+ * (desktop df22e97 tooltip filter); 当天全为 0 时提示框整体不绘制。
+ * 图例保持整段窗口的模型集, 不随悬停日变化 (用于识别/切换系列)。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ModelTrendChart(
     data: ModelTrendData,
@@ -487,64 +507,188 @@ fun ModelTrendChart(
             )
             .take(MODEL_COLORS.size)
     }
-    val barData = remember(ranked, dim) {
-        val sets = ranked.map { (series, _) ->
-            val values = when (dim) {
+    // 前置空档不画 (desktop parity): 从可见模型第一天有量的开始; 中间/末尾的 0 保留
+    val from = remember(data, excludedModels) {
+        modelTrendLeadIndex(data.days, data.series, excludedModels).coerceAtLeast(0)
+    }
+    val days = remember(data, from) { if (from > 0) data.days.drop(from) else data.days }
+    val labels = remember(days) { days.map { shortDate(it) } }
+    val names = remember(ranked) { ranked.map { it.first.model } }
+    // 每天原始值 (已裁剪) — input=含缓存总输入 / output / cost, 与环形图维度口径一致
+    val rawValues = remember(ranked, dim, from, days) {
+        ranked.map { (series, _) ->
+            val full = when (dim) {
                 "output" -> series.output.map { it.toDouble() }
                 "cost" -> series.cost
                 else -> series.input.map { it.toDouble() }
             }
-            val colorIdx = order[series.model] ?: (MODEL_COLORS.size - 1)
-            BarDataSet(
-                values.mapIndexed { i, v -> BarEntry(i.toFloat(), v.toFloat()) },
-                series.model,
-            ).apply {
-                color = MODEL_COLORS[colorIdx % MODEL_COLORS.size].toArgbInt()
-                setDrawValues(false)
-            }
-        }
-        BarData(sets).apply {
-            barWidth = 0.7f
-            isHighlightEnabled = false
+            val sliced = full.drop(from)
+            List(days.size) { i -> sliced.getOrElse(i) { 0.0 } }
         }
     }
-    // 手机窄屏: 30 天标签必粘连 → 短格式 + 限 labelCount
-    val dateLabels = remember(data) { data.days.map { shortDate(it) } }
-    val fmtY: (Float) -> String = if (dim == "cost") {
-        { v -> Fmt.money(v.toDouble(), currency, usdCny) }
-    } else {
-        { v -> Fmt.tokens(v.toLong()) }
+    // 按天归一: 每天合计=100%; 基数只取参与绘制的模型 (与环形图 top6 内部占比同口径)
+    val pctValues = remember(rawValues, days) {
+        val totals = List(days.size) { i -> rawValues.sumOf { it.getOrElse(i) { 0.0 } } }
+        rawValues.map { values ->
+            List(days.size) { i -> if (totals[i] > 0.0) (values[i] / totals[i] * 100.0).toFloat() else 0f }
+        }
     }
-    AndroidView(
-        modifier = modifier.fillMaxWidth().height(220.dp),
-        factory = { ctx -> BarChart(ctx).apply { description.isEnabled = false } },
-        update = { chart ->
-            chart.legend.isEnabled = true
-            chart.legend.textSize = 10f
-            chart.legend.textColor = labelColor.toArgbInt()
-            chart.xAxis.apply {
-                position = XAxis.XAxisPosition.BOTTOM
-                setDrawGridLines(false)
-                textSize = 10f
-                textColor = labelColor.toArgbInt()
-                setLabelCount(6, false)
-                granularity = 1f
-                valueFormatter = IndexAxisValueFormatter(dateLabels)
+    val colors = remember(ranked, order) {
+        ranked.map { (series, _) ->
+            MODEL_COLORS[(order[series.model] ?: (MODEL_COLORS.size - 1)) % MODEL_COLORS.size]
+        }
+    }
+    val fmtRaw: (Double) -> String = remember(dim, currency, usdCny) {
+        if (dim == "cost") {
+            { v -> Fmt.money(v, currency, usdCny) }
+        } else {
+            { v -> Fmt.tokens(v.toLong()) }
+        }
+    }
+    var selected by remember(days) { mutableStateOf(-1) }
+
+    val textMeasurer = rememberTextMeasurer()
+    val axisStyle = TextStyle(fontSize = 9.sp, color = labelColor)
+    val tipBg = MaterialTheme.colorScheme.surface
+    val tipBorder = MaterialTheme.colorScheme.outline
+    val tipTextColor = MaterialTheme.colorScheme.onSurface
+
+    Column(modifier) {
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(210.dp)
+                .pointerInput(labels) {
+                    detectTapGestures { offset ->
+                        val count = labels.size
+                        if (count == 0) return@detectTapGestures
+                        val left = 40.dp.toPx()
+                        val top = 8.dp.toPx()
+                        val plotW = size.width.toFloat() - left - 8.dp.toPx()
+                        val plotH = size.height.toFloat() - top - 20.dp.toPx()
+                        if (plotW <= 0f || plotH <= 0f) return@detectTapGestures
+                        if (offset.x < left || offset.x > left + plotW || offset.y < top || offset.y > top + plotH) {
+                            selected = -1
+                            return@detectTapGestures
+                        }
+                        val i = if (count == 1) 0 else ((offset.x - left) / plotW * (count - 1)).roundToInt()
+                        val idx = i.coerceIn(0, count - 1)
+                        selected = if (selected == idx) -1 else idx
+                    }
+                },
+        ) {
+            val n = days.size
+            if (n == 0) return@Canvas
+            val left = 40.dp.toPx()
+            val right = 8.dp.toPx()
+            val top = 8.dp.toPx()
+            val bottom = 20.dp.toPx()
+            val plotW = size.width - left - right
+            val plotH = size.height - top - bottom
+            if (plotW <= 0f || plotH <= 0f) return@Canvas
+            fun xAt(i: Int): Float = if (n == 1) left + plotW / 2f else left + plotW * i / (n - 1)
+            fun yAt(pct: Float): Float = top + plotH * (1f - (pct / 100f).coerceIn(0f, 1f))
+
+            // y 轴固定 0~100% (堆叠面积按天归一)
+            listOf(0, 25, 50, 75, 100).forEach { p ->
+                val y = yAt(p.toFloat())
+                drawLine(gridLineColor, Offset(left, y), Offset(left + plotW, y), strokeWidth = 1f)
+                val layout = textMeasurer.measure(AnnotatedString("$p%"), axisStyle)
+                drawText(
+                    layout,
+                    topLeft = Offset(left - layout.size.width - 4.dp.toPx(), y - layout.size.height / 2f),
+                )
             }
-            chart.axisLeft.apply {
-                textSize = 10f
-                textColor = labelColor.toArgbInt()
-                gridColor = gridLineColor.toArgbInt()
-                valueFormatter = object : ValueFormatter() {
-                    override fun getFormattedValue(value: Float) = fmtY(value)
+            // x 轴日期 (最多 6 个, 窄屏防粘连)
+            val tickCount = minOf(6, n)
+            val tickIdx = (0 until tickCount).map { k ->
+                if (tickCount == 1) 0 else ((n - 1) * k / (tickCount - 1.0)).roundToInt()
+            }.distinct()
+            tickIdx.forEach { i ->
+                val layout = textMeasurer.measure(AnnotatedString(labels[i]), axisStyle)
+                val x = (xAt(i) - layout.size.width / 2f).coerceIn(0f, size.width - layout.size.width)
+                drawText(layout, topLeft = Offset(x, top + plotH + 4.dp.toPx()))
+            }
+            // 堆叠面积: 从下往上画, 每层是「本层顶边 ↔ 上一层顶边」之间的区域
+            val cumulative = FloatArray(n)
+            pctValues.forEachIndexed { k, pcts ->
+                val prev = cumulative.copyOf()
+                for (i in 0 until n) cumulative[i] += pcts[i]
+                val area = Path().apply {
+                    moveTo(xAt(0), yAt(cumulative[0]))
+                    for (i in 1 until n) lineTo(xAt(i), yAt(cumulative[i]))
+                    for (i in n - 1 downTo 0) lineTo(xAt(i), yAt(prev[i]))
+                    close()
+                }
+                drawPath(area, color = colors[k].copy(alpha = 0.85f))
+                // 层顶细线 (desktop borderWidth 1), 让相邻同色系层可分辨
+                val edge = Path().apply {
+                    moveTo(xAt(0), yAt(cumulative[0]))
+                    for (i in 1 until n) lineTo(xAt(i), yAt(cumulative[i]))
+                }
+                drawPath(edge, color = colors[k], style = Stroke(width = 1.dp.toPx()))
+            }
+            // 选中日: 竖线 + 提示框 (只列当天该维度有用量的模型; 当天全 0 则不画)
+            if (selected in 0 until n) {
+                val x = xAt(selected)
+                drawLine(
+                    labelColor.copy(alpha = 0.35f),
+                    Offset(x, top),
+                    Offset(x, top + plotH),
+                    strokeWidth = 1.dp.toPx(),
+                )
+                val lines = mutableListOf(labels[selected])
+                names.forEachIndexed { k, name ->
+                    val raw = rawValues[k].getOrElse(selected) { 0.0 }
+                    if (raw > 0.0) {
+                        val pct = pctValues[k].getOrElse(selected) { 0f }
+                        lines += "$name  ${String.format(Locale.US, "%.1f", pct)}% · ${fmtRaw(raw)}"
+                    }
+                }
+                if (lines.size > 1) {
+                    val tipStyle = TextStyle(fontSize = 9.sp, color = tipTextColor)
+                    val layouts = lines.map { textMeasurer.measure(AnnotatedString(it), tipStyle) }
+                    val lineH = layouts.maxOf { it.size.height } + 2.dp.toPx()
+                    val boxW = layouts.maxOf { it.size.width } + 12.dp.toPx()
+                    val boxH = lineH * lines.size + 8.dp.toPx()
+                    val bx = (x + 8.dp.toPx())
+                        .let { if (it + boxW > size.width) x - boxW - 8.dp.toPx() else it }
+                        .coerceIn(2.dp.toPx(), maxOf(2.dp.toPx(), size.width - boxW - 2.dp.toPx()))
+                    val by = (top + 2.dp.toPx())
+                        .coerceIn(2.dp.toPx(), maxOf(2.dp.toPx(), size.height - boxH - 2.dp.toPx()))
+                    drawRoundRect(
+                        color = tipBg.copy(alpha = 0.97f),
+                        topLeft = Offset(bx, by),
+                        size = Size(boxW, boxH),
+                        cornerRadius = CornerRadius(6.dp.toPx()),
+                    )
+                    drawRoundRect(
+                        color = tipBorder.copy(alpha = 0.5f),
+                        topLeft = Offset(bx, by),
+                        size = Size(boxW, boxH),
+                        cornerRadius = CornerRadius(6.dp.toPx()),
+                        style = Stroke(width = 1.dp.toPx()),
+                    )
+                    layouts.forEachIndexed { li, layout ->
+                        drawText(layout, topLeft = Offset(bx + 6.dp.toPx(), by + 4.dp.toPx() + lineH * li))
+                    }
                 }
             }
-            chart.axisRight.isEnabled = false
-            if (chart.data !== barData) {
-                chart.data = barData
-                if (animate) chart.animateY(400)
+        }
+        // 图例: 整段窗口的模型集 (与桌面一致; 模型多时自动换行)
+        if (names.isNotEmpty()) {
+            FlowRow(
+                Modifier.fillMaxWidth().padding(top = 2.dp, start = 2.dp, end = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                names.forEachIndexed { k, name ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(7.dp).background(colors[k], CircleShape))
+                        Spacer(Modifier.width(4.dp))
+                        Text(name, fontSize = 10.sp, color = labelColor, maxLines = 1)
+                    }
+                }
             }
-            chart.invalidate()
-        },
-    )
+        }
+    }
 }
