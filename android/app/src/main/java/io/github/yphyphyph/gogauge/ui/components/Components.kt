@@ -339,13 +339,14 @@ fun quotaResetText(w: QuotaWindow, s: Strings): String = when {
 
 /**
  * 配额窗口打满预测小字 (desktop forecastText parity): 会打满 →「· 预计耗尽于 X」,
- * 重置前用不完 →「· 预计不会打满」; 样本不足 / 已打满 / 窗口未开始 → 空串 (不显示).
+ * 重置前用不完 →「· 预计不会打满（X%）」(X = 按本周期前段平均速率外推到重置时的
+ * 用量百分比); 样本不足 / 已打满 / 窗口未开始 → 空串 (不显示).
  */
 fun quotaForecastText(w: QuotaWindow, q: QuotaResult, s: Strings): String {
     val fc = Forecast.forWindow(w, q.periodStart, q.periodEnd) ?: return ""
     return when (fc.state) {
         "fill" -> " · ${s.fcExhaust.format(Fmt.dur(fc.sec.toLong(), s.dUnit, s.hUnit, s.mUnit, s.soon))}"
-        "no_fill" -> " · ${s.fcNeverFull}"
+        "no_fill" -> " · ${s.fcNeverFull.format(fc.pct)}"
         else -> ""
     }
 }

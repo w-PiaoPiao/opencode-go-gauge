@@ -1,4 +1,4 @@
-"""配额窗口打满预测 (纯函数) — 首页三窗口的「预计耗尽于 X / 预计不会打满」.
+"""配额窗口打满预测 (纯函数) — 首页三窗口的「预计耗尽于 X / 预计不会打满（X%）」.
 
 口径: 按窗口内自身的平均消耗速率外推 (已用 % ÷ 已过时间). used 与 reset_in_sec
 取自同一份配额快照, 因此预测与界面上「重置于 X」始终同源可比; 不依赖历史账单
@@ -15,6 +15,20 @@ FIVE_HOUR_SEC = 5 * 3600
 WEEK_SEC = 7 * 86400
 # 已过时间不足窗口长度的 1% 时不预测: 窗口刚重置的突发用量会放大噪声
 MIN_SAMPLE_RATIO = 0.01
+# 「不会打满」时展示的预测用量上限: 预测值本身 <= 100, 而 100% 与「不会打满」
+# 自相矛盾 (边界上耗尽时刻恰等于重置时刻), 显示层封顶 99.
+MAX_PROJECTED_PCT = 99
+
+
+def _projected_pct(used: float, elapsed: float, window_len: float) -> int:
+    """按窗口内平均速率外推到重置时的用量百分比 (四舍五入取整, 封顶 99).
+
+    与打满判定同源: exhaust < reset ⇔ used × window_len ÷ elapsed > 100, 所以
+    no_fill 分支里本函数的结果天然 <= 100; 取整/封顶保证「不会打满」不会配上
+    「（100%）」这种自相矛盾的文案.
+    """
+    projected = used * window_len / elapsed
+    return max(0, min(MAX_PROJECTED_PCT, int(math.floor(projected + 0.5))))
 
 
 def window_len_sec(
@@ -41,9 +55,9 @@ def window_forecast(
 ) -> Optional[dict[str, Any]]:
     """按窗口内平均速率判断能否在重置前打满.
 
-    返回 {"state": "fill", "sec": N} — 预计 N 秒后耗尽, 早于重置;
-        {"state": "no_fill"}        — 按当前速率重置前用不完;
-        None                        — 无法预测 (样本不足 / 已打满 / 缺窗口长度).
+    返回 {"state": "fill", "sec": N}    — 预计 N 秒后耗尽, 早于重置;
+        {"state": "no_fill", "pct": P}  — 不会打满, 按当前速率到重置时预计用掉 P%;
+        None                            — 无法预测 (样本不足 / 已打满 / 缺窗口长度).
     """
     if not window_len or window_len <= 0:
         return None
@@ -55,8 +69,8 @@ def window_forecast(
     if elapsed < window_len * MIN_SAMPLE_RATIO:  # 样本不足 (含 reset 越过窗口长度的脏数据)
         return None
     if u <= 0.0:  # 零消耗: 重置前用不完
-        return {"state": "no_fill"}
+        return {"state": "no_fill", "pct": 0}
     exhaust = (100.0 - u) * elapsed / u
     if exhaust < reset:
         return {"state": "fill", "sec": int(math.ceil(exhaust))}
-    return {"state": "no_fill"}
+    return {"state": "no_fill", "pct": _projected_pct(u, elapsed, window_len)}

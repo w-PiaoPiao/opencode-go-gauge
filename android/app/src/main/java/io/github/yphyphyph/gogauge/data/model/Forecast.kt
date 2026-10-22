@@ -2,11 +2,13 @@ package io.github.yphyphyph.gogauge.data.model
 
 import io.github.yphyphyph.gogauge.util.parseIsoInstant
 import kotlin.math.ceil
+import kotlin.math.floor
 
 /** 窗口打满预测结果 — mirrors app/forecast.py window_forecast 返回值. */
 data class WindowForecast(
     val state: String,   // "fill" | "no_fill"
     val sec: Int = 0,    // state="fill": 预计 N 秒后耗尽
+    val pct: Int = 0,    // state="no_fill": 按当前速率到重置时预计用掉的百分比
 )
 
 /**
@@ -27,6 +29,9 @@ object Forecast {
     /** 已过时间不足窗口长度的 1% 时不预测: 窗口刚重置的突发用量会放大噪声 */
     private const val MIN_SAMPLE_RATIO = 0.01
 
+    /** 「不会打满」时展示的预测用量上限: 100% 与「不会打满」自相矛盾 (与桌面 MAX_PROJECTED_PCT 同口径) */
+    private const val MAX_PROJECTED_PCT = 99
+
     /** 窗口总时长 (秒). 5h/周为固定长度; 月窗口取订阅周期起止, 缺边界则 null. */
     fun windowLenSec(label: String, periodStart: String?, periodEnd: String?): Double? = when (label) {
         LABEL_ROLLING -> FIVE_HOUR_SEC
@@ -43,7 +48,7 @@ object Forecast {
      * 按窗口内平均速率判断能否在重置前打满.
      *
      * fill — 预计 [WindowForecast.sec] 秒后耗尽, 早于重置;
-     * no_fill — 按当前速率重置前用不完;
+     * no_fill — 按当前速率重置前用不完, [WindowForecast.pct] 为到重置时的预测用量;
      * null — 无法预测 (样本不足 / 已打满 / 缺窗口长度).
      */
     fun windowForecast(used: Double, resetInSec: Int, windowLen: Double?): WindowForecast? {
@@ -52,11 +57,15 @@ object Forecast {
         val reset = maxOf(0.0, resetInSec.toDouble())
         val elapsed = windowLen - reset
         if (elapsed < windowLen * MIN_SAMPLE_RATIO) return null  // 样本不足 (含 reset 越过窗口长度的脏数据)
-        if (used <= 0.0) return WindowForecast("no_fill")  // 零消耗: 重置前用不完
+        if (used <= 0.0) return WindowForecast("no_fill", pct = 0)  // 零消耗: 重置前用不完
         val exhaust = (100.0 - used) * elapsed / used
         return if (exhaust < reset) WindowForecast("fill", ceil(exhaust).toInt())
-        else WindowForecast("no_fill")
+        else WindowForecast("no_fill", pct = projectedPct(used, elapsed, windowLen))
     }
+
+    /** 已用 [used]% 按窗口内平均速率外推到重置时的百分比 (四舍五入, 封顶 99). */
+    private fun projectedPct(used: Double, elapsed: Double, windowLen: Double): Int =
+        floor(used * windowLen / elapsed + 0.5).toInt().coerceIn(0, MAX_PROJECTED_PCT)
 
     /**
      * 一个窗口 + 所属配额的周期边界 → 预测.
