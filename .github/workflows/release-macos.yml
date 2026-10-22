@@ -1,4 +1,5 @@
-# macOS 双架构自动构建: 推送 v*-macos tag 时触发, 构建产物自动附到同名 release.
+# macOS 双架构自动构建 (旧式单平台发布; 统一发布见 release.yml): 推送 v*-macos tag 时触发,
+# 构建产物自动附到同名 release.
 # arm64 = Apple Silicon (macos-14), x86_64 = Intel (macos-15-intel).
 #
 # 注: Intel 构建原用 macos-13, 该镜像已从 GitHub 退役 —— 标签失效后 job 会

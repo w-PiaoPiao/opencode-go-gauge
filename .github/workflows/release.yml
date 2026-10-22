@@ -1,0 +1,200 @@
+# 全平台统一发布: 推送版本 tag (如 v2.2.1d) 后, 并行构建 Windows / macOS(双架构) /
+# Android, 全部安装包作为 assets 附到同一个 GitHub Release.
+#
+# - 统一发布只认「不带平台后缀」的版本 tag; 旧的 v*-macos / v*-windows / v*-android
+#   单平台 workflow 继续保留 (用于过渡期或单平台热修), 见 docs/release.md.
+# - release 已存在时用 gh release upload --clobber 覆盖资产, 不会重复建 release.
+# - 重新跑: Actions 页面 Re-run jobs, 或 workflow_dispatch 选中 tag.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一 tag 只跑一份统一发布; 不取消正在进行的一次 (构建成本高, 避免半截 release)
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    # 带平台后缀的 tag 交给各自的旧 workflow, 避免同一 tag 建出两个 release
+    if: ${{ !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 构建 job 会执行第三方依赖 (pip/gradle), 不把 token 落进 .git/config
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build GoGauge.exe
+        shell: pwsh
+        run: |
+          python -m pip install -q -r requirements-windows.lock.txt
+          @"
+          """构建时自动生成 (gitignored): 打包产物元信息, 供更新检查使用."""
+          UPDATE_REPO = "${{ github.repository }}"
+          "@ | Out-File -Encoding utf8 app/_build_info.py
+          python -m PyInstaller --noconfirm --clean --onefile --noconsole --name GoGauge `
+            --add-data "app/web;app/web" `
+            --add-data "assets;assets" `
+            --icon assets/GoGauge.ico `
+            --collect-submodules webview `
+            --hidden-import clr `
+            --hidden-import pythonnet `
+            --hidden-import pystray `
+            --exclude-module numpy `
+            --exclude-module cryptography `
+            --exclude-module PIL._avif `
+            entry.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoGauge-windows-exe
+          path: dist/GoGauge.exe
+          if-no-files-found: error
+
+  build-macos:
+    if: ${{ !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build .app
+        run: ./build_macos.sh
+
+      - name: Zip (保留签名/权限)
+        run: ditto -c -k --keepParent dist/GoGauge.app "GoGauge-${{ matrix.arch }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoGauge-macos-${{ matrix.arch }}
+          path: GoGauge-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  build-android:
+    if: ${{ !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 仓库无 wrapper, 固定与 AGP 8.13 兼容的 Gradle 版本
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Build signed release APK
+        working-directory: android
+        run: gradle :app:assembleRelease --no-daemon --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoGauge-android-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+  publish:
+    permissions:
+      contents: write
+    needs: [build-windows, build-macos, build-android]
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify tag matches app versions
+        # tag 与代码内版本不一致会让已安装客户端「永远有新版本」: 产物里还是旧
+        # __version__, 下次检查仍判定旧 < tag. 发布前必须先升三处版本号.
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          VER="${TAG#v}"
+          PY_VER=$(grep -oE '__version__ = "[^"]+"' app/__init__.py | head -1 | sed -E 's/.*"([^"]+)"/\1/')
+          ANDROID_VER=$(grep -E 'versionName = "' android/app/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)"/\1/')
+          echo "tag=${TAG} desktop=${PY_VER} android=${ANDROID_VER}"
+          if [ "$VER" != "$PY_VER" ]; then
+            echo "::error::tag ${TAG} 与 app/__init__.py __version__=${PY_VER} 不一致, 请先升版本号"
+            exit 1
+          fi
+          if [ "$VER" != "$ANDROID_VER" ]; then
+            echo "::error::tag ${TAG} 与 Android versionName=${ANDROID_VER} 不一致, 请先升版本号"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoGauge-windows-exe
+          path: artifacts/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoGauge-macos-arm64
+          path: artifacts/macos-arm64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoGauge-macos-x86_64
+          path: artifacts/macos-x86_64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoGauge-android-apk
+          path: artifacts/android
+
+      - name: Create or update release with all platform assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # v2.2.1d -> GoGauge-v2.2.1d-{windows.exe,macos-arm64.zip,macos-x86_64.zip,android.apk}
+          VER="${TAG#v}"
+          mkdir -p dist
+          mv artifacts/windows/GoGauge.exe "dist/GoGauge-v${VER}-windows.exe"
+          mv artifacts/macos-arm64/GoGauge-arm64.zip "dist/GoGauge-v${VER}-macos-arm64.zip"
+          mv artifacts/macos-x86_64/GoGauge-x86_64.zip "dist/GoGauge-v${VER}-macos-x86_64.zip"
+          mv artifacts/android/app-release.apk "dist/GoGauge-v${VER}-android.apk"
+          # 全平台资产 + 校验和清单 (资产名不含平台后缀, 不会被更新检查误选)
+          ( cd dist && sha256sum * > SHA256SUMS.txt )
+          ls -lh dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "GoGauge $TAG" --generate-notes
+          fi

@@ -1,6 +1,6 @@
 # 桌面端 CI: PR / push 到 main 时跑 pytest.
 #
-# 此前仓库只有四个 release workflow, 全部只构建不测试 —— 约 3.5k 行 pytest 对
+# 此前仓库只有 release workflow (单平台 + 统一发布), 全部只构建不测试 —— 约 3.5k 行 pytest 对
 # 发布没有任何约束力, tag 一打就发最后一次提交的内容. 本 workflow 补上这道闸.
 #
 # 只覆盖桌面端 (Python); Android (gradle) 与 HarmonyOS (hvigor) 另见各自 release

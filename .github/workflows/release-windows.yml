@@ -1,4 +1,5 @@
-# Windows 单文件 exe 自动构建: 推送 v*-windows tag 时触发, 构建产物自动附到同名 release.
+# Windows 单文件 exe 自动构建 (旧式单平台发布; 统一发布见 release.yml): 推送 v*-windows tag 时触发,
+# 构建产物自动附到同名 release.
 # 与 build.bat 等效 (bat 末尾 pause 不可用于 CI); 另生成 _build_info.py 使更新检查指向本 fork.
 name: release-windows
 
