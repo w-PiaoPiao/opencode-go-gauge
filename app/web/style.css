@@ -389,6 +389,7 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .toast { background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 16px; font-size: 13px; display: flex; align-items: center; gap: 8px; animation: slide .2s ease; max-width: 340px; }
 .toast.ok { border-left: 3px solid var(--green); }
 .toast.err { border-left: 3px solid var(--red); }
+.toast.warn { border-left: 3px solid var(--amber); }
 @keyframes slide { from { transform: translateX(30px); opacity: 0; } to { transform: none; opacity: 1; } }
 .toast.out { transition: all .25s; transform: translateX(30px); opacity: 0; }
 

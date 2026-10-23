@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -193,3 +193,118 @@ def test_attach_forecast_passthrough_when_unavailable():
     assert server._attach_forecast(failed) is failed
     no_windows = {"success": True}
     assert server._attach_forecast(no_windows) is no_windows
+
+
+# ---------------------------------------------------------------------------
+# 「按同步范围清理」: 同步范围是取数范围, 本地数据只能由按钮显式删除
+# ---------------------------------------------------------------------------
+
+
+def _stamp(days_ago: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _rec(usg_id: str, created_at: str) -> dict:
+    return {
+        "usg_id": usg_id,
+        "created_at": created_at,
+        "model": "test-model",
+        "provider": "opencode",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_5m_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "cost_raw": 0,
+        "cost_usd": 0.0,
+    }
+
+
+def _count_records() -> int:
+    return db.get_db().execute(
+        "SELECT COUNT(*) AS c FROM usage_records").fetchone()["c"]
+
+
+def test_prune_preview_then_execute(http, tmp_db):
+    """预演只算数不写库; POST 才真删, 且只删边界之前的行."""
+    db.insert_usage_records(
+        [_rec("old-1", _stamp(100)), _rec("old-2", _stamp(100)), _rec("new-1", _stamp(0))],
+        1,
+    )
+    _request(f"{http}/api/settings", "PUT", {"window_days": 30})
+
+    preview, status = _get(f"{http}/api/usage/prune")
+    assert status == 200
+    assert preview["window_days"] == 30
+    assert preview["count"] == 2
+    assert _count_records() == 3, "预演不能删数据"
+
+    done, status = _request(f"{http}/api/usage/prune", "POST")
+    assert status == 200
+    assert done["deleted"] == 2
+    assert _count_records() == 1
+    assert db.get_db().execute(
+        "SELECT usg_id FROM usage_records").fetchone()["usg_id"] == "new-1"
+
+
+def test_prune_is_noop_when_range_is_all(http, tmp_db):
+    """同步范围「所有」= 不设上限, 清理按钮什么都不该删."""
+    db.insert_usage_records([_rec("ancient", _stamp(400))], 1)
+    _request(f"{http}/api/settings", "PUT", {"window_days": None})
+
+    preview, _ = _get(f"{http}/api/usage/prune")
+    assert preview["window_days"] is None
+    assert preview["count"] == 0
+
+    done, status = _request(f"{http}/api/usage/prune", "POST")
+    assert status == 200
+    assert done["deleted"] == 0
+    assert _count_records() == 1
+
+
+class _FakePage:
+    """fetch_usage_page 的替身: 一页到底, 不产生网络请求."""
+
+    def __init__(self, records):
+        self.records = records
+        self.next_cursor = None
+        self.retention_days = 30
+
+
+class _FakeRecord:
+    def __init__(self, usg_id: str, created_at: str):
+        self.usg_id = usg_id
+        self.created_at = created_at
+
+    def to_db_dict(self) -> dict:
+        return _rec(self.usg_id, self.created_at)
+
+
+def test_sync_never_deletes_local_records(tmp_db, monkeypatch):
+    """回归: 同步结束不得裁剪窗口外的本地存量.
+
+    window_days 只是取数范围 (调用它的全量同步据此决定翻页深度), 绝不能顺手
+    删掉更早的记录 —— 早期实现每次同步都 prune, 把「改小同步范围」变成一次
+    静默的不可恢复删除.
+    """
+    aid = db.add_account("tok", "wrk_test", switch=True, provider=db.PROVIDER_OPENCODE)
+    db.insert_usage_records([_rec("keep-old", _stamp(100))], aid)
+
+    monkeypatch.setattr(
+        server, "fetch_usage_page",
+        lambda *a, **k: _FakePage([_FakeRecord("fresh", _stamp(0))]),
+    )
+    monkeypatch.setattr(server, "fetch_key_names", lambda *a, **k: {})
+
+    result = server._sync_one_account(aid, "acc", "full", 30)
+    assert result["ok"] is True
+
+    ids = {
+        r["usg_id"]
+        for r in db.get_db().execute(
+            "SELECT usg_id FROM usage_records WHERE account_id = ?", (aid,)).fetchall()
+    }
+    assert "keep-old" in ids, "同步把窗口外的本地记录删掉了"
+    assert "fresh" in ids

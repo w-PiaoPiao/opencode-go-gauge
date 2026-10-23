@@ -57,7 +57,7 @@
 - **Command Code GOAT support**: after logging into a Command Code account, view 5h / weekly / monthly quota windows and request-level details (GOAT source badge)
 - **Accounts overview panel**: toggle in settings, aggregates each account's quota windows and today's usage with cross-account summary KPIs and a 7-day cost trend comparison
 - **Built-in WebView login**: independent login window opens the opencode.ai console sign-in page, auto-captures session & workspace — no manual copy-paste
-- **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All)
+- **Auto sync**: incremental sync (1/5/15/30 min) + sync range (30/60/90/180 days / All — fetch depth only, never deletes local data); purging old records is manual via "Purge by Range" with confirmation
 - **Version updates**: the settings page checks GitHub Releases; a new version can be downloaded in-app (`.exe` on Windows, `.zip` on macOS, revealed in Finder), falling back to the release page
 - **Dual themes**: light / dark toggle; bilingual UI (中文 / English)
 - **System tray / menu bar**: closing the window minimizes to the system tray (Windows) or the menu bar (macOS); brand logo icons

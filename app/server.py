@@ -625,9 +625,8 @@ def _sync_one_account(
             if stop:
                 break
 
-        # 按同步范围裁剪窗口外记录 (与本次新增数独立)
-        if window_days is not None:
-            db.prune_old_records(window_days, account_id)
+        # 同步只按范围取数, 不裁剪本地存量: window_days 是取数范围, 不是保留期.
+        # 过期数据只能由设置页「按同步范围清理」显式删除 (删除不可恢复).
 
         # 顺带刷新该账号的 key 显示名称缓存 (合并写入: key_id 全局唯一,
         # 多账号各补各的条目; 单账号失败不影响已有缓存).
@@ -700,9 +699,7 @@ def _sync_one_cc_account(
                 break
             cursor = next_cursor
 
-        # 按同步范围裁剪窗口外记录
-        if window_days is not None:
-            db.prune_old_records(window_days, account_id)
+        # 同步只按范围取数, 不裁剪本地存量 (同 opencode 分支)
 
         # commandcode 无 key 名称概念, 不需要 fetch_key_names
 
@@ -991,6 +988,24 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             return
         sync_all_async(mode)
         _json_response(handler, {"ok": True})
+        return
+
+    # 「按同步范围清理」: GET = 预演 (只算数不写库), POST = 真删 (不可恢复).
+    # 同步流程不再自动删数据, 这里是唯一的删除入口, 由设置页按钮显式触发.
+    if route == "/api/usage/prune" and method == "GET":
+        _json_response(
+            handler,
+            {"ok": True, **db.prune_preview(db.get_settings().get("window_days"))},
+        )
+        return
+
+    if route == "/api/usage/prune" and method == "POST":
+        window_days = db.get_settings().get("window_days")
+        preview = db.prune_preview(window_days)
+        deleted = db.prune_expired(window_days)
+        if deleted:
+            bump_data_generation()  # 存量记录变了: 聚合与明细缓存整体失效
+        _json_response(handler, {"ok": True, "deleted": deleted, **preview})
         return
 
     if route == "/api/dashboard" and method == "GET":
