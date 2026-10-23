@@ -312,6 +312,10 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .set-row:last-child { border-bottom: none; }
 /* 设置页右侧控件统一宽度, 保证对齐 */
 .set-row .badge, .set-row .btn { min-width: 96px; text-align: center; justify-content: center; }
+/* 同一行多个按钮: 包成一组靠右排列, 间距与行内 gap 一致 (避免被外层
+   space-between 拆到两边, 中间空出一大片) */
+.set-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex: 0 0 auto; }
+.set-actions .btn { width: 120px; }  /* 固定宽, 两个按钮等宽对齐 (文案长短不同也齐) */
 .sl { font-size: 13px; font-weight: 600; }
 .sd { font-size: 12px; color: var(--text3); margin-top: 2px; }
 .setting-value { display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
