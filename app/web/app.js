@@ -31,9 +31,10 @@ const I18N = {
     setAutoSync: "自动同步", autoSync: "自动增量同步", autoSyncDesc: "按间隔拉取最新用量记录",
     syncInterval: "同步间隔", syncIntervalDesc: "多久自动同步一次",
     min1: "1 分钟", min5: "5 分钟", min15: "15 分钟", min30: "30 分钟",
-    syncRange: "同步范围", syncRangeDesc: "本地保留与首次拉取的历史窗口；\"所有\"= 拉取全部（500 页保险）",
+    syncRange: "同步范围", syncRangeDesc: "只决定取数与全量同步的回溯深度，不删除本地已有数据；\"所有\"= 拉取全部（500 页保险）",
     d30short: "30天", d60: "60天", d90: "90天", d180: "180天",
     fullSync: "立即全量同步", fullSyncDesc: "重新拉取历史记录，补全数据", startFullSync: "开始全量同步",
+    pruneNow: "按同步范围清理",
     setAppearance: "外观", theme: "主题", themeDesc: "亮色 / 深色，顶栏按钮快捷切换",
     chartAnim: "图表动画", chartAnimDesc: "数据刷新时的过渡动画；低配设备建议关闭以减少卡顿",
     light: "浅色", dark: "深色", currency: "默认货币", currencyDesc: "费用主显示货币（实时汇率）",
@@ -69,8 +70,12 @@ const I18N = {
     dUnit: "天", hUnit: "小时", mUnit: "分钟",
     confirm: "确认", cancel: "取消", ok: "确定",
     fullSyncConfirm: "将重新拉取历史记录（按同步范围），确定开始？", startSync: "开始同步",
+    pruneConfirm: "将删除本地 %1 天前（早于 %2）的 %3 条记录，删除后不可恢复，确定继续？",
+    pruneNone: "同步范围为「所有」，本地数据不受限制，无需清理",
+    pruneEmpty: "同步范围内没有需要清理的记录",
+    pruneDone: "已清理 %1 条本地记录", pruneFailed: "清理失败，请重试",
               quotaFail: "配额获取失败", retryTip: "点击右上角刷新重试",
-    syncIntervalSet: "同步间隔已设为", syncRangeUpdated: "同步范围已更新，下次全量同步生效",
+    syncIntervalSet: "同步间隔已设为", syncRangeUpdated: "同步范围已更新（只影响取数，不删本地数据）",
     trendHint: "30 天",     setUsers: "用户管理", addUser: "添加 OpenCode 账号", addGoatUser: "添加 GOAT 账号",     provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
     goatLoginNote: "打开 Command Code 登录页，完成后自动回填会话",
     goatLoginWin: "打开内置登录窗口",
@@ -129,9 +134,10 @@ const I18N = {
     setAutoSync: "Auto Sync", autoSync: "Auto incremental sync", autoSyncDesc: "Fetch latest usage records at interval",
     syncInterval: "Sync Interval", syncIntervalDesc: "How often to auto sync",
     min1: "1 min", min5: "5 min", min15: "15 min", min30: "30 min",
-    syncRange: "Sync Range", syncRangeDesc: "Local history window for initial fetch; \"All\" = fetch everything (500-page safety cap)",
+    syncRange: "Sync Range", syncRangeDesc: "Controls fetch depth (and full-sync lookback) only — never deletes local data; \"All\" = fetch everything (500-page safety cap)",
     d30short: "30d", d60: "60d", d90: "90d", d180: "180d",
     fullSync: "Full Sync Now", fullSyncDesc: "Re-fetch history records to fill gaps", startFullSync: "Start Full Sync",
+    pruneNow: "Purge by Range",
     setAppearance: "Appearance", theme: "Theme", themeDesc: "Light / Dark, quick toggle in top bar",
     chartAnim: "Chart Animation", chartAnimDesc: "Transition animation on data refresh; disable on low-end devices",
     light: "Light", dark: "Dark", currency: "Currency", currencyDesc: "Primary currency for costs (live FX rate)",
@@ -167,8 +173,12 @@ const I18N = {
     dUnit: "d", hUnit: "h", mUnit: "m",
     confirm: "Confirm", cancel: "Cancel", ok: "OK",
     fullSyncConfirm: "This will re-fetch all history records (per sync range). Continue?", startSync: "Start Sync",
+    pruneConfirm: "Delete %3 local records older than %1 days (before %2)? This cannot be undone.",
+    pruneNone: "Sync range is \"All\" — local data is unlimited, nothing to purge",
+    pruneEmpty: "Nothing to purge within the current sync range",
+    pruneDone: "Purged %1 local records", pruneFailed: "Purge failed, please retry",
               quotaFail: "Quota fetch failed", retryTip: "Click refresh in top bar to retry",
-    syncIntervalSet: "Sync interval set to", syncRangeUpdated: "Sync range updated, takes effect on next full sync",
+    syncIntervalSet: "Sync interval set to", syncRangeUpdated: "Sync range updated (fetch depth only, local data untouched)",
     trendHint: "30 days",     setUsers: "User Management", addUser: "Add OpenCode account", addGoatUser: "Add GOAT account",     provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
     goatLoginNote: "Opens Command Code sign-in; session is captured automatically",
     goatLoginWin: "Open built-in login window",
@@ -1828,6 +1838,37 @@ function bindEvents() {
   $("tb-refresh").addEventListener("click", () => startSync("incremental"));
   $("btn-full-sync").addEventListener("click", () => {
     showModal({ title: t("fullSync"), message: t("fullSyncConfirm"), okText: t("startSync"), onOk: () => startSync("full") });
+  });
+  // 「按同步范围清理」: 唯一会删除本地存量的入口 (先预演, 再二次确认)
+  $("btn-prune").addEventListener("click", async () => {
+    let preview;
+    try {
+      preview = await api("/api/usage/prune");
+    } catch (e) {
+      toast(t("pruneFailed"), "err");
+      return;
+    }
+    if (preview.window_days == null) { toast(t("pruneNone"), "warn"); return; }
+    if (!preview.count) { toast(t("pruneEmpty")); return; }
+    showModal({
+      title: t("pruneNow"),
+      danger: true,
+      message: t("pruneConfirm")
+        .replace("%1", preview.window_days)
+        .replace("%2", preview.cutoff)
+        .replace("%3", fmtInt(preview.count)),
+      okText: t("pruneNow"),
+      onOk: async () => {
+        try {
+          const r = await api("/api/usage/prune", { method: "POST" });
+          toast(t("pruneDone").replace("%1", fmtInt(r.deleted || 0)));
+          await loadDashboard(false, true);
+          if (state.page === "settings") renderSettings();
+        } catch (e) {
+          toast(t("pruneFailed"), "err");
+        }
+      },
+    });
   });
   $("pg-prev").addEventListener("click", () => { if (state.records.page > 1) { state.records.page--; loadRecords(); } });
   $("pg-next").addEventListener("click", () => { if (recPageMax() >= state.records.page + 1) { state.records.page++; loadRecords(); } });

@@ -1436,24 +1436,69 @@ _DEFAULT_SETTINGS = {
 }
 
 
-def prune_old_records(window_days: int | None, account_id: Optional[int] = None) -> int:
-    """按同步范围裁剪过期记录, 返回删除条数. window_days=None 时不裁剪."""
+def _prune_window(window_days: int | None) -> Optional[int]:
+    """同步范围 → 裁剪天数; None (「所有」) = 不裁剪."""
     if window_days is None:
+        return None
+    return max(1, min(int(window_days), 3650))
+
+
+def prune_cutoff(window_days: int | None) -> Optional[str]:
+    """过期判定的日历日边界 (local_date 早于它即过期); None = 不裁剪."""
+    days = _prune_window(window_days)
+    if days is None:
+        return None
+    row = get_db().execute(
+        "SELECT date('now', 'localtime', ?) AS cutoff", (f"-{days} days",)
+    ).fetchone()
+    return row["cutoff"] if row else None
+
+
+def prune_preview(window_days: int | None) -> dict[str, Any]:
+    """「按同步范围清理」的预演: 边界 + 待删条数 (跨账号, 不写库).
+
+    同步范围只是取数范围, 本地数据默认永不自动删除; 这个预演给按钮的
+    二次确认弹窗用, 让用户先看到「要删多少条、边界是哪天」。
+    """
+    cutoff = prune_cutoff(window_days)
+    if cutoff is None:
+        return {"window_days": None, "cutoff": None, "count": 0}
+    row = get_db().execute(
+        "SELECT COUNT(*) AS c FROM usage_records"
+        " WHERE local_date IS NOT NULL AND local_date < ?",
+        (cutoff,),
+    ).fetchone()
+    return {
+        "window_days": _prune_window(window_days),
+        "cutoff": cutoff,
+        "count": row["c"] if row else 0,
+    }
+
+
+def prune_expired(window_days: int | None) -> int:
+    """按同步范围清理**所有账号**的过期记录, 返回删除条数.
+
+    只应由设置页的「按同步范围清理」按钮触发 (删除不可恢复, 调用方负责
+    二次确认). 同步流程不再调用本函数 —— 同步只按范围取数, 不动本地存量.
+    """
+    cutoff = prune_cutoff(window_days)
+    if cutoff is None:
         return 0
-    aid = _resolve_account_id(account_id)
-    if not aid:
-        return 0
-    window_days = max(1, min(int(window_days), 3650))
-    # local_date 走 idx_usage_account_localdate; 原先 datetime(created_at) <
-    # datetime('now', ?) 每次同步都要按账号全表扫一遍. 日历日口径最多多保留
-    # 窗口边界当天一天的记录, 只多不少, 不会丢数据.
-    cur = get_db().execute(
-        "DELETE FROM usage_records WHERE account_id = ?"
-        " AND local_date < date('now', 'localtime', ?)",
-        (aid, f"-{window_days} days"),
+    conn = get_db()
+    # local_date 走 idx_usage_account_localdate; 日历日口径最多多保留边界当天
+    # 一天的记录, 只多不少.
+    cur = conn.execute(
+        "DELETE FROM usage_records"
+        " WHERE local_date IS NOT NULL AND local_date < ?",
+        (cutoff,),
     )
-    get_db().commit()
-    return cur.rowcount
+    deleted = cur.rowcount
+    if deleted:
+        # 同步状态里的总数/最老最新记录要跟着回填, 否则设置页还显示删前的数
+        for acc in conn.execute("SELECT id FROM accounts").fetchall():
+            _refresh_sync_totals(conn, int(acc["id"]))
+    conn.commit()
+    return deleted
 
 
 def _account_filter(where: str, params: list[Any], aid: int) -> tuple[str, list[Any]]:
