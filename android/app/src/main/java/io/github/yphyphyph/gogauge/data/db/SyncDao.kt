@@ -336,6 +336,15 @@ abstract class SyncDao {
         val aid = requireActiveId()  // 事务外: 依赖 PayloadLock 写回活跃位
         if (aid == 0) return
         saveTokenData(aid, token, workspaceId, provider)
+        // 周期/重置键一并清掉 (desktop db.save_token 同步修复): provider 可能切换
+        // (GOAT <-> GO), 旧来源的计费周期对新来源无意义; 重新登录后配额拉取成功会重写.
+        // 必须在事务外走 persistPayload —— 事务持写连接后再取 PayloadLock 会与
+        // SettingsDao「先取锁再写库」的路径反向锁序互等 (见 getActiveAccountId 说明)
+        persistPayload { data ->
+            data.remove("period_start:$aid")
+            data.remove("period_end:$aid")
+            data.remove("monthly_reset:$aid")
+        }
     }
 
     @Transaction
@@ -343,6 +352,13 @@ abstract class SyncDao {
         updateCredential(aid, token.trim(), workspaceId.trim().ifEmpty { "Default" }, provider, Instant.now().toString())
         ensureStateRow(aid)
         resetCursorForAccount(aid)
+        // 周期/重置键一并清掉 (desktop db.save_token 同步修复): provider 可能切换
+        // (GOAT <-> GO), 旧来源的计费周期对新来源无意义; 重新登录后配额拉取成功会重写
+        persistPayload { data ->
+            data.remove("period_start:$aid")
+            data.remove("period_end:$aid")
+            data.remove("monthly_reset:$aid")
+        }
     }
 
     /** 读取账号的 provider; 账号不存在回退 opencode (desktop db.get_account_provider parity)。 */
@@ -431,6 +447,15 @@ abstract class SyncDao {
     /** 按账号删除其全部用量记录 (级联删除用; Room DAO 允许跨表 @Query)。 */
     @Query("DELETE FROM usage_records WHERE account_id = :accountId")
     abstract suspend fun deleteRecordsForAccount(accountId: Int)
+
+    /**
+     * 只刷新账号的 total_records/oldest/newest, 不碰 last_sync_at/status 等字段
+     * (desktop _refresh_sync_totals parity; 「按同步范围清理」删数据后调用).
+     */
+    suspend fun refreshSyncTotals(accountId: Int) {
+        val b = recordBoundsRaw(accountId)
+        setSyncTotals(accountId, b.count, b.oldest, b.newest)
+    }
 
     // ------------------------------------------------------------------
     // 凭据快捷读取 (活跃账号; desktop db.get_token/get_workspace_hint parity)

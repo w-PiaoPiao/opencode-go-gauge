@@ -10,6 +10,7 @@ import androidx.glance.GlanceModifier
 import androidx.glance.GlanceTheme
 import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
+import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.LinearProgressIndicator
 import androidx.glance.appwidget.action.actionStartActivity
 import androidx.glance.appwidget.provideContent
@@ -37,7 +38,13 @@ import kotlin.math.roundToInt
 class QuotaWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val data = WidgetData.load(context)
+        // 每个小组件实例各自按配置选账号 ("active"/"account:{id}"); 拿不到
+        // appWidgetId (异常环境) 时回退活跃账号视角. 此前恒传 null, 配置页选的
+        // 固定账号从未生效过
+        val appWidgetId = runCatching {
+            GlanceAppWidgetManager(context).getAppWidgetId(id)
+        }.getOrNull()
+        val data = WidgetData.load(context, appWidgetId)
         val openIntent = android.content.Intent(context, MainActivity::class.java)
             .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         provideContent {

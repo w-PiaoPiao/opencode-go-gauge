@@ -30,6 +30,10 @@ abstract class UsageDao {
         @androidx.room.ColumnInfo(name = "account_id") val accountId: Int,
     )
 
+    /**
+     * 查重按 (account_id, usg_id) 组合: usg_id 只是 provider 侧 id, 不同账号空间
+     * 可能重叠 —— 复合主键下同号 id 在不同账号是两行独立记录 (桌面迁移 8 parity).
+     */
     @Query("SELECT usg_id, account_id FROM usage_records WHERE usg_id IN (:ids)")
     abstract suspend fun existingOwnership(ids: List<String>): List<OwnershipRow>
 
@@ -38,15 +42,24 @@ abstract class UsageDao {
 
     /**
      * Batch insert with dedup; returns count of newly inserted rows.
-     * 已存在的记录保留原归属账号 (desktop ON CONFLICT DO UPDATE 不更新 account_id).
+     * 逐行按记录自身 accountId 归属 (desktop insert_usage_records parity: 记录带
+     * account_id 字段时逐行归属, 备份导入按行 remap); 账号内同号已存在则 upsert 更新,
+     * 跨账号同号 id 互不影响. 已存在的 (账号内同号) 记录保留原归属账号
+     * (desktop ON CONFLICT DO UPDATE 不更新 account_id).
      */
     @Transaction
     open suspend fun insertUsageRecords(records: List<UsageRecordEntity>, accountId: Int): Int {
         if (records.isEmpty()) return 0
-        val existingAccount = existingOwnership(records.map { it.usgId })
-            .associate { it.usgId to it.accountId }
-        upsertAll(records.map { r -> r.copy(accountId = existingAccount[r.usgId] ?: accountId) })
-        return records.count { it.usgId !in existingAccount }
+        // Map<usg_id, 拥有该 id 的账号集合>: 同号 id 可被多个账号各自持有;
+        // 新增数 = 不在自己的目标账号中已存在的行数 (以每行自己的归属为准)
+        val ownership = HashMap<String, MutableSet<Int>>()
+        for (chunk in records.map { it.usgId }.distinct().chunked(500)) {
+            existingOwnership(chunk).forEach { row ->
+                ownership.getOrPut(row.usgId) { mutableSetOf() }.add(row.accountId)
+            }
+        }
+        upsertAll(records)
+        return records.count { r -> r.accountId !in (ownership[r.usgId] ?: emptySet()) }
     }
 
     @Query(
@@ -54,6 +67,29 @@ abstract class UsageDao {
             " AND local_date < date('now', 'localtime', :intervalArg)"
     )
     abstract suspend fun pruneOldRecords(intervalArg: String, accountId: Int): Int
+
+    // ------------------------------------------------------------------
+    // 「按同步范围清理」显式入口 (desktop db.prune_preview / prune_expired parity):
+    // 同步不再自动删数据, 这里是唯一的删除入口, 由设置页按钮触发 (二次确认).
+    // ------------------------------------------------------------------
+
+    /** 过期判定的日历日边界 (local_date 早于它即过期)。 */
+    @Query("SELECT date('now', 'localtime', :intervalArg) AS cutoff")
+    abstract suspend fun pruneCutoff(intervalArg: String): String
+
+    /** 待删条数预演 (跨账号, 不写库)。 */
+    @Query(
+        "SELECT COUNT(*) FROM usage_records" +
+            " WHERE local_date IS NOT NULL AND local_date < :cutoff"
+    )
+    abstract suspend fun prunePreviewCount(cutoff: String): Int
+
+    /** 按边界删除**所有账号**的过期记录, 返回删除条数 (删除不可恢复). */
+    @Query(
+        "DELETE FROM usage_records" +
+            " WHERE local_date IS NOT NULL AND local_date < :cutoff"
+    )
+    abstract suspend fun pruneExpiredAll(cutoff: String): Int
 
     /**
      * 回填 local_date 为 NULL 的历史行 —— 旧版 Android (API ≤33) 上 Instant.parse
@@ -408,7 +444,9 @@ abstract class UsageDao {
                        MAX(created_at) AS last_at
                 FROM usage_records $where
                 GROUP BY $sessionKey
-                ORDER BY last_at DESC
+                -- session_id 是分组键 (结果集内唯一), 并列 last_at 时由它构成全序:
+                -- 只按 last_at 排序时分页在页边界可能重复/跳过 (desktop session_stats_page parity)
+                ORDER BY last_at DESC, session_id ASC
                 LIMIT ? OFFSET ?
                 """.trimIndent(),
                 (params + listOf(pageSize, (page - 1) * pageSize)).toTypedArray(),
@@ -456,7 +494,10 @@ abstract class UsageDao {
         val rows = recordsRaw(
             SimpleSQLiteQuery(
                 """
-                SELECT * FROM usage_records $where ORDER BY created_at DESC LIMIT ? OFFSET ?
+                SELECT * FROM usage_records $where
+                -- usg_id 次序键: created_at 不唯一 (毫秒精度 + 批量同步一次插多条),
+                -- 页边界可能重复/跳过 (desktop usage_records_page parity)
+                ORDER BY created_at DESC, usg_id DESC LIMIT ? OFFSET ?
                 """.trimIndent(),
                 (params + listOf(pageSize, (page - 1) * pageSize)).toTypedArray(),
             )
@@ -494,12 +535,26 @@ abstract class UsageDao {
     // Export (v2.2.0b — CSV/JSON 备份的分页遍历)
     // ------------------------------------------------------------------
 
-    /** 按时间升序分页导出 (BackupManager 流式写文件, 避免一次性载入全表)。 */
+    /**
+     * 按时间升序分页导出 (BackupManager 流式写文件, 避免一次性载入全表)。
+     *
+     * [afterCreated]/[afterUsgId] 为 keyset 游标 (上一页末行的两个值): created_at
+     * 不唯一 (毫秒精度 + 批量同步一次插多条), 只按它排序时 OFFSET 分页会漏行/重行,
+     * 表现为备份静默丢记录 (desktop db.export_page parity); (created_at, usg_id)
+     * 在单账号内是全序。传 null 保留首屏语义。
+     */
     @Query(
         "SELECT * FROM usage_records WHERE account_id = :accountId" +
-            " ORDER BY created_at ASC LIMIT :limit OFFSET :offset"
+            " AND (:afterCreated IS NULL OR (created_at > :afterCreated" +
+            " OR (created_at = :afterCreated AND usg_id > :afterUsgId)))" +
+            " ORDER BY created_at ASC, usg_id ASC LIMIT :limit"
     )
-    abstract suspend fun exportPage(accountId: Int, limit: Int, offset: Int): List<UsageRecordEntity>
+    abstract suspend fun exportPage(
+        accountId: Int,
+        limit: Int,
+        afterCreated: String?,
+        afterUsgId: String?,
+    ): List<UsageRecordEntity>
 
     // ------------------------------------------------------------------
     // Row projections

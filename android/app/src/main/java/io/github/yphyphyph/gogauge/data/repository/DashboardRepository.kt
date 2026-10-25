@@ -47,6 +47,9 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.time.format.DateTimeFormatter
 
+/** 「按同步范围清理」预演结果 (desktop db.prune_preview 返回体 parity)。 */
+data class PrunePreview(val windowDays: Int, val cutoff: String, val count: Int)
+
 /** Sync outcome — mirrors server.py sync_usage return dict. */
 data class SyncResult(
     val ok: Boolean,
@@ -269,7 +272,6 @@ class DashboardRepository(
             val token = syncDao.getTokenFor(accountId)
             val hint = syncDao.getWorkspaceHintFor(accountId)
             val provider = syncDao.getAccountProvider(accountId)
-            target.at = System.currentTimeMillis() / 1000.0
             target.data = try {
                 if (provider == PROVIDER_COMMANDCODE) ccApi.fetchQuota(token)
                 else api.fetchQuota(token, hint)
@@ -279,6 +281,10 @@ class DashboardRepository(
                 android.util.Log.e("GoGauge", "quota refresh failed", e)
                 null
             }
+            // TTL 从**请求后**计时 (desktop server._fetch_quota_with_cache parity):
+            // 取请求前的时刻会让实际有效期变成 TTL + 本次网络耗时, 慢网下配额比
+            // 声明的 30s 更久不刷新; 防重入由 quotaRefreshing 在请求期间挡住并发
+            target.at = System.currentTimeMillis() / 1000.0
             if (accountId == activeAccountId()) _quota.value = target.data
             // 配额拉取成功后持久化月度窗口的重置时间 (供「本周期」筛选推算周期起点,
             // desktop server._record_cycle_bounds parity); 失败不影响配额返回.
@@ -390,13 +396,24 @@ class DashboardRepository(
             if (now - exchangeCache.at < EXCHANGE_TTL) return exchangeCache.usdCny
             try {
                 val rate = exchangeApi.fetchUsdCny()
-                if (rate > 0) exchangeCache.usdCny = rate
+                if (rate > 0) {
+                    exchangeCache.usdCny = rate
+                    exchangeCache.at = System.currentTimeMillis() / 1000.0
+                } else {
+                    shortExchangeBackoff()
+                }
             } catch (e: Exception) {
-                // keep old value on failure (server.py parity)
+                // 失败短退避 (desktop server.py parity): 5 分钟后才允许重试,
+                // 而非整个 TTL (6h) —— 一次网络抖动不该让汇率陈旧一下午
+                shortExchangeBackoff()
             }
-            exchangeCache.at = System.currentTimeMillis() / 1000.0
             exchangeCache.usdCny
         }
+    }
+
+    /** 汇率拉取失败后的短 TTL: 把时间戳拨到「5 分钟后过期」的位置。 */
+    private fun shortExchangeBackoff() {
+        exchangeCache.at = System.currentTimeMillis() / 1000.0 - EXCHANGE_TTL + 300.0
     }
 
     // ------------------------------------------------------------------
@@ -804,10 +821,9 @@ class DashboardRepository(
             // 缺口永远不会被增量补上, 只有手动全量才能恢复
             val truncated = page >= maxPages && !exhausted && !windowBoundaryReached
 
-            // prune records outside the window (independent of this run's inserts)
-            if (windowDays != null) {
-                usageDao.pruneOldRecords("-${windowDays} days", accountId)
-            }
+            // 同步只按范围取数, 不裁剪本地存量: window_days 是取数范围, 不是保留期
+            // (desktop 6995669 同语义: 过期数据由设置页「按同步范围清理」显式删除).
+            // 此前每轮同步静默 prune, 用户缩小同步范围后历史记录会被自动删光.
 
             // 顺带刷新该账号的 key 显示名称缓存 — 多账号合并写入 (key_id 全局唯一),
             // 单账号失败不影响已有缓存. 24h 节流 (desktop KEY_NAMES_REFRESH_SEC parity):
@@ -958,10 +974,7 @@ class DashboardRepository(
             // 前移增量游标使缺口永不再补 (与 opencode 分支同一处理)
             val truncated = pages >= maxPages && !exhausted && !windowBoundaryReached && !failed
 
-            // 按同步范围裁剪窗口外记录
-            if (windowDays != null) {
-                usageDao.pruneOldRecords("-${windowDays} days", accountId)
-            }
+            // 同步只按范围取数, 不裁剪本地存量 (同 opencode 分支, desktop parity)
 
             // charts 全周期聚合 (模型×5min 桶): 补全明细接口 24h/100 条之外的历史统计。
             // 独立容错: 失败仅标记 partial, 不影响已落库明细, 下次同步自动重试。
@@ -1077,6 +1090,32 @@ class DashboardRepository(
     suspend fun settings(): AppSettings = db.settingsDao().getSettings()
 
     suspend fun saveSettings(patch: AppSettings): AppSettings = db.settingsDao().saveSettings(patch)
+
+    /**
+     * 「按同步范围清理」预演 (desktop db.prune_preview parity): 边界 + 待删条数,
+     * 跨账号不写库; 同步范围为「所有」(windowDays=null) 时返回 null (无需清理).
+     */
+    suspend fun prunePreview(): PrunePreview? {
+        val wd = db.settingsDao().getSettings().windowDays ?: return null
+        val cutoff = usageDao.pruneCutoff("-${wd} days")
+        return PrunePreview(windowDays = wd, cutoff = cutoff, count = usageDao.prunePreviewCount(cutoff))
+    }
+
+    /**
+     * 按同步范围清理**所有账号**的过期记录 (desktop db.prune_expired parity)。
+     * 删除不可恢复, 调用方负责二次确认; 删除后回填同步状态的总数/最老最新。
+     */
+    suspend fun pruneExpired(): Int {
+        val wd = db.settingsDao().getSettings().windowDays ?: return 0
+        val cutoff = usageDao.pruneCutoff("-${wd} days")
+        val deleted = usageDao.pruneExpiredAll(cutoff)
+        if (deleted > 0) {
+            for (acc in syncDao.listAccounts()) {
+                syncDao.refreshSyncTotals(acc.id)
+            }
+        }
+        return deleted
+    }
 
     /**
      * 退出登录当前活跃账号 (清其数据, 保留账号行).

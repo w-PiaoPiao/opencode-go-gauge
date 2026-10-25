@@ -57,9 +57,10 @@ data class UsageChartEntity(
     @ColumnInfo(name = "local_date") val localDate: String? = null,
 )
 
-/** Mirrors desktop db.py v2.0.0 `usage_records` table — records belong to an account. */
+/** Mirrors desktop db.py v2.0.0+ `usage_records` table — records belong to an account. */
 @Entity(
     tableName = "usage_records",
+    primaryKeys = ["account_id", "usg_id"],
     indices = [
         Index(value = ["created_at"], name = "idx_usage_time"),
         Index(value = ["session_id"], name = "idx_usage_session"),
@@ -69,7 +70,9 @@ data class UsageChartEntity(
     ],
 )
 data class UsageRecordEntity(
-    @PrimaryKey @ColumnInfo(name = "usg_id") val usgId: String,
+    // usg_id 只是 provider 侧记录 id, 不同账号的 id 空间可能重叠 —— 全局主键会让
+    // 多账号互踩 (桌面 db.py 迁移 8 同款修复): 唯一键改为账号内 (account_id, usg_id)
+    @ColumnInfo(name = "usg_id") val usgId: String,
     @ColumnInfo(name = "created_at") val createdAt: String,
     @ColumnInfo(name = "model") val model: String,
     @ColumnInfo(name = "provider") val provider: String? = null,
