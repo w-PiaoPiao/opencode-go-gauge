@@ -929,6 +929,10 @@ def save_token(
         "UPDATE usage_sync_state SET deepest_page_fetched = -1 WHERE account_id = ?", (aid,)
     )
     conn.commit()
+    # 周期/重置键随凭证一并重置: provider 可能切换 (GOAT <-> GO), 旧来源的计费周期
+    # 对新来源无意义 —— 不清则 opencode 重新登录后 monthly_cycle_start 仍优先采用
+    # GOAT 的 period_start, 「本周期」窗口口径错账号 (下轮配额成功会重新写入新键)
+    _drop_account_period_keys(aid)
     _invalidate_cred_cache(aid)
 
 
@@ -1106,20 +1110,30 @@ def delete_account(account_id: int) -> int:
                 data.pop("active_account_id", None)
                 _write_payload(conn, data)
                 conn.commit()
-        # 清理该账号残留的周期/月度重置键 (账号已删, 键无主)
+        # 清理该账号残留的周期/月度重置键 (账号已删, 键无主); _payload_lock 是
+        # RLock, 嵌套获取安全
+        _drop_account_period_keys(aid)
+    conn.commit()
+    _keychain_cleanup(aid)
+    _invalidate_cred_cache(aid)
+    return remaining
+
+
+def _drop_account_period_keys(account_id: int) -> None:
+    """清掉账号的周期/月度重置键 (凭证重置/登出/删号后, 键已失效或无主)."""
+    conn = get_db()
+    with _payload_lock:
         data = _raw_payload(conn)
         orphan_keys = [
             k for k in data
-            if k in (f"period_start:{aid}", f"period_end:{aid}", f"monthly_reset:{aid}")
+            if k in (f"period_start:{account_id}", f"period_end:{account_id}",
+                     f"monthly_reset:{account_id}")
         ]
         if orphan_keys:
             for k in orphan_keys:
                 data.pop(k, None)
             _write_payload(conn, data)
-    conn.commit()
-    _keychain_cleanup(aid)
-    _invalidate_cred_cache(aid)
-    return remaining
+            conn.commit()
 
 
 def clear_account() -> None:
@@ -1142,6 +1156,8 @@ def clear_account() -> None:
         (aid,),
     )
     conn.commit()
+    # 周期/重置键一并清掉: 重新登录后由配额重新写入, 避免旧周期残留进「本周期」
+    _drop_account_period_keys(aid)
     _keychain_cleanup(aid)
     _invalidate_cred_cache(aid)
 
@@ -1534,7 +1550,11 @@ def usage_records_page(
         conn.execute(f"SELECT COUNT(*) AS c FROM usage_records {where_sql}", params).fetchone()["c"]
     )
     rows = conn.execute(
-        f"SELECT * FROM usage_records {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM usage_records {where_sql}"
+        # usg_id 追加为次序键: created_at 不唯一 (毫秒精度 + 批量同步一次插多条),
+        # 并列行的次序在两次查询间不保证稳定, 页边界可能重复/跳过 (session_stats_page
+        # 同款修复); (created_at, usg_id) 在单账号内是全序。
+        f" ORDER BY created_at DESC, usg_id DESC LIMIT ? OFFSET ?",
         params + [page_size, (page - 1) * page_size],
     ).fetchall()
     records = []
