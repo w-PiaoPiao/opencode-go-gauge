@@ -216,8 +216,11 @@ def _parse_window_percent(
         used_pct = _clamp_percent(used_value / cap_value * 100.0)
     else:
         used_pct = 0.0
-    reset_at = _ms_to_iso(reset_ms)
-    reset_in = max(0, int(reset_ms / 1000.0 - now.timestamp()))
+    # 接口未给该窗口的 resetAt 时留空 (""): 拿 epoch (1970) 充数会让前端
+    # resetText 走倒计时分支显示「即将重置」—— 与真实状态 (接口没给重置时间)
+    # 自相矛盾; 留空交给界面按「重置时间未知/窗口未开始」呈现 (opencode 侧同口径)
+    reset_at = _ms_to_iso(reset_ms) if reset_ms > 0 else ""
+    reset_in = max(0, int(reset_ms / 1000.0 - now.timestamp())) if reset_ms > 0 else 0
     return QuotaWindow(
         label="",  # 由调用方回填
         used=used_pct,
