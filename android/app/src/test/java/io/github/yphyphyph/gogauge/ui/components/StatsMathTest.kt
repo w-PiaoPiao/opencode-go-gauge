@@ -49,7 +49,7 @@ class StatsMathTest {
     }
 
     @Test
-    fun `current streak starts from yesterday when today has no usage`() {
+    fun `current streak breaks when today has no usage`() {
         val days = listOf(
             day("2026-10-01", requests = 1),
             day("2026-10-02", requests = 1),
@@ -57,7 +57,7 @@ class StatsMathTest {
             day("2026-10-04", requests = 0),
         )
         val s = heatmapSummary(days, "tokens")
-        assertEquals(3, s.currentStreak)
+        assertEquals(0, s.currentStreak)
         assertEquals(3, s.longestStreak)
     }
 
