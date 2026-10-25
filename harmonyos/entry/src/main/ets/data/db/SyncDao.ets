@@ -323,6 +323,9 @@ export class SyncDao {
       new Date().toISOString())
     await this.ensureStateRow(aid)
     await this.resetCursorForAccount(aid)
+    // 周期/重置键一并清掉 (desktop db.save_token 同步修复): provider 数据源切换后
+    // 旧计费周期对新来源无意义, 重新登录后配额拉取成功会重新写入
+    await this.settings().dropAccountKeys(aid)
   }
 
   // ------------------------------------------------------------------
@@ -390,6 +393,14 @@ export class SyncDao {
   async updateSyncStateAndTotals(accountId: number, status: string, error: string | null, inserted: number): Promise<void> {
     await this.ensureStateRow(accountId)
     await this.bumpSyncState(accountId, status, error, inserted, new Date().toISOString())
+    await this.refreshSyncTotals(accountId)
+  }
+
+  /**
+   * 只刷新账号的 total_records/oldest/newest, 不碰 last_sync_at/status 等字段
+   * (desktop _refresh_sync_totals parity; 「按同步范围清理」删数据后调用)。
+   */
+  async refreshSyncTotals(accountId: number): Promise<void> {
     const b = await this.recordBounds(accountId)
     await AppDb.store().executeSql(
       'UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?, newest_record_at = ? WHERE account_id = ?',
@@ -397,8 +408,7 @@ export class SyncDao {
     )
   }
 
-  async getSyncStateFor(accountId: number): Promise<SyncState> {
-    const rs = await AppDb.store().querySql(
+  async getSyncStateFor(accountId: number): Promise<SyncState> {    const rs = await AppDb.store().querySql(
       'SELECT * FROM usage_sync_state WHERE account_id = ?', [accountId.toString()],
     )
     const r = new RowReader(rs)

@@ -11,7 +11,7 @@ import { SyncDao } from './SyncDao'
 import { SettingsDao } from './SettingsDao'
 
 /** 当前 schema 版本; 每次结构变更 +1 并在 migrate() 里补对应分支。 */
-const SCHEMA_VERSION: number = 1
+const SCHEMA_VERSION: number = 2
 
 export class AppDb {
   private static _store: relationalStore.RdbStore | null = null
@@ -96,17 +96,30 @@ export class AppDb {
       // 降级安装 (装了更新的版本又回退): 继续跑旧代码可能读到不兼容结构, 明确报错
       throw new Error(`数据库版本 ${current} 高于当前应用支持的 ${SCHEMA_VERSION}, 请升级应用`)
     }
-    // 逐版本升级: 目前只有 v0 -> v1 (首次引入版本号, 结构由 createSchema 保证)
+    // 逐版本升级
     if (current < 1) {
       // v0 为无版本号的初始形态; 结构与 v1 一致 (createSchema 已建齐), 只需登记版本
+    }
+    if (current < 2) {
+      await AppDb.migrateV1ToV2(store)
     }
     await store.executeSql(`PRAGMA user_version = ${SCHEMA_VERSION}`)
   }
 
-  private static async createSchema(store: relationalStore.RdbStore): Promise<void> {
-    const ddl: string[] = [
-      `CREATE TABLE IF NOT EXISTS usage_records (
-         usg_id TEXT PRIMARY KEY,
+  /**
+   * v1 → v2: 主键改账号内唯一 + 旧版会话 cookie 清理 (desktop db.py 迁移 8/4 parity)。
+   *
+   * 1) usage_records 主键由全局 usg_id 改为 (account_id, usg_id): usg_id 只是
+   *    provider 侧记录 id, 不同账号的 id 空间一旦重叠, 同号记录会互相顶掉
+   *    (后同步账号的记录撞上先同步账号的同号行而漏插)。旧形状下 usg_id 已全局
+   *    唯一, (account_id, usg_id) 天然唯一, 搬运无需去重;
+   * 2) opencode.ai 2026-09 改版后旧会话 Cookie (auth=…) 已失效, 置空凭证引导
+   *    重新登录 (新格式 __Host-console_session=… 不受影响); 仅清凭证不删历史记录。
+   */
+  private static async migrateV1ToV2(store: relationalStore.RdbStore): Promise<void> {
+    await store.executeSql(`ALTER TABLE usage_records RENAME TO usage_records_legacy`)
+    await store.executeSql(`CREATE TABLE IF NOT EXISTS usage_records (
+         usg_id TEXT NOT NULL,
          created_at TEXT NOT NULL,
          model TEXT NOT NULL,
          provider TEXT,
@@ -122,7 +135,46 @@ export class AppDb {
          session_id TEXT,
          plan TEXT,
          synced_at TEXT NOT NULL,
-         account_id INTEGER NOT NULL DEFAULT 1
+         account_id INTEGER NOT NULL DEFAULT 1,
+         PRIMARY KEY (account_id, usg_id)
+       )`)
+    await store.executeSql(`INSERT INTO usage_records
+         (usg_id, created_at, model, provider, input_tokens, output_tokens,
+          reasoning_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+          cost_raw, cost_usd, key_id, session_id, plan, synced_at, account_id)
+         SELECT usg_id, created_at, model, provider, input_tokens, output_tokens,
+                reasoning_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+                cost_raw, cost_usd, key_id, session_id, plan, synced_at, account_id
+         FROM usage_records_legacy`)
+    // 索引属于旧表, 随 RENAME 保留在 legacy 上、随 DROP 消失: 就地重建
+    await store.executeSql(`DROP TABLE usage_records_legacy`)
+    await store.executeSql(`CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at DESC)`)
+    await store.executeSql(`CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)`)
+    await store.executeSql(`CREATE INDEX IF NOT EXISTS idx_usage_account_time ON usage_records(account_id, created_at DESC)`)
+    await store.executeSql(`UPDATE accounts SET token = '' WHERE token LIKE 'auth=%'`)
+  }
+
+  private static async createSchema(store: relationalStore.RdbStore): Promise<void> {
+    const ddl: string[] = [
+      `CREATE TABLE IF NOT EXISTS usage_records (
+         usg_id TEXT NOT NULL,
+         created_at TEXT NOT NULL,
+         model TEXT NOT NULL,
+         provider TEXT,
+         input_tokens INTEGER NOT NULL,
+         output_tokens INTEGER NOT NULL,
+         reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+         cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+         cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0,
+         cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+         cost_raw INTEGER NOT NULL,
+         cost_usd REAL NOT NULL,
+         key_id TEXT,
+         session_id TEXT,
+         plan TEXT,
+         synced_at TEXT NOT NULL,
+         account_id INTEGER NOT NULL DEFAULT 1,
+         PRIMARY KEY (account_id, usg_id)
        )`,
       `CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at DESC)`,
       `CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)`,

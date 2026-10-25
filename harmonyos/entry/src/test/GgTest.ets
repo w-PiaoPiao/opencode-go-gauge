@@ -9,28 +9,36 @@ import { Fmt } from '../main/ets/common/util/Fmt'
 import { SyncDao } from '../main/ets/data/db/SyncDao'
 import { Login } from '../main/ets/common/auth/Login'
 import { UpdateApi } from '../main/ets/data/remote/UpdateApi'
+import { OpenCodeApi } from '../main/ets/data/remote/OpenCodeApi'
 
-const QUOTA_HTML = `
-<html><body>
-<script>
-window.__APP_DATA__ = {};
-var $R = [];
-// usagePercent first
-rollingUsage: $R[12] = {usagePercent: 34.5, resetInSec: 43199, isActive: true, something: "x"};
-// resetInSec first
-weeklyUsage: $R[13] = {resetInSec: 518400, usagePercent: 12.3, isActive: true};
-// usagePercent first, negative guard value
-monthlyUsage: $R[14] = {usagePercent: 105.7, resetInSec: 15552000, isActive: true};
-</script>
-</body></html>`
+const NOW_MS = 1752000000000
 
-const USAGE_RESPONSE = `
-window.__SERVER_DATA__ = {ok: true};
-const $R = [];
-$R[0] = {version: 1};
-$R[1] = {id: "usg_abc123", timeCreated: $R[2] = new Date("2025-08-01T10:00:00.000Z"), model: "deepseek-chat", provider: "deepseek", inputTokens: 1234, outputTokens: 567, reasoningTokens: 89, cacheReadTokens: 100, cacheWrite5mTokens: 50, cacheWrite1hTokens: 25, cost: 12345678, keyID: "key_1", sessionID: "ses_1", enrichment:$R[3]={plan:"lite"}};
-$R[4] = {id:"usg_def456",timeCreated:$R[5]=new Date("2025-08-01T09:30:00.000Z"),model:"gpt-4o",provider:"openai",inputTokens:100,outputTokens:200,reasoningTokens:0,cacheReadTokens:0,cacheWrite5mTokens:0,cacheWrite1hTokens:0,cost:5000000,keyID:"key_2",sessionID:""};
-$R[6] = {id: "usg_ghi789", timeCreated: $R[7] = new Date("2025-08-01T08:00:00.000Z"), model: "glm-4", provider: "zhipu", inputTokens: null, outputTokens: 0, reasoningTokens: null, cacheReadTokens: 0, cacheWrite5mTokens: 0, cacheWrite1hTokens: 0, cost: 0, keyID: "", sessionID: ""};`
+// ArkTS 禁止无类型对象字面量, fixture 一律拼 JSON 文本 (与线上响应体同构)
+const GO_STATUS_JSON = '{"access":{"startsAt":"2025-07-08T00:00:00Z","endsAt":"2025-09-01T00:00:00Z",' +
+  '"meters":{' +
+  '"fiveHour":{"limitMicroCents":100000000000,"usedMicroCents":34500000000,"resetsAt":"2025-07-09T00:00:00Z"},' +
+  '"week":{"limitMicroCents":100000000000,"usedMicroCents":12300000000,"resetsAt":"2025-07-14T00:00:00Z"},' +
+  '"month":{"limitMicroCents":100000000000,"usedMicroCents":105700000000}}}}'
+
+// 5h/周窗口空闲 (接口不给 resetsAt): 重置时间必须留空, 不能借月周期兜底
+const GO_STATUS_IDLE_JSON = '{"access":{"endsAt":"2025-09-01T00:00:00Z","meters":{' +
+  '"fiveHour":{"limitMicroCents":100000000000,"usedMicroCents":0},' +
+  '"week":{"limitMicroCents":100000000000,"usedMicroCents":0},' +
+  '"month":{"limitMicroCents":100000000000,"usedMicroCents":0}}}}'
+
+const REQUEST_LOGS_JSON = '{"items":[' +
+  '{"id":"usg_abc123","startedAt":1753773600000,"category":"inference",' +
+  '"model":"deepseek-chat","provider":"deepseek","inputTokens":1234,"outputTokens":567,' +
+  '"reasoningTokens":89,"cacheReadTokens":100,"cacheWriteTokens":75,"cost":0.12345678,' +
+  '"serviceAPIKeyID":"key_1","sessionID":"ses_1","product":"lite"},' +
+  '{"id":"usg_api999","startedAt":1753773601000,"category":"api","model":"console",' +
+  '"provider":"opencode","inputTokens":0,"outputTokens":0,"reasoningTokens":0,' +
+  '"cacheReadTokens":0,"cacheWriteTokens":0,"cost":0},' +
+  '{"id":"usg_def456","startedAt":1753771300000,"category":"inference","model":"gpt-4o",' +
+  '"provider":"openai","inputTokens":100,"outputTokens":200,"reasoningTokens":0,' +
+  '"cacheReadTokens":0,"cacheWriteTokens":0,"cost":0.05,"serviceAPIKeyID":"","sessionID":"","product":""},' +
+  '{"id":"usg_no_time","category":"inference","model":"x"}],' +
+  '"nextCursor":"cur_2","retentionDays":30}'
 
 /**
  * 活跃账号解析策略 —— 直接调用生产实现 SyncDao.resolveActive。
@@ -42,78 +50,104 @@ function resolveActive(stored: number | null, pairs: Array<[number, boolean]>): 
 
 export default function ggTest() {
   describe('QuotaParserTest', () => {
-    it('parses_all_three_windows_both_field_orders', 0, () => {
-      const windows = QuotaParser.parseQuotaHtml(QUOTA_HTML, 1752000000000)
+    it('parses_all_three_windows_from_go_status_json', 0, () => {
+      const windows = QuotaParser.parseGoStatusText(GO_STATUS_JSON, NOW_MS)
       expect(windows.length).assertEqual(3)
       const rolling = windows[0]
       expect(rolling.label).assertEqual('5h Rolling')
       expect(rolling.used).assertEqual(34.5)
       expect(rolling.remaining).assertEqual(65.5)
-      expect(rolling.resetInSec).assertEqual(43199)
+      const expectedSec = Math.max(0, Math.floor((Date.parse('2025-07-09T00:00:00Z') - NOW_MS) / 1000))
+      expect(rolling.resetInSec).assertEqual(expectedSec)
       const weekly = windows[1]
       expect(weekly.label).assertEqual('Weekly')
       expect(weekly.used).assertEqual(12.3)
-      expect(weekly.resetInSec).assertEqual(518400)
       expect(windows[2].label).assertEqual('Monthly')
     })
 
     it('clamps_usage_percent_to_0_100', 0, () => {
-      const windows = QuotaParser.parseQuotaHtml(QUOTA_HTML)
-      const monthly = windows[2]
-      expect(monthly.used).assertEqual(100.0)
-      expect(monthly.remaining).assertEqual(0.0)
+      const windows = QuotaParser.parseGoStatusText(GO_STATUS_JSON, NOW_MS)
+      expect(windows[2].used).assertEqual(100.0)
+      expect(windows[2].remaining).assertEqual(0.0)
     })
 
-    it('returns_empty_when_no_markers', 0, () => {
-      expect(QuotaParser.parseQuotaHtml('<html><body>nothing here</body></html>').length).assertEqual(0)
+    it('monthly_window_falls_back_to_access_endsAt', 0, () => {
+      const windows = QuotaParser.parseGoStatusText(GO_STATUS_JSON, NOW_MS)
+      expect(windows[2].resetAt).assertEqual(new Date(Date.parse('2025-09-01T00:00:00Z')).toISOString())
     })
 
-    it('resetAt_is_now_plus_resetInSec', 0, () => {
-      const windows = QuotaParser.parseQuotaHtml(QUOTA_HTML, 1752000000000)
-      const expected = new Date(1752000000000 + 43199 * 1000).toISOString()
-      expect(windows[0].resetAt).assertEqual(expected)
+    it('idle_5h_window_keeps_reset_at_empty', 0, () => {
+      // 5h/周窗口无 resetsAt = 窗口未开始: 留空, 不借月周期兜底
+      const windows = QuotaParser.parseGoStatusText(GO_STATUS_IDLE_JSON, NOW_MS)
+      expect(windows.length).assertEqual(3)
+      expect(windows[0].resetAt).assertEqual('')
+      expect(windows[0].resetInSec).assertEqual(0)
+      expect(windows[2].resetAt).assertEqual(new Date(Date.parse('2025-09-01T00:00:00Z')).toISOString())
+    })
+
+    it('returns_empty_for_non_dict_or_missing_meters', 0, () => {
+      expect(QuotaParser.parseGoStatusText('no json here', NOW_MS).length).assertEqual(0)
+      expect(QuotaParser.parseGoStatusText('{}', NOW_MS).length).assertEqual(0)
+      expect(QuotaParser.parseGoStatusText('{"access":{}}', NOW_MS).length).assertEqual(0)
     })
   })
 
   describe('UsageParserTest', () => {
-    it('parses_records_in_both_get_and_post_formats', 0, () => {
-      const records = UsageParser.parseUsageResponse(USAGE_RESPONSE)
-      expect(records.length).assertEqual(3)
-      const first = records[0]
+    it('parses_request_logs_json_inference_only', 0, () => {
+      const page = UsageParser.parseRequestLogsText(REQUEST_LOGS_JSON)
+      expect(page.records.length).assertEqual(2)
+      expect(page.nextCursor).assertEqual('cur_2')
+      expect(page.retentionDays).assertEqual(30)
+      const first = page.records[0]
       expect(first.usgId).assertEqual('usg_abc123')
-      expect(first.createdAt).assertEqual('2025-08-01T10:00:00.000Z')
+      expect(first.createdAt).assertEqual(new Date(1753773600000).toISOString())
       expect(first.model).assertEqual('deepseek-chat')
       expect(first.provider).assertEqual('deepseek')
       expect(first.inputTokens).assertEqual(1234)
       expect(first.outputTokens).assertEqual(567)
       expect(first.reasoningTokens).assertEqual(89)
       expect(first.cacheReadTokens).assertEqual(100)
-      expect(first.cacheWrite5mTokens).assertEqual(50)
-      expect(first.cacheWrite1hTokens).assertEqual(25)
+      expect(first.cacheWrite5mTokens).assertEqual(75)
+      expect(first.cacheWrite1hTokens).assertEqual(0)
       expect(first.costRaw).assertEqual(12345678)
       expect(parseFloat((first.costRaw / 100000000.0).toFixed(9))).assertEqual(0.12345678)
       expect(first.keyId).assertEqual('key_1')
       expect(first.sessionId).assertEqual('ses_1')
       expect(first.plan).assertEqual('lite')
-      const second = records[1]
+      const second = page.records[1]
       expect(second.usgId).assertEqual('usg_def456')
       expect(second.model).assertEqual('gpt-4o')
-      expect(second.inputTokens).assertEqual(100)
       expect(second.plan).assertEqual(null)
-      const third = records[2]
-      expect(third.usgId).assertEqual('usg_ghi789')
-      expect(third.inputTokens).assertEqual(0)
-      expect(third.reasoningTokens).assertEqual(0)
     })
 
-    it('returns_empty_for_garbage', 0, () => {
-      expect(UsageParser.parseUsageResponse('no records here').length).assertEqual(0)
+    it('returns_empty_for_garbage_or_missing_items', 0, () => {
+      expect(UsageParser.parseRequestLogsText('no records here').records.length).assertEqual(0)
+      expect(UsageParser.parseRequestLogsText('{}').records.length).assertEqual(0)
     })
 
-    it('skips_records_without_timeCreated', 0, () => {
-      const text = `const $R = [];
-$R[1] = {id: "usg_no_time", model: "x", inputTokens: 1, outputTokens: 1};`
-      expect(UsageParser.parseUsageResponse(text).length).assertEqual(0)
+    it('skips_records_without_id_or_startedAt', 0, () => {
+      // ArkTS 禁止无类型对象字面量, 这里直接拼 JSON 文本
+      const text = '{"items":[' +
+        '{"id":"usg_no_time","category":"inference","model":"x","startedAt":0},' +
+        '{"category":"inference","model":"y","startedAt":1753773600000}]}'
+      expect(UsageParser.parseRequestLogsText(text).records.length).assertEqual(0)
+    })
+  })
+
+  describe('CookieHeaderTest', () => {
+    it('pure_value_becomes_new_session_cookie', 0, () => {
+      expect(OpenCodeApi.buildCookieHeader('st_abc')).assertEqual('__Host-console_session=st_abc')
+    })
+
+    it('new_and_legacy_cookie_segments_pass_through', 0, () => {
+      expect(OpenCodeApi.buildCookieHeader('__Host-console_session=st_abc'))
+        .assertEqual('__Host-console_session=st_abc')
+      expect(OpenCodeApi.buildCookieHeader('a=1; auth=Fe26; b=2')).assertEqual('auth=Fe26')
+    })
+
+    it('cookie_prefix_is_stripped', 0, () => {
+      expect(OpenCodeApi.buildCookieHeader('Cookie: __Host-console_session=st_abc'))
+        .assertEqual('__Host-console_session=st_abc')
     })
   })
 
@@ -198,6 +232,26 @@ $R[1] = {id: "usg_no_time", model: "x", inputTokens: 1, outputTokens: 1};`
 
     it('no_stored_no_logged_in_uses_min_any_id', 0, () => {
       expect(resolveActive(null, [[3, false], [8, false]])).assertEqual(3)
+    })
+  })
+
+  describe('LoginEntryTest', () => {
+    it('builds_console_login_url', 0, () => {
+      // 2026-09 改版: 旧授权页 auth.opencode.ai/authorize 已下线, 入口即控制台登录页
+      expect(Login.buildLoginUrl()).assertEqual('https://opencode.ai/console/login?next=%2Fconsole%2F')
+    })
+
+    it('new_session_cookie_takes_priority_over_legacy', 0, () => {
+      expect(Login.extractAuthCookie('__Host-console_session=st_new; auth=Fe26_old'))
+        .assertEqual('__Host-console_session=st_new')
+      expect(Login.extractAuthCookie('auth=Fe26_old')).assertEqual('auth=Fe26_old')
+      expect(Login.extractAuthCookie('other=1')).assertEqual('')
+    })
+
+    it('workspace_hint_matches_console_and_workspace_paths', 0, () => {
+      expect(Login.extractWorkspaceHint('https://opencode.ai/console/wrk_abc')).assertEqual('wrk_abc')
+      expect(Login.extractWorkspaceHint('https://opencode.ai/workspace/wrk_xyz')).assertEqual('wrk_xyz')
+      expect(Login.extractWorkspaceHint('https://opencode.ai/console/')).assertEqual('Default')
     })
   })
 
