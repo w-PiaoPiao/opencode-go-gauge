@@ -116,6 +116,38 @@ export struct SettingsPage {
     }
   }
 
+  /**
+   * 「按同步范围清理」: 先预演 (数量/边界), 再二次确认后真删 (desktop 6995669 同语义:
+   * 同步只按范围取数, 不再自动裁剪本地存量 —— 这是唯一的删除入口)。
+   */
+  private async runPrune(): Promise<void> {
+    const preview = await Repo.get().prunePreview()
+    if (preview === null) {
+      promptAction.showToast({ message: I18n.t('prune_none') })
+      return
+    }
+    if (preview[2] === 0) {
+      promptAction.showToast({ message: I18n.t('prune_empty') })
+      return
+    }
+    const res = await promptAction.showDialog({
+      title: I18n.t('prune_now'),
+      message: I18n.t('prune_confirm')
+        .replace('%1', String(preview[0]))
+        .replace('%2', preview[1])
+        .replace('%3', String(preview[2])),
+      buttons: [
+        { text: I18n.t('cancel'), color: Theme.sub() },
+        { text: I18n.t('prune_now'), color: Theme.danger() },
+      ],
+    })
+    if (res.index === 1) {
+      const deleted = await Repo.get().pruneExpired()
+      promptAction.showToast({ message: I18n.t('prune_done').replace('%1', String(deleted)) })
+      await this.loadAll()
+    }
+  }
+
   build() {
     Scroll() {
       Column({ space: 12 }) {
@@ -287,6 +319,21 @@ export struct SettingsPage {
             .height(32)
             .enabled(!this.syncing)
           .onClick(() => { this.runFullSync() })
+        }
+        .width('100%')
+
+        // 「按同步范围清理」: 同步不再自动删数据, 这是唯一的删除入口 (desktop 同语义)
+        Row() {
+          Column({ space: 2 }) {
+            Text(I18n.t('prune_now')).fontSize(13).fontColor(Theme.text())
+            Text(I18n.t('prune_now_desc')).fontSize(11).fontColor(Theme.sub())
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+          Button(I18n.t('prune_now'))
+            .fontSize(12)
+            .height(32)
+          .onClick(() => { this.runPrune() })
         }
         .width('100%')
       }

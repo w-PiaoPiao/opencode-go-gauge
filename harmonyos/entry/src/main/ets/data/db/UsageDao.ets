@@ -46,37 +46,54 @@ export class UsageDao {
     return parts.join(',')
   }
 
-  /** 批量插入去重; 返回新增行数。已存在的记录保留原归属账号 (desktop ON CONFLICT 语义)。 */
+  /**
+   * 批量插入去重; 返回新增行数。
+   * 查重按 (account_id, usg_id) 组合 (v2 复合主键): usg_id 只是 provider 侧 id,
+   * 不同账号空间可能重叠, 同号 id 在不同账号是两行独立记录 (desktop 迁移 8 parity)。
+   * 批内同号已存在则保留原归属账号更新 (desktop ON CONFLICT 语义)。
+   */
   async insertUsageRecords(records: UsageRecordEntity[], accountId: number): Promise<number> {
     if (records.length === 0) {
       return 0
     }
     const store = this.store()
     const ids: string[] = records.map((r) => r.usgId)
-    const existingAccount: Map<string, number> = new Map()
-    const rs = await store.querySql(
-      `SELECT usg_id, account_id FROM usage_records WHERE usg_id IN (${UsageDao.placeholders(ids.length)})`,
-      ids,
-    )
-    const reader = new RowReader(rs)
-    while (reader.next()) {
-      existingAccount.set(reader.getStr('usg_id'), reader.getLong('account_id'))
+    // Map<usg_id, 拥有该 id 的账号集合>: 同号 id 可被多个账号各自持有
+    const ownership: Map<string, Set<number>> = new Map()
+    const distinctIds: string[] = Array.from(new Set(ids))
+    for (let start = 0; start < distinctIds.length; start += 500) {
+      const chunk = distinctIds.slice(start, start + 500)
+      const rs = await store.querySql(
+        `SELECT usg_id, account_id FROM usage_records WHERE usg_id IN (${UsageDao.placeholders(chunk.length)})`,
+        chunk,
+      )
+      const reader = new RowReader(rs)
+      while (reader.next()) {
+        const usgId = reader.getStr('usg_id')
+        let set = ownership.get(usgId)
+        if (set === undefined) {
+          set = new Set<number>()
+          ownership.set(usgId, set)
+        }
+        set.add(reader.getLong('account_id'))
+      }
+      reader.close()
     }
-    reader.close()
 
     let inserted = 0
     store.beginTransaction()
     try {
       for (const r of records) {
-        if (existingAccount.has(r.usgId)) {
+        const owners = ownership.get(r.usgId)
+        if (owners !== undefined && owners.has(r.accountId)) {
           await store.executeSql(
             `UPDATE usage_records SET created_at=?, model=?, provider=?, input_tokens=?, output_tokens=?,
                reasoning_tokens=?, cache_read_tokens=?, cache_write_5m_tokens=?, cache_write_1h_tokens=?,
                cost_raw=?, cost_usd=?, key_id=?, session_id=?, plan=?, synced_at=?
-             WHERE usg_id=?`,
+             WHERE usg_id=? AND account_id=?`,
             [r.createdAt, r.model, r.provider, r.inputTokens, r.outputTokens, r.reasoningTokens,
               r.cacheReadTokens, r.cacheWrite5mTokens, r.cacheWrite1hTokens, r.costRaw, r.costUsd,
-              r.keyId, r.sessionId, r.plan, r.syncedAt, r.usgId],
+              r.keyId, r.sessionId, r.plan, r.syncedAt, r.usgId, r.accountId.toString()],
           )
         } else {
           await store.executeSql(
@@ -86,8 +103,7 @@ export class UsageDao {
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             [r.usgId, r.createdAt, r.model, r.provider, r.inputTokens, r.outputTokens, r.reasoningTokens,
               r.cacheReadTokens, r.cacheWrite5mTokens, r.cacheWrite1hTokens, r.costRaw, r.costUsd,
-              r.keyId, r.sessionId, r.plan, r.syncedAt, existingAccount.get(r.usgId) !== undefined
-                ? existingAccount.get(r.usgId) : accountId],
+              r.keyId, r.sessionId, r.plan, r.syncedAt, r.accountId.toString()],
           )
           inserted++
         }
@@ -100,11 +116,55 @@ export class UsageDao {
     return inserted
   }
 
-  async pruneOldRecords(intervalArg: string, accountId: number): Promise<void> {
-    await this.store().executeSql(
-      `DELETE FROM usage_records WHERE account_id = ? AND datetime(created_at) < datetime('now', ?)`,
-      [accountId, intervalArg],
+  // ------------------------------------------------------------------
+  // 「按同步范围清理」显式入口 (desktop db.prune_preview / prune_expired parity):
+  // 同步不再自动删数据, 这里是唯一的删除入口, 由设置页按钮触发 (二次确认)。
+  // 本端无 local_date 物化列, 本地日由 datetime(...,'localtime') 派生, 口径与
+  // dailyStats/todayTrend 同源。
+  // ------------------------------------------------------------------
+
+  /** 过期判定的日历日边界 (早于它即过期)。 */
+  async pruneCutoff(days: number): Promise<string> {
+    const clamped = Math.min(3650, Math.max(1, days))
+    const rs = await this.store().querySql(
+      `SELECT date('now', 'localtime', ?) AS cutoff`, [`-${clamped} days`],
     )
+    const reader = new RowReader(rs)
+    let out = ''
+    if (reader.next()) {
+      out = reader.getStr('cutoff')
+    }
+    reader.close()
+    return out
+  }
+
+  /** 待删条数预演 (跨账号, 不写库)。 */
+  async prunePreviewCount(cutoff: string): Promise<number> {
+    const rs = await this.store().querySql(
+      `SELECT COUNT(*) AS count FROM usage_records
+       WHERE substr(datetime(created_at, 'localtime'), 1, 10) < ?`,
+      [cutoff],
+    )
+    const reader = new RowReader(rs)
+    let count = 0
+    if (reader.next()) {
+      count = reader.getLong('count')
+    }
+    reader.close()
+    return count
+  }
+
+  /** 按边界删除**所有账号**的过期记录, 返回删除条数 (删除不可恢复)。 */
+  async pruneExpiredAll(cutoff: string): Promise<number> {
+    const deleted = await this.prunePreviewCount(cutoff)
+    if (deleted === 0) {
+      return 0
+    }
+    await this.store().executeSql(
+      `DELETE FROM usage_records WHERE substr(datetime(created_at, 'localtime'), 1, 10) < ?`,
+      [cutoff],
+    )
+    return deleted
   }
 
   // ------------------------------------------------------------------
@@ -376,7 +436,9 @@ export class UsageDao {
     const whereParts: string[] = ['account_id = ?']
     const params: Array<string> = [accountId.toString()]
     if (days !== null) {
-      whereParts.push(`datetime(created_at) >= datetime('now', ?)`)
+      // 日历日口径 (与 dailyStats/todayTrend 同源): 窗口必须整天对齐, 原先的
+      // datetime() 精确 N×24h 会让列表比统计图少掉最早半天
+      whereParts.push(`substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)`)
       params.push(`-${Math.min(365, Math.max(1, days))} days`)
     }
     const where = `WHERE ${whereParts.join(' AND ')}`
@@ -409,7 +471,9 @@ export class UsageDao {
               MAX(created_at) AS last_at
        FROM usage_records ${where}
        GROUP BY ${UsageDao.SESSION_KEY}
-       ORDER BY last_at DESC
+       -- session_id 是分组键 (结果集内唯一), 并列 last_at 时由它构成全序:
+       -- 只按 last_at 排序时分页在页边界可能重复/跳过 (desktop session_stats_page parity)
+       ORDER BY last_at DESC, session_id ASC
        LIMIT ? OFFSET ?`,
       pageArgs,
     )
@@ -444,7 +508,8 @@ export class UsageDao {
       params.push(model)
     }
     if (days !== null) {
-      whereParts.push(`datetime(created_at) >= datetime('now', ?)`)
+      // 日历日口径 (与 dailyStats/todayTrend 同源): 窗口必须整天对齐
+      whereParts.push(`substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)`)
       params.push(`-${Math.min(365, Math.max(1, days))} days`)
     }
     const where = `WHERE ${whereParts.join(' AND ')}`
@@ -464,7 +529,10 @@ export class UsageDao {
     }
     pageArgs.push(pageSize.toString(), ((page - 1) * pageSize).toString())
     const rs = await store.querySql(
-      `SELECT * FROM usage_records ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, pageArgs,
+      // usg_id 次序键: created_at 不唯一 (毫秒精度 + 批量同步一次插多条),
+      // 页边界可能重复/跳过 (desktop usage_records_page parity)
+      `SELECT * FROM usage_records ${where} ORDER BY created_at DESC, usg_id DESC LIMIT ? OFFSET ?`,
+      pageArgs,
     )
     const reader = new RowReader(rs)
     const records: UsageRecordRow[] = []

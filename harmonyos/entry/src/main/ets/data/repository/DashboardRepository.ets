@@ -8,6 +8,7 @@ import { AppDb } from '../db/AppDb'
 import { UsageDao, UsageRecordEntity } from '../db/UsageDao'
 import { SyncDao } from '../db/SyncDao'
 import { OpenCodeApi } from '../remote/OpenCodeApi'
+import { UsagePage } from '../remote/UsageParser'
 import { ExchangeApi } from '../remote/ExchangeApi'
 import { MonthlyCycle } from '../../common/util/MonthlyCycle'
 import { Fmt } from '../../common/util/Fmt'
@@ -343,7 +344,13 @@ export class DashboardRepository {
     }
   }
 
-  /** 同步单个账号的用量记录。 */
+  /**
+   * 同步单个账号的用量记录 (desktop server._sync_one_account parity)。
+   *
+   * /console/api/request-logs 为游标分页 (按时间倒序, 无法并发跳页): 顺序翻页,
+   * 直到游标耗尽 / 触达同步范围边界 / 增量追平 (连续两批 0 新增)。
+   * 旧实现的页码并发跳页 (fetchBatch) 是 /_server 时代的形态, 随 2026-09 改版下线。
+   */
   private async syncOneAccount(
     accountId: number, name: string, mode: string, windowDays: number | null,
   ): Promise<SyncResult> {
@@ -369,97 +376,93 @@ export class DashboardRepository {
       }
 
       let totalInserted = 0
-      const maxPages = mode === 'full' ? 2000 : 5
+      // 页数上限对齐桌面 (_max_pages_for: full 1000 / incremental 10; 此前 2000/5 漂移)
+      const maxPages = mode === 'full' ? 1000 : 10
       let page = 0
-      let emptyBatches = 0
+      let cursor: string | null = null
+      let emptyPages = 0
       let failedPages = 0
       let windowBoundaryReached = false
 
-      while (page < maxPages) {
-        const batchEnd = Math.min(page + 5, maxPages)
-        const batchPages: number[] = []
-        for (let p = page; p < batchEnd; p++) {
-          batchPages.push(p)
+      // 增量同步: 只取最新记录之后的一段时间 (重叠 1 小时防边界漏记),
+      // 命中不到旧数据就不会去翻历史页, 既快又少请求
+      let sinceMs: number | null = null
+      if (mode !== 'full') {
+        const newest = (await this.syncDao.getSyncStateFor(accountId)).newestRecordAt
+        if (newest !== null && newest.length > 0) {
+          const stamp = Date.parse(newest)
+          if (!Number.isNaN(stamp)) {
+            const overlap = stamp - 3600 * 1000
+            if (overlap > 0) {
+              sinceMs = overlap
+            }
+          }
         }
+      }
+
+      while (page < maxPages) {
         this.updateProgress((p) => { p.page = page })
-
-        const results = await this.fetchBatch(token, workspaceId, batchPages)
-
-        let batchInserted = 0
-        let batchFullPages = 0
-        let batchFailed = 0
-        for (const p of batchPages) {
-          const result = results.get(p)
-          if (result === undefined || result === null) {
-            batchFailed++
-            continue
+        let usagePage: UsagePage
+        try {
+          usagePage = await OpenCodeApi.fetchUsagePage(token, workspaceId, cursor, sinceMs)
+        } catch (e) {
+          // 首页即失败 -> 整体报错; 翻页中途失败 -> 保留已入库数据标记 partial
+          // (深页偶尔慢/连接被重置; 桌面同语义, 无游标重试路径)
+          if (page === 0) {
+            const msg = `[${name}] ${(e as Error).message}`
+            await this.syncDao.updateSyncStateAndTotals(accountId, 'error', msg, 0)
+            this.updateProgress((p) => { p.phase = 'error'; p.message = msg })
+            return { ok: false, error: (e as Error).message, inserted: 0, pages: 0, partial: false, failedPages: 0 }
           }
-          if (result.length === 0) {
-            continue // 空页: 数据结束
-          }
+          failedPages += 1
+          break
+        }
+        page += 1
+        const records = usagePage.records
+        let inserted = 0
+        if (records.length > 0) {
+          // 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 -> 该页保留后停止
           if (mode === 'full' && windowDays !== null) {
             let earliest = ''
-            for (const r of result) {
+            for (const r of records) {
               if (earliest.length === 0 || r.createdAt < earliest) {
                 earliest = r.createdAt
               }
             }
             if (earliest.length > 0) {
-              try {
-                const et = Date.parse(earliest)
-                const boundary = Date.now() - windowDays * 24 * 3600 * 1000
-                if (!Number.isNaN(et) && et < boundary) {
-                  windowBoundaryReached = true
-                }
-              } catch (e) {
-                // 忽略不可解析的日期 (desktop parity)
+              const et = Date.parse(earliest)
+              const boundary = Date.now() - windowDays * 24 * 3600 * 1000
+              if (!Number.isNaN(et) && et < boundary) {
+                windowBoundaryReached = true
               }
             }
           }
           const syncedAt = new Date().toISOString()
-          const entities: UsageRecordEntity[] = result.map((r) => toEntity(r, syncedAt, accountId))
-          const inserted = await this.usageDao.insertUsageRecords(entities, accountId)
+          const entities: UsageRecordEntity[] = records.map((r) => toEntity(r, syncedAt, accountId))
+          inserted = await this.usageDao.insertUsageRecords(entities, accountId)
           totalInserted += inserted
-          batchInserted += inserted
-          if (result.length >= 50) {
-            batchFullPages++
-          }
           this.updateProgress((p) => { p.inserted = totalInserted })
         }
-
-        page += 5
-
-        if (windowBoundaryReached) {
-          break
-        }
-        if (batchFailed > 0) {
-          failedPages += batchFailed
-          if (mode === 'incremental') {
-            const msg = '网络请求失败 (IncompleteRead/超时)'
-            await this.syncDao.updateSyncStateAndTotals(accountId, 'error', `[${name}] 第 ${page - 4} 页拉取失败: ${msg}`, totalInserted)
-            this.updateProgress((p) => {
-              p.phase = 'error'
-              p.message = `[${name}] 第 ${page - 4} 页拉取失败: ${msg}`
-            })
-            return { ok: false, error: msg, inserted: totalInserted, pages: page, partial: false, failedPages: batchFailed }
-          }
-        }
-        if (batchFullPages === 0) {
-          break // 本批没有满页 -> 到底
-        }
-        if (mode === 'incremental' && batchInserted === 0) {
-          emptyBatches++
-          if (emptyBatches >= 2) {
+        // 增量停止判定: 连续两批 0 新增 (空页同计) 即追平 (desktop _incremental_done parity)
+        if (mode === 'incremental' && inserted === 0) {
+          emptyPages += 1
+          if (emptyPages >= 2) {
             break
           }
         } else {
-          emptyBatches = 0
+          emptyPages = 0
+        }
+        cursor = usagePage.nextCursor
+        if (cursor === null) {
+          break // 已到最早一条
+        }
+        if (windowBoundaryReached) {
+          break
         }
       }
 
-      if (windowDays !== null) {
-        await this.usageDao.pruneOldRecords(`-${windowDays} days`, accountId)
-      }
+      // 同步只按范围取数, 不裁剪本地存量: window_days 是取数范围, 不是保留期
+      // (desktop 6995669 同语义: 过期数据由设置页「按同步范围清理」显式删除)
 
       // 刷新该账号的 key 显示名称缓存 (失败不影响已有缓存)
       try {
@@ -476,7 +479,7 @@ export class DashboardRepository {
       }
 
       if (failedPages > 0) {
-        const msg = `完成, 但 ${failedPages} 页拉取失败 (数据不完整, 可再次全量同步补全)`
+        const msg = '完成, 但翻页中断 (数据不完整, 可再次全量同步补全)'
         await this.syncDao.updateSyncStateAndTotals(accountId, 'partial', msg, totalInserted)
         return { ok: true, error: null, inserted: totalInserted, pages: page, partial: true, failedPages: failedPages }
       }
@@ -487,25 +490,6 @@ export class DashboardRepository {
       await this.syncDao.updateSyncStateAndTotals(accountId, 'error', errMsg, 0)
       return { ok: false, error: errMsg, inserted: 0, pages: 0, partial: false, failedPages: 0 }
     }
-  }
-
-  /** 并发抓取最多 5 页; undefined = 失败页。 */
-  private async fetchBatch(
-    token: string, workspaceId: string, pages: number[],
-  ): Promise<Map<number, UsageRecord[] | null>> {
-    const out: Map<number, UsageRecord[] | null> = new Map()
-    const tasks: Array<Promise<void>> = []
-    for (const p of pages) {
-      tasks.push((async () => {
-        try {
-          out.set(p, await OpenCodeApi.fetchUsagePage(token, workspaceId, p))
-        } catch (e) {
-          out.set(p, null)
-        }
-      })())
-    }
-    await Promise.all(tasks)
-    return out
   }
 
   /** 配额刷新 + 用量同步; 返回同步结果文本供调用方展示 (full 模式必须可被触发, 见设置页说明). */
@@ -575,6 +559,38 @@ export class DashboardRepository {
 
   async saveSettings(patch: AppSettings): Promise<AppSettings> {
     return AppDb.settingsDao().saveSettings(patch)
+  }
+
+  /**
+   * 「按同步范围清理」预演 (desktop db.prune_preview parity): [窗口天数, 边界, 待删数],
+   * 跨账号不写库; 同步范围为「所有」(windowDays=null) 时返回 null (无需清理)。
+   */
+  async prunePreview(): Promise<[number, string, number] | null> {
+    const wd = (await AppDb.settingsDao().getSettings()).windowDays
+    if (wd === null) {
+      return null
+    }
+    const cutoff = await this.usageDao.pruneCutoff(wd)
+    return [wd, cutoff, await this.usageDao.prunePreviewCount(cutoff)]
+  }
+
+  /**
+   * 按同步范围清理**所有账号**的过期记录 (desktop db.prune_expired parity)。
+   * 删除不可恢复, 调用方负责二次确认; 删除后回填同步状态的总数/最老最新。
+   */
+  async pruneExpired(): Promise<number> {
+    const wd = (await AppDb.settingsDao().getSettings()).windowDays
+    if (wd === null) {
+      return 0
+    }
+    const cutoff = await this.usageDao.pruneCutoff(wd)
+    const deleted = await this.usageDao.pruneExpiredAll(cutoff)
+    if (deleted > 0) {
+      for (const acc of await this.syncDao.listAccounts()) {
+        await this.syncDao.refreshSyncTotals(acc.id)
+      }
+    }
+    return deleted
   }
 
   /** 退出登录当前活跃账号 (清其数据, 保留账号行)。 */

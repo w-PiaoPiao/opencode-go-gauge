@@ -1,80 +1,97 @@
 /**
- * OpenCode Go API 客户端 —— opencode_api.py / OpenCodeApi.kt 的 1:1 移植。
- * 两个能力:
- *  1. quota: 抓取 opencode.ai dashboard HTML, 正则解析 5h/weekly/monthly 用量
- *  2. usage: 调用 opencode.ai/_server server-fn 接口, 解析每条请求的 token/cost 明细
+ * OpenCode Console API 客户端 —— opencode_api.py / OpenCodeApi.kt 的 ArkTS 移植
+ * (2026-09 opencode.ai 前端改版后)。
+ *
+ * - 会话 Cookie: ``auth`` -> ``__Host-console_session`` (登录页 /console/login)
+ * - 配额: 旧 dashboard HTML 解析 -> GET /console/api/go/status
+ * - 明细: 旧 /_server server-fn -> GET /console/api/request-logs (游标分页)
+ * - 工作区: GET /console/api/orgs ; Key 名称: GET /console/api/service-accounts
+ *
+ * 所有 /console/api 请求除 Cookie 外还需 ``x-org-id: <wrk_xxx>`` 头 (org 即工作区)。
+ * 服务端对请求明细只保留 30 天 (响应中的 retentionDays)。
  */
 import { HttpFetch } from './HttpFetch'
-import { QuotaParser } from './QuotaParser'
-import { UsageParser } from './UsageParser'
+import { Json, QuotaParser } from './QuotaParser'
+import { UsageParser, UsagePage } from './UsageParser'
 import { Cookie } from '../../common/util/Cookie'
-import { QuotaResult, UsageRecord } from '../../common/model/Models'
+import { QuotaResult, QuotaWindow } from '../../common/model/Models'
 
 export class OpenCodeApi {
-  static readonly DASHBOARD_BASE = 'https://opencode.ai/workspace'
-  static readonly WORKSPACE_SERVER_ID = 'def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f'
-  static readonly DEFAULT_USAGE_SERVER_ID = 'bfd684bfc2e4eed05cd0b518f5e4eafd3f3376e3938abb9e536e7c03df831e5c'
+  static readonly CONSOLE_ORIGIN = 'https://opencode.ai'
+  static readonly CONSOLE_LOGIN_URL = 'https://opencode.ai/console/login'
+  static readonly API_BASE = 'https://opencode.ai/console/api'
+  // 会话 Cookie: 新版 __Host-console_session, 旧版 auth (兼容历史 token)
+  static readonly SESSION_COOKIE = '__Host-console_session'
+  static readonly LEGACY_SESSION_COOKIE = 'auth'
   static readonly USER_AGENT =
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:148.0) Gecko/20100101 Firefox/148.0'
 
+  /** request-logs 单页条数 (接口上限 100)。 */
+  static readonly USAGE_PAGE_SIZE = 100
+
   private static readonly WORKSPACE_ID_RE = /wrk_[A-Za-z0-9]+/
-  private static readonly WORKSPACE_ENTRY_RE =
-    /id\s*:\s*"(wrk_[^"]+)"[^{}]*?name\s*:\s*"([^"]*)"/gs
-  private static readonly KEY_ENTRY_RE = /\{id:"(key_[A-Za-z0-9]+)",name:"([^"]*)"/g
 
-  /** 归一化 token 为 auth cookie 段。 */
+  /**
+   * 归一化 token 为 Cookie 头 (opencode_api.build_cookie_header parity)。
+   * 支持完整 Cookie 串 / "cookie:" 前缀串 / 纯值三种输入。
+   */
   static buildCookieHeader(token: string): string {
-    const seg = Cookie.findSegment(token, 'auth')
-    if (seg.length > 0) {
-      return seg
+    const raw = Cookie.stripPrefix(token)
+    if (raw.length === 0) {
+      return ''
     }
-    const cookie = Cookie.stripPrefix(token)
-    return cookie.length === 0 ? '' : `auth=${cookie}`
-  }
-
-  private static argsToJson(args: Array<string | number | null>): string {
-    const sb: string[] = ['[']
-    for (let i = 0; i < args.length; i++) {
-      if (i > 0) {
-        sb.push(',')
+    for (const part of raw.split(';')) {
+      const p = part.trim()
+      if (p.length === 0) {
+        continue
       }
-      const a = args[i]
-      if (a === null) {
-        sb.push('null')
-      } else if (typeof a === 'string') {
-        sb.push(`"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
-      } else {
-        sb.push(a.toString())
+      const name = p.split('=')[0].trim().toLowerCase()
+      if (name === OpenCodeApi.SESSION_COOKIE || name === OpenCodeApi.LEGACY_SESSION_COOKIE) {
+        return p
       }
     }
-    sb.push(']')
-    return sb.join('')
+    // 形如 name=value 的其它 Cookie 原样透传, 纯值则按新版会话 Cookie 处理
+    if (/^[A-Za-z0-9_.\-]+\s*=\s*\S+$/.test(raw)) {
+      return raw
+    }
+    return `${OpenCodeApi.SESSION_COOKIE}=${raw}`
   }
 
-  private static async serverCall(
-    serverId: string, args: Array<string | number | null>, refererPath: string, token: string,
-  ): Promise<string> {
+  /** GET /console/api 下接口, 返回解析后的 JSON (解析失败抛错)。 */
+  private static async apiGet(
+    path: string, token: string, orgId: string,
+    params: Map<string, string | null> = new Map(),
+  ): Promise<Object | null> {
     const cookie = OpenCodeApi.buildCookieHeader(token)
     if (cookie.length === 0) {
       throw new Error('token 为空')
     }
-    const url = 'https://opencode.ai/_server?id=' +
-      encodeURIComponent(serverId) +
-      '&args=' + encodeURIComponent(OpenCodeApi.argsToJson(args))
+    let url = `${OpenCodeApi.API_BASE}${path}`
+    const parts: string[] = []
+    params.forEach((v, k) => {
+      if (v !== null && v.length > 0) {
+        parts.push(`${k}=${encodeURIComponent(v)}`)
+      }
+    })
+    if (parts.length > 0) {
+      url += `?${parts.join('&')}`
+    }
     const headers: Record<string, string> = {
       'Cookie': cookie,
-      'X-Server-Id': serverId,
-      'X-Server-Instance': `server-fn:${Date.now() * 1000}`,
+      'Accept': 'application/json',
       'User-Agent': OpenCodeApi.USER_AGENT,
-      'Origin': 'https://opencode.ai',
-      'Referer': `https://opencode.ai${refererPath}`,
-      'Accept': 'text/javascript, application/json;q=0.9, */*;q=0.8',
+      'Origin': OpenCodeApi.CONSOLE_ORIGIN,
+      'Referer': `${OpenCodeApi.CONSOLE_ORIGIN}/console/`,
     }
-    return HttpFetch.fetch(url, headers)
+    if (orgId.length > 0) {
+      headers['x-org-id'] = orgId
+    }
+    const text = await HttpFetch.fetch(url, headers, 2)
+    return JSON.parse(text) as Object
   }
 
   // ------------------------------------------------------------------
-  // 工作区解析
+  // 工作区 (org)
   // ------------------------------------------------------------------
 
   static extractWorkspaceId(raw: string): string {
@@ -89,40 +106,28 @@ export class OpenCodeApi {
     return m === null ? '' : m[0]
   }
 
-  /** 拉取账号下全部工作区 (id, name)。 */
+  /** 拉取账号下全部工作区 (id, name) — GET /console/api/orgs。 */
   static async fetchWorkspaceRefs(token: string): Promise<Array<[string, string]>> {
-    const cookie = OpenCodeApi.buildCookieHeader(token)
-    if (cookie.length === 0) {
-      throw new Error('token 为空')
-    }
-    const url = 'https://opencode.ai/_server?id=' + encodeURIComponent(OpenCodeApi.WORKSPACE_SERVER_ID)
-    const headers: Record<string, string> = {
-      'Cookie': cookie,
-      'X-Server-Id': OpenCodeApi.WORKSPACE_SERVER_ID,
-      'X-Server-Instance': `server-fn:${Date.now() * 1000}`,
-      'User-Agent': OpenCodeApi.USER_AGENT,
-      'Origin': 'https://opencode.ai',
-      'Referer': 'https://opencode.ai',
-      'Accept': 'text/javascript, application/json;q=0.9, */*;q=0.8',
-    }
-    const text = await HttpFetch.fetch(url, headers)
+    const data = await OpenCodeApi.apiGet('/orgs', token, '')
     const refs: Array<[string, string]> = []
     const seen: Set<string> = new Set()
-    // 带 /g 标志的静态正则跨调用共享 lastIndex: 异常中断后状态可能残留,
-    // 与 fetchKeyNames 同样在每轮使用前显式归零
-    OpenCodeApi.WORKSPACE_ENTRY_RE.lastIndex = 0
-    let m: RegExpExecArray | null
-    while ((m = OpenCodeApi.WORKSPACE_ENTRY_RE.exec(text)) !== null) {
-      const workspaceId = m[1]
-      const name = m[2].trim()
-      if (seen.has(workspaceId)) {
-        continue
+    const arr = Json.asArr(data)
+    if (arr !== null) {
+      for (const el of arr) {
+        const item = Json.asObj(el)
+        if (item === null) {
+          continue
+        }
+        const wid = Json.str(item['id']).trim()
+        if (wid.length === 0 || seen.has(wid)) {
+          continue
+        }
+        seen.add(wid)
+        refs.push([wid, Json.str(item['name']).trim()])
       }
-      seen.add(workspaceId)
-      refs.push([workspaceId, name])
     }
     if (refs.length === 0) {
-      throw new Error('无法从账号数据解析工作区 ID')
+      throw new Error('无法获取工作区列表 (账号下没有工作区)')
     }
     return refs
   }
@@ -149,97 +154,98 @@ export class OpenCodeApi {
   }
 
   // ------------------------------------------------------------------
-  // Quota
+  // 配额 (go/status)
   // ------------------------------------------------------------------
 
-  /** 抓取工作区配额窗口。绝不抛异常 —— 失败返回带 error 的 QuotaResult。 */
+  /** 抓取工作区 Go 配额窗口 (5h/weekly/monthly)。绝不抛异常 —— 失败返回带 error 的 QuotaResult。 */
   static async fetchQuota(token: string, workspaceHint: string = 'Default'): Promise<QuotaResult> {
     const nowIso = new Date().toISOString()
     const hint = (workspaceHint.length === 0 ? 'Default' : workspaceHint).trim()
-    if (token.length === 0) {
-      return { name: 'Default', workspaceId: hint, success: false, updatedAt: nowIso, windows: [], error: '未配置 token' }
+    if (token.trim().length === 0) {
+      return {
+        name: 'Default', workspaceId: hint, success: false,
+        updatedAt: nowIso, windows: [], error: '未配置 token',
+      }
     }
     try {
       const workspaceId = await OpenCodeApi.resolveWorkspaceId(hint, token)
-      const cookie = OpenCodeApi.buildCookieHeader(token)
-      if (cookie.length === 0) {
-        throw new Error('token 为空')
-      }
-      const url = `${OpenCodeApi.DASHBOARD_BASE}/${encodeURIComponent(workspaceId)}/go`
-      const headers: Record<string, string> = {
-        'Cookie': cookie,
-        'User-Agent': OpenCodeApi.USER_AGENT,
-        'Accept': 'text/html, application/xhtml+xml',
-      }
-      // dashboard HTML 较慢: 2 次尝试 + 500ms 退避 (desktop parity)
-      const html = await HttpFetch.fetch(url, headers, 2)
-      const windows = QuotaParser.parseQuotaHtml(html)
+      const payload = await OpenCodeApi.apiGet('/go/status', token, workspaceId)
+      const windows = QuotaParser.parseGoStatusPayload(payload)
       if (windows.length === 0) {
-        throw new Error('无法从 Dashboard HTML 解析额度数据')
+        throw new Error('账号未订阅 OpenCode Go (接口无额度数据)')
       }
-      return { name: 'Default', workspaceId: workspaceId, success: true, updatedAt: nowIso, windows: windows, error: null }
-    } catch (e) {
       return {
-        name: 'Default', workspaceId: hint, success: false, updatedAt: nowIso, windows: [],
-        error: (e as Error).message !== undefined ? (e as Error).message : '未知错误',
+        name: 'Default', workspaceId: workspaceId, success: true,
+        updatedAt: nowIso, windows: windows, error: null,
+      }
+    } catch (e) {
+      const msg = (e as Error).message !== undefined ? (e as Error).message : '未知错误'
+      return {
+        name: 'Default', workspaceId: hint, success: false,
+        updatedAt: nowIso, windows: [], error: msg,
       }
     }
   }
 
   // ------------------------------------------------------------------
-  // Usage records
+  // 用量明细 (request-logs)
   // ------------------------------------------------------------------
 
-  /** 拉取一页用量记录 (每页 50 条, page 从 0 开始)。 */
+  /**
+   * 拉取一页用量明细 (游标分页, 按时间倒序)。
+   *
+   * cursor: 上一页返回的 next_cursor, 首页传 null; sinceMs: 只取该毫秒时间戳
+   * 之后的记录 (增量同步用)。
+   */
   static async fetchUsagePage(
-    token: string, workspaceId: string, page: number = 0, keyId: string | null = null,
-  ): Promise<UsageRecord[]> {
-    const args: Array<string | number | null> = [workspaceId]
-    if (keyId !== null) {
-      if (page > 0) {
-        args.push(page)
-        args.push(keyId)
-      } else {
-        args.push(keyId)
-      }
-    } else if (page > 0) {
-      args.push(page)
+    token: string, workspaceId: string,
+    cursor: string | null = null, sinceMs: number | null = null,
+  ): Promise<UsagePage> {
+    const params: Map<string, string | null> = new Map()
+    params.set('limit', String(OpenCodeApi.USAGE_PAGE_SIZE))
+    if (cursor !== null && cursor.length > 0) {
+      params.set('cursor', cursor)
     }
-    const text = await OpenCodeApi.serverCall(
-      OpenCodeApi.DEFAULT_USAGE_SERVER_ID, args, `/workspace/${workspaceId}/usage`, token,
-    )
-    return UsageParser.parseUsageResponse(text)
+    if (sinceMs !== null && sinceMs > 0) {
+      params.set('since', String(Math.floor(sinceMs)))
+    }
+    const payload = await OpenCodeApi.apiGet('/request-logs', token, workspaceId, params)
+    return UsageParser.parseRequestLogsPayload(payload)
   }
 
   /** 拉取工作区下所有 API key 的名称映射 (key_id -> 名称)。失败返回空 map。 */
   static async fetchKeyNames(token: string, workspaceId: string): Promise<Map<string, string>> {
-    const cookie = OpenCodeApi.buildCookieHeader(token)
-    if (cookie.length === 0) {
-      return new Map()
-    }
-    const url = `${OpenCodeApi.DASHBOARD_BASE}/${workspaceId}/keys`
-    const headers: Record<string, string> = {
-      'Cookie': cookie,
-      'User-Agent': OpenCodeApi.USER_AGENT,
-      'Origin': 'https://opencode.ai',
-      'Referer': `${OpenCodeApi.DASHBOARD_BASE}/${workspaceId}/keys`,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    }
+    const names: Map<string, string> = new Map()
     try {
-      const html = await HttpFetch.fetch(url, headers)
-      const names: Map<string, string> = new Map()
-      let m: RegExpExecArray | null
-      OpenCodeApi.KEY_ENTRY_RE.lastIndex = 0
-      while ((m = OpenCodeApi.KEY_ENTRY_RE.exec(html)) !== null) {
-        const id = m[1]
-        const name = m[2].trim()
-        if (id.length > 0 && name.length > 0 && !names.has(id)) {
-          names.set(id, name)
+      const payload = await OpenCodeApi.apiGet('/service-accounts', token, workspaceId)
+      const root = Json.asObj(payload)
+      const items = root === null ? null : Json.asArr(root['items'])
+      if (items !== null) {
+        for (const el of items) {
+          const entry = Json.asObj(el)
+          if (entry === null) {
+            continue
+          }
+          const keys = Json.asArr(entry['keys'])
+          if (keys === null) {
+            continue
+          }
+          for (const kel of keys) {
+            const key = Json.asObj(kel)
+            if (key === null) {
+              continue
+            }
+            const id = Json.str(key['id']).trim()
+            const name = Json.str(key['name']).trim()
+            if (id.length > 0 && name.length > 0 && !names.has(id)) {
+              names.set(id, name)
+            }
+          }
         }
       }
-      return names
     } catch (e) {
-      return new Map()
+      // 失败返回空 map (不影响主流程)
     }
+    return names
   }
 }
