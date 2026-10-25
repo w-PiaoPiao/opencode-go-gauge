@@ -792,9 +792,9 @@ function heatmapSummaryHtml(metric, val) {
   const on = heatmapDays.map((d) => (d.request_count || 0) > 0);
   let longest = 0, run = 0;
   for (const v of on) { run = v ? run + 1 : 0; if (run > longest) longest = run; }
-  // 当前连续从最后一天回溯; 今天还没用量时从昨天起算, 否则每天零点后都会显示 0
+  // 当前连续从最后一天回溯, 最后一天 (今天) 为 0 即中断 — 与热力图今天的格子一致;
+  // 不做「跳过今天」的宽容: 那会让今天明明是 0 却显示中断前的连续天数
   let i = on.length - 1;
-  if (i >= 0 && !on[i]) i -= 1;
   let cur = 0;
   while (i >= 0 && on[i]) { cur += 1; i -= 1; }
   const fmt = (v) => metric === "cost" ? fmtMoney(v) : metric === "requests" ? fmtInt(v) : fmtTokens(v);

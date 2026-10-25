@@ -29,8 +29,8 @@ fun dailyMetricValue(d: DailyStat, metric: String): Double = when (metric) {
  * 热力图摘要: 峰值 (随指标, 带日期) / 当前连续 / 最长连续.
  *
  * 连续天数按「当天有请求」判定, 与指标无关 —— 免费模型可能成本为 0, 按成本算会把
- * 连续天数误判成断掉; 当前连续在最后一天尚无用量时从昨天起算, 否则每天零点一过
- * 就会显示 0, 看起来像缺陷 (desktop 同口径).
+ * 连续天数误判成断掉; 当前连续在最后一天 (今天) 为 0 时即中断, 与热力图今天的
+ * 格子一致 (desktop 同口径).
  */
 fun heatmapSummary(days: List<DailyStat>, metric: String): HeatmapSummary {
     var peakValue = -1.0
@@ -49,9 +49,8 @@ fun heatmapSummary(days: List<DailyStat>, metric: String): HeatmapSummary {
         run = if (v) run + 1 else 0
         if (run > longest) longest = run
     }
-    // 当前连续: 从最后一天回溯; 今天还没用量时从昨天起算
+    // 当前连续: 从最后一天回溯, 今天为 0 即中断
     var i = on.lastIndex
-    if (i >= 0 && !on[i]) i -= 1
     var current = 0
     while (i >= 0 && on[i]) {
         current += 1
