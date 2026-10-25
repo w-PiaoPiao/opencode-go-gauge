@@ -19,6 +19,7 @@ import io.github.yphyphyph.gogauge.data.model.SessionStat
 import io.github.yphyphyph.gogauge.data.model.SyncProgress
 import io.github.yphyphyph.gogauge.data.model.UsageRecordRow
 import io.github.yphyphyph.gogauge.data.repository.DashboardRepository
+import io.github.yphyphyph.gogauge.data.repository.PrunePreview
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApiException
 import io.github.yphyphyph.gogauge.data.remote.UpdateDownloader
 import io.github.yphyphyph.gogauge.data.remote.UpdateInfo
@@ -360,6 +361,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             repo.logout()
             resetPagedData()
             checkState()
+        }
+    }
+
+    /** 「按同步范围清理」预演 (desktop db.prune_preview parity); 范围为「所有」返回 null. */
+    fun prunePreview(onResult: (PrunePreview?) -> Unit) {
+        scope.launch { onResult(repo.prunePreview()) }
+    }
+
+    /** 显式清理过期记录 (删除不可恢复, 调用方负责二次确认); 回调删除条数. */
+    fun pruneExpired(onDone: (Int) -> Unit = {}) {
+        scope.launch {
+            val n = repo.pruneExpired()
+            if (n > 0) {
+                resetPagedData()
+                checkState()
+            }
+            onDone(n)
         }
     }
 

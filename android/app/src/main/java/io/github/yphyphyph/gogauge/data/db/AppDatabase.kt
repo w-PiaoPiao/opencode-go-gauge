@@ -21,7 +21,7 @@ import java.time.Instant
         UsageChartEntity::class,
         QuotaSnapshotEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -217,6 +217,77 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v6 → v7 主键改账号内唯一 — 对齐桌面 db.py 迁移 8.
+         *
+         * 原形状 usg_id TEXT PRIMARY KEY 是全局唯一, 而 usg_id 只是 provider 侧的
+         * 记录 id —— 不同账号的 id 空间一旦重叠, 后同步账号的记录会撞上先同步账号
+         * 的同号行 (upsert 保留原归属 / 直接漏插): 前者用量凭空不变, 后者数据缺失.
+         * 改为 (account_id, usg_id) 复合主键即可根治. 旧形状下 usg_id 已全局唯一,
+         * 故 (account_id, usg_id) 天然唯一, 搬运无需去重.
+         *
+         * 注意: 建表 SQL 必须与 Room 按实体生成的 schema 逐字一致 (列序 = 实体字段
+         * 序, 不带 DEFAULT, 主键为表级约束), 否则迁移校验会 IllegalStateException.
+         * 旧表的索引随 DROP TABLE 消失, 必须就地重建.
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `usage_records_new` (" +
+                        "`usg_id` TEXT NOT NULL, " +
+                        "`created_at` TEXT NOT NULL, " +
+                        "`model` TEXT NOT NULL, " +
+                        "`provider` TEXT, " +
+                        "`input_tokens` INTEGER NOT NULL, " +
+                        "`output_tokens` INTEGER NOT NULL, " +
+                        "`reasoning_tokens` INTEGER NOT NULL, " +
+                        "`cache_read_tokens` INTEGER NOT NULL, " +
+                        "`cache_write_5m_tokens` INTEGER NOT NULL, " +
+                        "`cache_write_1h_tokens` INTEGER NOT NULL, " +
+                        "`cost_raw` INTEGER NOT NULL, " +
+                        "`cost_usd` REAL NOT NULL, " +
+                        "`key_id` TEXT, " +
+                        "`session_id` TEXT, " +
+                        "`plan` TEXT, " +
+                        "`synced_at` TEXT NOT NULL, " +
+                        "`account_id` INTEGER NOT NULL, " +
+                        "`local_date` TEXT, " +
+                        "PRIMARY KEY(`account_id`, `usg_id`))"
+                )
+                db.execSQL(
+                    "INSERT INTO `usage_records_new` (" +
+                        "`usg_id`, `created_at`, `model`, `provider`, `input_tokens`, `output_tokens`, " +
+                        "`reasoning_tokens`, `cache_read_tokens`, `cache_write_5m_tokens`, `cache_write_1h_tokens`, " +
+                        "`cost_raw`, `cost_usd`, `key_id`, `session_id`, `plan`, `synced_at`, `account_id`, `local_date`) " +
+                        "SELECT `usg_id`, `created_at`, `model`, `provider`, `input_tokens`, `output_tokens`, " +
+                        "`reasoning_tokens`, `cache_read_tokens`, `cache_write_5m_tokens`, `cache_write_1h_tokens`, " +
+                        "`cost_raw`, `cost_usd`, `key_id`, `session_id`, `plan`, `synced_at`, `account_id`, `local_date` " +
+                        "FROM `usage_records`"
+                )
+                db.execSQL("DROP TABLE `usage_records`")
+                db.execSQL("ALTER TABLE `usage_records_new` RENAME TO `usage_records`")
+                // 索引属于旧表, 随 DROP 一起消失: 就地重建 (同桌面迁移 8 的说明)
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_usage_time` ON `usage_records` (`created_at`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_usage_session` ON `usage_records` (`session_id`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_usage_account_time`" +
+                        " ON `usage_records` (`account_id`, `created_at`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_usage_account_localdate`" +
+                        " ON `usage_records` (`account_id`, `local_date`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_usage_account_model`" +
+                        " ON `usage_records` (`account_id`, `model`)"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -224,7 +295,10 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "gousage.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(
+                        MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
+                        MIGRATION_5_6, MIGRATION_6_7,
+                    )
                     .build().also { instance = it }
             }
     }

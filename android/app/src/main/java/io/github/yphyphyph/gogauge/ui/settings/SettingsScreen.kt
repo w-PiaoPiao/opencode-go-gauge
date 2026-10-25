@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
+import io.github.yphyphyph.gogauge.data.repository.PrunePreview
 import io.github.yphyphyph.gogauge.BuildConfig
 import io.github.yphyphyph.gogauge.ui.MainViewModel
 import io.github.yphyphyph.gogauge.ui.Strings
@@ -182,6 +183,25 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 trailing = {
                     TextButton(onClick = { confirmDialog = ConfirmAction.FullSync }, enabled = !vm.progress.running) {
                         Text(s.startFullSync, fontSize = 13.sp)
+                    }
+                },
+            )
+            // 「按同步范围清理」: 同步不再自动删数据, 这是唯一的删除入口
+            // (desktop 6995669 同语义; 先预演, 再二次确认)
+            SetRow(
+                s.pruneNow,
+                s.pruneNowDesc,
+                trailing = {
+                    TextButton(onClick = {
+                        vm.prunePreview { preview ->
+                            when {
+                                preview == null -> toast(s.pruneNone)
+                                preview.count == 0 -> toast(s.pruneEmpty)
+                                else -> confirmDialog = ConfirmAction.Prune(preview)
+                            }
+                        }
+                    }) {
+                        Text(s.pruneNow, fontSize = 13.sp)
                     }
                 },
             )
@@ -486,6 +506,14 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
             is ConfirmAction.DeleteUser ->
                 Quad(s.deleteTitle, s.deleteUserConfirm.replace("{name}", action.name), s.confirm, true)
             ConfirmAction.FullSync -> Quad(s.fullSync, s.fullSyncConfirm, s.startSync, false)
+            is ConfirmAction.Prune -> Quad(
+                s.pruneNow,
+                s.pruneConfirm
+                    .replace("%1", action.preview.windowDays.toString())
+                    .replace("%2", action.preview.cutoff)
+                    .replace("%3", Fmt.int(action.preview.count)),
+                s.pruneNow, true,
+            )
         }
         AlertDialog(
             onDismissRequest = { confirmDialog = null },
@@ -505,6 +533,9 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                             toast(s.userDeleted)
                         }
                         ConfirmAction.FullSync -> vm.startSync("full")
+                        is ConfirmAction.Prune -> {
+                            vm.pruneExpired { n -> toast(s.pruneDone.replace("%1", Fmt.int(n))) }
+                        }
                     }
                 }) {
                     Text(okText, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
@@ -522,6 +553,7 @@ private sealed interface ConfirmAction {
     data class LogoutUser(val id: Int, val name: String) : ConfirmAction
     data class DeleteUser(val id: Int, val name: String) : ConfirmAction
     data object FullSync : ConfirmAction
+    data class Prune(val preview: PrunePreview) : ConfirmAction
 }
 
 private data class Quad<T>(val a: T, val b: T, val c: T, val d: Boolean)

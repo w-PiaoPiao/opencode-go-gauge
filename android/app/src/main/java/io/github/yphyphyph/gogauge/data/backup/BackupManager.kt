@@ -50,9 +50,12 @@ object BackupManager {
                 w.write(CSV_HEADER.joinToString(","))
                 w.write("\n")
                 for (acc in accounts) {
-                    var offset = 0
+                    // keyset 游标 (created_at, usg_id): created_at 不唯一, OFFSET
+                    // 分页会漏行/重行 -> 备份静默丢记录 (desktop export parity)
+                    var afterCreated: String? = null
+                    var afterUsgId: String? = null
                     while (true) {
-                        val page = db.usageDao().exportPage(acc.id, EXPORT_PAGE, offset)
+                        val page = db.usageDao().exportPage(acc.id, EXPORT_PAGE, afterCreated, afterUsgId)
                         if (page.isEmpty()) break
                         for (r in page) {
                             w.write(
@@ -64,8 +67,9 @@ object BackupManager {
                             )
                             w.write("\n")
                         }
-                        offset += page.size
                         if (page.size < EXPORT_PAGE) break
+                        afterCreated = page.last().createdAt
+                        afterUsgId = page.last().usgId
                     }
                 }
             }
@@ -123,13 +127,15 @@ object BackupManager {
         }
         val records = mutableListOf<BackupRecord>()
         for (acc in accounts) {
-            var offset = 0
+            var afterCreated: String? = null
+            var afterUsgId: String? = null
             while (true) {
-                val page = db.usageDao().exportPage(acc.id, EXPORT_PAGE, offset)
+                val page = db.usageDao().exportPage(acc.id, EXPORT_PAGE, afterCreated, afterUsgId)
                 if (page.isEmpty()) break
                 records += page.map { r -> r.toBackup() }
-                offset += page.size
                 if (page.size < EXPORT_PAGE) break
+                afterCreated = page.last().createdAt
+                afterUsgId = page.last().usgId
             }
         }
         val body = json.encodeToString(
@@ -182,30 +188,47 @@ object BackupManager {
         var recordsAdded = 0
         val nowIso = Instant.now().toString()
         file.records.chunked(EXPORT_PAGE).forEach { chunk ->
-            val entities = chunk.map { r ->
-                UsageRecordEntity(
-                    usgId = r.usgId,
-                    createdAt = r.createdAt,
-                    model = r.model,
-                    provider = r.provider,
-                    inputTokens = r.inputTokens,
-                    outputTokens = r.outputTokens,
-                    reasoningTokens = r.reasoningTokens,
-                    cacheReadTokens = r.cacheReadTokens,
-                    cacheWrite5mTokens = r.cacheWrite5mTokens,
-                    cacheWrite1hTokens = r.cacheWrite1hTokens,
-                    costUsd = r.costUsd,
-                    keyId = r.keyId,
-                    sessionId = r.sessionId,
-                    plan = r.plan,
-                    syncedAt = nowIso,
-                    accountId = idRemap[r.accountId] ?: 1,
-                    localDate = r.localDate,
-                )
+            val entities = chunk.mapNotNull { r ->
+                usgIdOrEmpty(r)?.let { usgId ->
+                    val mapped = idRemap[r.accountId]
+                    // accountId 无法映射 (指向备份中不存在的账号, 手改/损坏文件):
+                    // 跳过, 不回退写入账号 1 —— 那可能是不相干账号, 造成记录错归
+                    // (desktop import_backup parity)
+                    mapped ?: return@mapNotNull null
+                    UsageRecordEntity(
+                        usgId = usgId,
+                        createdAt = r.createdAt,
+                        model = r.model,
+                        provider = r.provider,
+                        inputTokens = r.inputTokens,
+                        outputTokens = r.outputTokens,
+                        reasoningTokens = r.reasoningTokens,
+                        cacheReadTokens = r.cacheReadTokens,
+                        cacheWrite5mTokens = r.cacheWrite5mTokens,
+                        cacheWrite1hTokens = r.cacheWrite1hTokens,
+                        costUsd = r.costUsd,
+                        keyId = r.keyId,
+                        sessionId = r.sessionId,
+                        plan = r.plan,
+                        syncedAt = nowIso,
+                        accountId = mapped,
+                        localDate = r.localDate,
+                    )
+                }
             }
-            recordsAdded += db.usageDao().insertUsageRecords(entities, entities.first().accountId)
+            // 逐行按自身 accountId 归属; 判重以每行自己的 (account_id, usg_id) 为准.
+            // 批级参数仅为签名兼容 (桌面同款), 全部行已带显式归属, 传 0 不参与写入
+            if (entities.isNotEmpty()) {
+                recordsAdded += db.usageDao().insertUsageRecords(entities, entities.first().accountId)
+            }
         }
         return ImportResult(accountsAdded, recordsAdded, accountsSkipped)
+    }
+
+    /** 缺主键/时间的记录无法入库 (local_date 由 created_at 派生), 返回 null 防脏行。 */
+    private fun usgIdOrEmpty(r: BackupRecord): String? {
+        if (r.usgId.isEmpty() || r.createdAt.isEmpty()) return null
+        return r.usgId
     }
 
     private fun UsageRecordEntity.toBackup() = BackupRecord(

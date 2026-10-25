@@ -309,14 +309,16 @@ class CommandCodeApi(private val client: OkHttpClient = OpenCodeApi.defaultClien
         /** (used, cap, resetAt ms) -> 百分比窗口 (desktop _parse_window_percent parity)。 */
         private fun windowFrom(label: String, used: Double, cap: Double, resetMs: Long, nowMs: Long): QuotaWindow {
             val usedPct = if (cap > 0) (used / cap * 100.0).coerceIn(0.0, 100.0) else 0.0
+            // 接口未给 resetAt 时留空: epoch 充数会让界面显示「即将重置」—— 与
+            // 真实状态 (接口没给重置时间) 自相矛盾 (desktop commandcode_api parity)
             return QuotaWindow(
                 label = label,
                 used = usedPct,
                 remaining = Math.round((100.0 - usedPct) * 10) / 10.0,
                 total = cap,
                 unit = "$",
-                resetAt = fmtIso(if (resetMs > 0) resetMs else nowMs),
-                resetInSec = ((resetMs / 1000) - nowMs / 1000).toInt().coerceAtLeast(0),
+                resetAt = fmtIso(resetMs).takeIf { resetMs > 0 } ?: "",
+                resetInSec = if (resetMs > 0) ((resetMs - nowMs) / 1000).toInt().coerceAtLeast(0) else 0,
             )
         }
 
