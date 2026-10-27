@@ -387,7 +387,10 @@ def _agg_cached(key: tuple, producer: Callable[[], Any]) -> Any:
 
 
 def _dashboard_aggregates(
-    active_id: Optional[int], period: str, exclude_models: list[str]
+    active_id: Optional[int],
+    period: str,
+    exclude_models: list[str],
+    peak_split: bool = False,
 ) -> dict[str, Any]:
     """dashboard 里由 usage 数据聚合出来的部分 (可缓存); 易变字段由调用方实时合并."""
     # 显式透传 active_id: 各聚合内部若收到 None 会各自重跑
@@ -408,8 +411,9 @@ def _dashboard_aggregates(
         "trend": daily30,  # 用量趋势 (费用/请求双轴)
         "today_trend": db.today_trend(active_id),  # 今日 24 小时趋势
         # models 始终全量: 环形图需保留被排除模型 (图例删除线 + 点击即加回),
-        # 排行由前端按 excluded_models 过滤; 排除只作用于 totals/trend 聚合
-        "models": db.model_stats(period, active_id),
+        # 排行由前端按 excluded_models 过滤; 排除只作用于 totals/trend 聚合.
+        # 峰谷分档只影响统计页 —— 首页请求不带 peak_split, 模型构成保持整条.
+        "models": db.model_stats(period, active_id, peak_split=peak_split),
     }
 
 
@@ -1024,6 +1028,10 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         token = db.get_token()
         # 统计页「排除模型」筛选 (模型用量环形图图例点击): 可重复查询参数
         exclude_models = _parse_exclude_models(query)
+        # 峰谷分档只作用于统计页: 前端在统计页请求带 peak_split=1, 首页不带.
+        # 设置关闭时即使请求带了也按不拆处理 —— 开关始终是最终闸门.
+        want_split = query.get("peak_split", ["0"])[0] in ("1", "true", "True")
+        peak_split = bool(want_split and db.peak_split_enabled())
         # quota 使用缓存 (按账号分槽), 过期时后台刷新, 不阻塞 dashboard 响应
         active_id = db.get_active_account_id()
         _ensure_quota_async(active_id)
@@ -1034,8 +1042,11 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         # 本地日期); quota / progress / sync / account / 汇率 / 服务器时间等易变
         # 字段一律在下面每次实时计算 —— 整包缓存会让配额条卡死、同步进度不动.
         agg = _agg_cached(
-            (active_id, "dashboard", range_param, tuple(exclude_models), _agg_day()),
-            lambda: _dashboard_aggregates(active_id, period, exclude_models),
+            # 末位是这次请求实际生效的峰谷口径: 首页 (False) 与统计页 (True)
+            # 必须分开缓存, 否则后到的请求会命中另一页的聚合结果
+            (active_id, "dashboard", range_param, tuple(exclude_models), _agg_day(),
+             peak_split),
+            lambda: _dashboard_aggregates(active_id, period, exclude_models, peak_split),
         )
         _json_response(
             handler,
@@ -1327,9 +1338,15 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         except ValueError:
             days = 30
         active_id = db.get_active_account_id()
+        # 趋势图只出现在统计页: 跟随设置即可 (首页不拉这个端点)
+        peak_split = db.peak_split_enabled()
         payload = _agg_cached(
-            (active_id, "model_trend", days, _agg_day()),
-            lambda: {"ok": True, **db.model_daily_stats(days, active_id)},
+            # 峰谷分档开关进键: 切换设置后必须立刻按新口径重算, 不能命中旧缓存
+            (active_id, "model_trend", days, _agg_day(), peak_split),
+            lambda: {
+                "ok": True,
+                **db.model_daily_stats(days, active_id, peak_split=peak_split),
+            },
         )
         _json_response(handler, payload)
         return

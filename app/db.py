@@ -1449,6 +1449,7 @@ _DEFAULT_SETTINGS = {
     "autostart": False,  # 开机自启 (macOS LaunchAgent; 仅 mac 打包版生效)
     "show_accounts_panel": False,  # 账户总览面板开关 (侧边栏入口显隐)
     "chart_animation": False,  # 图表动画开关 (默认关闭: 低配设备上每次刷新重建动画是掉帧大头)
+    "ds_peak_split": False,  # 统计页把 DeepSeek flash 拆成「峰」「谷」两条 (纯展示, 不动数据)
 }
 
 
@@ -1719,7 +1720,8 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                             current[key] = max(1, min(int(val), 3650))
                         except (TypeError, ValueError):
                             pass
-                elif key in ("auto_sync", "autostart", "show_accounts_panel", "chart_animation"):
+                elif key in ("auto_sync", "autostart", "show_accounts_panel", "chart_animation",
+                             "ds_peak_split"):
                     current[key] = bool(payload[key])
                 else:
                     current[key] = payload[key]
@@ -1928,14 +1930,115 @@ _PERIOD_CLAUSES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek 峰谷分档 —— 纯展示层: 只改统计口径里的模型标签, 不动任何落库数据
+#
+# DeepSeek-V4.1-Flash 自 2026-09-10 起两档计价: 北京时间周一至周五
+# 09:00-12:00 / 14:00-18:00 为高峰, 其余时段 (含周末与法定节假日全天) 为空闲,
+# 空闲价恰为高峰价的一半. 实测本地账单逐条吻合, 且区间左闭右开 (11:59:59 仍按
+# 高峰价, 12:00:07 已切空闲价); 调休补班的周六实测仍按空闲价, 故判定只看
+# 「周一到周五 + 非法定节假日」, 不看调休上班日.
+#
+# 设置 ds_peak_split 打开时, 只有统计页的请求会拆 (model_stats 的 peak_split
+# 参数), 首页模型构成保持整条; 关闭时行为与改动前完全一致.
+#
+# created_at / time_bucket 都按 UTC 存. 北京峰窗换成 UTC 后是固定的
+# 01:00-03:59 / 06:00-09:59, 且窗口内 UTC 日期与北京日期相同, 因此直接做
+# 字符串比较即可 —— 不要改成每行 datetime(+8h) 再多次 strftime, 那会让
+# 30 天聚合慢 2~6 倍.
+#
+# 计价起始门: 北京时间 2026-09-10 00:00 = UTC 2026-09-09 16:00, 更早的记录
+# 不分档 (当时还是单一价, 拆成峰/谷会误导).
+# ---------------------------------------------------------------------------
+
+# 国务院办公厅《关于2026年部分节假日安排的通知》放假日 (调休上班的周末不在其中).
+# 起始门之后的窗口只落在 2026 年; 新增年份需补表, 没有表的年份只按周末判定.
+_CN_HOLIDAYS: dict[int, set[str]] = {
+    2026: {
+        "2026-01-01", "2026-01-02", "2026-01-03",
+        *[f"2026-02-{d:02d}" for d in range(15, 24)],
+        "2026-04-04", "2026-04-05", "2026-04-06",
+        *[f"2026-05-{d:02d}" for d in range(1, 6)],
+        "2026-06-19", "2026-06-20", "2026-06-21",
+        "2026-09-25", "2026-09-26", "2026-09-27",
+        *[f"2026-10-{d:02d}" for d in range(1, 8)],
+    },
+}
+
+_PEAK_SUFFIX = {"peak": " 峰", "off": " 谷"}
+
+# 计价起始 (UTC): 北京时间 2026-09-10 00:00
+_PRICING_START_UTC_DATE = "2026-09-09"
+_PRICING_START_UTC_HHMM = "16:00"
+
+# 参与分档的模型: 两档计价只适用于 flash 主线, 按精确名称 (可带 provider/ 前缀)
+# 匹配. 不用「名字里含 deepseek + flash」的宽匹配 —— 那会把计费规则未经验证的
+# 实验变体 (如 deepseek-v4-flash-vision-exp) 也拆开. 新增变体需显式加进列表.
+_DS_FLASH_MODELS = ("deepseek-v4.1-flash", "deepseek-v4-flash")
+_DS_FLASH_SQL = "(" + " OR ".join(
+    f"lower(model) = '{m}' OR lower(model) LIKE '%/{m}'" for m in _DS_FLASH_MODELS
+) + ")"
+
+
+def peak_split_enabled() -> bool:
+    """峰谷分档开关 (设置页「数据」卡片)."""
+    return get_settings().get("ds_peak_split") is True
+
+
+def _peak_tier_sql(col: str) -> tuple[str, list[str]]:
+    """返回 (tier 表达式, 绑定参数): DeepSeek flash 命中档位 -> 'peak'/'off', 其余 ''.
+
+    峰窗按 UTC 硬编码 (北京 09:00-12:00 / 14:00-18:00 = UTC 01:00-03:59 /
+    06:00-09:59); 窗口内 UTC 日期与北京日期相同, 星期/节假日直接用 UTC 日期.
+    计价起始门之前的记录返回 '' (不拆).
+
+    参数是法定节假日日期列表, 必须按 SQL 文本出现的顺序绑定 —— 表达式放在
+    SELECT 列表时, 这些参数要排在 WHERE 的参数之前.
+    """
+    holidays = sorted({d for days in _CN_HOLIDAYS.values() for d in days})
+    placeholders = ", ".join("?" * len(holidays))
+    date = f"substr({col}, 1, 10)"
+    hhmm = f"substr({col}, 12, 5)"
+    since_start = (
+        f"({date} > '{_PRICING_START_UTC_DATE}'"
+        f" OR ({date} = '{_PRICING_START_UTC_DATE}' AND {hhmm} >= '{_PRICING_START_UTC_HHMM}'))"
+    )
+    in_window = (
+        f"({hhmm} BETWEEN '01:00' AND '03:59'"
+        f" OR {hhmm} BETWEEN '06:00' AND '09:59')"
+    )
+    expr = (
+        f"CASE WHEN {_DS_FLASH_SQL} AND {since_start} THEN"
+        f" (CASE WHEN {in_window}"
+        f" AND strftime('%w', {col}) BETWEEN '1' AND '5'"
+        f" AND {date} NOT IN ({placeholders})"
+        f" THEN 'peak' ELSE 'off' END) ELSE '' END"
+    )
+    return expr, holidays
+
+
+def _split_model_label(model: str, tier: Any) -> str:
+    """档位 -> 展示用模型名 (非分档模型原样返回)."""
+    suffix = _PEAK_SUFFIX.get(str(tier or ""))
+    return f"{model}{suffix}" if suffix else str(model)
+
+
 def _exclude_clause(exclude_models: Optional[list[str]]) -> tuple[str, list[str]]:
     """「排除模型」SQL 片段: 参数化 NOT IN, 去空白去重后为空则返回空串.
 
     模型名来自 HTTP 查询参数, 一律走占位符, 不拼接进 SQL 文本.
+
+    峰谷分档打开时, 统计页图例给出的名称带「 峰 / 谷」后缀; 排除是模型级动作
+    (总量/趋势无法按档拆), 这里剥掉后缀还原成库里的真实模型名, 否则
+    `model NOT IN ('xxx 峰')` 一条也匹配不上, 点图例等于没反应.
     """
     cleaned: list[str] = []
     for m in exclude_models or ():
         m = (m or "").strip()
+        for suffix in _PEAK_SUFFIX.values():
+            if m.endswith(suffix) and len(m) > len(suffix):
+                m = m[:-len(suffix)]
+                break
         if m and m not in cleaned:
             cleaned.append(m)
     if not cleaned:
@@ -2057,17 +2160,25 @@ def _charts_stats_select(
     account_id: int,
     group_by_model: bool = False,
     exclude_models: Optional[list[str]] = None,
+    peak_split: bool = False,
 ):
     """charts 聚合查询, 输出列与明细统计查询同形.
 
     注意: charts 的 tokens_in 已包含缓存读 (tokensTotal = tokensIn + tokensOut,
     cacheReadInputTokens 为其中一部分), 因此 total_input = SUM(tokens_in) 而
     非叠加 cache_read, 否则重复计数.
+
+    peak_split 为真时按 15 分钟桶的起始时刻判 DeepSeek 峰谷并拆成两组
+    (桶边界与整点/半点对齐, 09:00/14:00 这类切换点不会跨桶).
     """
     where, params = _charts_period_where(period, account_id, exclude_models)
+    tier_expr, holidays = _peak_tier_sql("time_bucket") if (group_by_model and peak_split) else ("", [])
     if group_by_model:
+        tier_col = f"{tier_expr} AS tier," if tier_expr else ""
+        group_by = "GROUP BY model, tier" if tier_expr else "GROUP BY model"
         sql = f"""
             SELECT model,
+                   {tier_col}
                    SUM(requests) AS request_count,
                    0 AS session_count,
                    SUM(tokens_in) AS total_input_tokens,
@@ -2078,7 +2189,7 @@ def _charts_stats_select(
                    SUM(tokens_out) AS total_output_tokens,
                    SUM(total_cost) AS total_cost_usd
             FROM usage_charts {where}
-            GROUP BY model
+            {group_by}
             ORDER BY SUM(tokens_in + tokens_out) DESC
         """
     else:
@@ -2094,7 +2205,8 @@ def _charts_stats_select(
                    SUM(total_cost) AS total_cost_usd
             FROM usage_charts {where}
         """
-    return sql, params
+    # tier 表达式放在 SELECT 里, 其占位符 (法定节假日) 必须先于 WHERE 参数绑定
+    return sql, [*holidays, *params]
 
 
 def _use_charts_stats(aid: Optional[int]) -> bool:
@@ -2106,16 +2218,29 @@ def _use_charts_stats(aid: Optional[int]) -> bool:
     )
 
 
-def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[dict[str, Any]]:
+def model_stats(
+    period: str = "30d",
+    account_id: Optional[int] = None,
+    peak_split: Optional[bool] = None,
+) -> list[dict[str, Any]]:
     """按模型聚合: 请求数 / 会话数 / 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 命中率.
 
     始终返回全量模型 (不支持排除): 统计页环形图需要保留被排除模型以便图例点击加回,
     排行的排除过滤由调用侧按 excluded_models 处理.
+
+    ds_peak_split 打开且 peak_split 为真时, DeepSeek flash 模型按请求发生时刻
+    拆成「<模型名> 峰 / <模型名> 谷」两行 (其余模型不受影响); 关闭时行为不变.
+    peak_split=None 跟随设置, True/False 显式覆盖 —— 首页与统计页共用本函数,
+    由调用方 (dashboard 接口) 决定这次请求是否按档展示.
+
+    拆分行 (峰/谷) 的 session_count 是**各档内**的去重会话数: 会话跨档会在两行
+    各计一次, 不能相加; 全量会话数看 totals().
     """
     aid = _resolve_account_id(account_id)
+    split = peak_split_enabled() if peak_split is None else bool(peak_split)
     if _use_charts_stats(aid):
         rows = get_db().execute(
-            *_charts_stats_select(period, aid, group_by_model=True)
+            *_charts_stats_select(period, aid, group_by_model=True, peak_split=split)
         ).fetchall()
         result: list[dict[str, Any]] = []
         for r in rows:
@@ -2124,7 +2249,8 @@ def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[d
             hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
             result.append(
                 {
-                    "model": r["model"],
+                    "model": _split_model_label(r["model"], r["tier"] if split else ""),
+                    "base_model": r["model"],
                     "request_count": int(r["request_count"] or 0),
                     "session_count": 0,
                     "total_input_tokens": int(r["total_input_tokens"] or 0),
@@ -2140,9 +2266,13 @@ def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[d
         return result
     where, params = _period_where(period, aid)
     where, params = _account_filter(where, params, aid)
+    tier_expr, holidays = _peak_tier_sql("created_at") if split else ("", [])
+    tier_col = f"{tier_expr} AS tier," if tier_expr else ""
+    group_by = "GROUP BY model, tier" if tier_expr else "GROUP BY model"
     rows = get_db().execute(
         f"""
         SELECT model,
+               {tier_col}
                COUNT(*) AS request_count,
                COUNT(DISTINCT CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id END) AS session_count,
                SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
@@ -2154,11 +2284,12 @@ def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[d
                SUM(cost_usd) AS total_cost_usd
         FROM usage_records
         {where}
-        GROUP BY model
+        {group_by}
         ORDER BY (SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens)
                   + SUM(output_tokens)) DESC
         """,
-        params,
+        # tier 表达式在 SELECT 列表, 其占位符 (法定节假日) 要先于 WHERE 参数绑定
+        [*holidays, *params],
     ).fetchall()
     result: list[dict[str, Any]] = []
     for r in rows:
@@ -2167,7 +2298,8 @@ def model_stats(period: str = "30d", account_id: Optional[int] = None) -> list[d
         hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
         result.append(
             {
-                "model": r["model"],
+                "model": _split_model_label(r["model"], r["tier"] if split else ""),
+                "base_model": r["model"],
                 "request_count": int(r["request_count"]),
                 "session_count": int(r["session_count"] or 0),
                 "total_input_tokens": int(r["total_input_tokens"] or 0),
@@ -2292,44 +2424,57 @@ def model_daily_stats(
     days: int = 30,
     account_id: Optional[int] = None,
     exclude_models: Optional[list[str]] = None,
+    peak_split: Optional[bool] = None,
 ) -> dict[str, Any]:
     """近 N 天「日 × 模型」用量 (统计页模型堆叠趋势图数据源).
 
     返回 {"days": [连续日期...], "series": [{"model", "input", "output", "cost"}]},
     每个序列与 days 等长、缺日补 0 (与 daily_stats 同一连续日期口径);
     始终返回全量模型 —— top 截取与排序由调用侧按当前维度决定 (换维度顺序会变).
+
+    ds_peak_split 打开且 peak_split 为真时与 model_stats 同口径: DeepSeek flash
+    按天 × 档位拆成「峰 / 谷」两条序列, 保证两张图的模型名与配色能对上.
     """
     days = max(1, min(days, 365))
     aid = _resolve_account_id(account_id)
     ex_sql, ex_params = _exclude_clause(exclude_models)
     ex_and = f" AND {ex_sql}" if ex_sql else ""
+    split = peak_split_enabled() if peak_split is None else bool(peak_split)
     if _use_charts_stats(aid):
+        tier_expr, holidays = _peak_tier_sql("time_bucket") if split else ("", [])
+        tier_col = f"{tier_expr} AS tier," if tier_expr else ""
+        group_by = "GROUP BY local_date, model, tier" if tier_expr else "GROUP BY local_date, model"
         rows = get_db().execute(
             f"""
             SELECT local_date AS date, model,
+                   {tier_col}
                    SUM(tokens_in) AS input_tokens,
                    SUM(tokens_out) AS output_tokens,
                    SUM(total_cost) AS cost_usd
             FROM usage_charts
             WHERE account_id = ?
               AND local_date >= date('now', 'localtime', ?){ex_and}
-            GROUP BY local_date, model
+            {group_by}
             """,
-            (aid, f"-{days} days", *ex_params),
+            (*holidays, aid, f"-{days} days", *ex_params),
         ).fetchall()
     else:
+        tier_expr, holidays = _peak_tier_sql("created_at") if split else ("", [])
+        tier_col = f"{tier_expr} AS tier," if tier_expr else ""
+        group_by = "GROUP BY local_date, model, tier" if tier_expr else "GROUP BY local_date, model"
         rows = get_db().execute(
             f"""
             SELECT local_date AS date, model,
+                   {tier_col}
                    SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS input_tokens,
                    SUM(output_tokens) AS output_tokens,
                    SUM(cost_usd) AS cost_usd
             FROM usage_records
             WHERE account_id = ?
               AND local_date >= date('now', 'localtime', ?){ex_and}
-            GROUP BY local_date, model
+            {group_by}
             """,
-            (aid, f"-{days} days", *ex_params),
+            (*holidays, aid, f"-{days} days", *ex_params),
         ).fetchall()
     bounds = get_db().execute(
         "SELECT date('now', 'localtime', ?) AS start_date, date('now', 'localtime') AS end_date",
@@ -2347,10 +2492,13 @@ def model_daily_stats(
         i = idx.get(r["date"])
         if i is None:  # 边界外的行 (时区/手工改库): 不参与
             continue
-        model = str(r["model"] or "unknown")
+        base = str(r["model"] or "unknown")
+        model = _split_model_label(base, r["tier"] if split else "")
         s = series.get(model)
         if s is None:
             s = series[model] = {
+                "model": model,
+                "base_model": base,
                 "input": [0] * len(day_list),
                 "output": [0] * len(day_list),
                 "cost": [0.0] * len(day_list),
@@ -2360,7 +2508,7 @@ def model_daily_stats(
         s["cost"][i] = round(float(s["cost"][i]) + float(r["cost_usd"] or 0), 6)
     return {
         "days": day_list,
-        "series": [{"model": m, **v} for m, v in series.items()],
+        "series": list(series.values()),
     }
 
 
