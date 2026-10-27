@@ -102,6 +102,8 @@ const I18N = {
     hmPeak: "峰值", hmCurStreak: "当前连续", hmMaxStreak: "最长连续", hmDay: "天", hmDayOne: "天",
     trendHintGap: "30 天（{n} 天前无数据）",
     exportCsv: "导出 CSV", exportCsvDesc: "用量明细导出为表格文件（时间/模型/Token/费用）",
+    peakSplit: "区分 DeepSeek 峰谷", peakSplitDesc: "统计页把 deepseek flash 拆成「峰」「谷」两条；只改统计口径，不动同步数据",
+    peakSplitOn: "已按峰谷拆分（统计页）", peakSplitOff: "已恢复为整模型统计",
     exportBackup: "导出 JSON 备份", exportBackupDesc: "账号（不含凭证）与全部用量记录打包 (.json.gz)，与移动端互通",
     importBackup: "导入备份", importBackupDesc: "从 JSON 备份合并数据；凭证不可迁移，恢复后需重新登录",
     exportDone: "已导出", exportFailed: "导出失败", importDone: "导入完成，新增 %1 条记录",
@@ -205,6 +207,8 @@ const I18N = {
     hmPeak: "Peak", hmCurStreak: "Current streak", hmMaxStreak: "Longest streak", hmDay: "days", hmDayOne: "day",
     trendHintGap: "30 days (no data for the first {n} days)",
     exportCsv: "Export CSV", exportCsvDesc: "Export usage records as a spreadsheet (time/model/tokens/cost)",
+    peakSplit: "Split DeepSeek peak / off-peak", peakSplitDesc: "Stats page lists deepseek flash as peak and off-peak entries; display only, synced data is untouched",
+    peakSplitOn: "Peak / off-peak split enabled (stats page)", peakSplitOff: "Back to whole-model stats",
     exportBackup: "Export JSON Backup", exportBackupDesc: "Pack accounts (no tokens) and all usage records (.json.gz), interchangeable with mobile",
     importBackup: "Import Backup", importBackupDesc: "Merge data from a JSON backup; tokens can't migrate — re-login after restore",
     exportDone: "Exported", exportFailed: "Export failed", importDone: "Imported, %1 new records",
@@ -537,12 +541,14 @@ const DASH_CACHE_MAX = 8;  // 客户端复用条目上限 (账号/口径/排除�
 const dashCache = new Map();  // dashboardQuery() -> {at, data}: 最近成功的同口径响应
 let dashInflight = null;  // 在途 dashboard 请求控制器: 口径变化时取消, 不再白等/白渲染
 let dashRendered = { page: "", key: "" };  // 已渲染到界面上的 (页面, 口径)
-/* dashboard 查询串: 统计页携带模型排除项 (环形图图例点击 → 全局联动), 其他页不带 */
+/* dashboard 查询串: 统计页携带模型排除项 (环形图图例点击 → 全局联动), 其他页不带。
+   峰谷分档同理只在统计页生效: 首页的模型构成保持整条, 开关仍由服务端把关。 */
 function dashboardQuery() {
   const params = new URLSearchParams();
   params.set("range", state.page === "stats" ? state.statsRange : state.range);
   if (state.page === "stats") {
     state.excludedModels.forEach((m) => params.append("exclude_models", m));
+    params.set("peak_split", "1");
   }
   return params.toString();
 }
@@ -831,8 +837,20 @@ function onModelLegendClick(evt, item, legend) {
   legendReload();
 }
 function toggleModelExclusion(model) {
-  if (state.excludedModels.has(model)) state.excludedModels.delete(model);
-  else state.excludedModels.add(model);
+  const key = modelBaseKey(model);
+  if (state.excludedModels.has(key)) state.excludedModels.delete(key);
+  else state.excludedModels.add(key);
+}
+/* 峰谷分档打开时统计页的模型名带「 峰 / 谷」后缀, 但排除是模型级动作:
+   后端按真实模型名排除整条链路 (总量/趋势无法按档拆), 所以判定与记录一律
+   归并到 base_model, 否则点「…峰」只会隐藏一半、总量却整模型扣减. */
+function modelBaseKey(m) {
+  if (m && typeof m === "object" && m.base_model) return m.base_model;
+  const s = String((m && typeof m === "object" ? m.model : m) || "");
+  return s.replace(/ (峰|谷)$/, "");
+}
+function isModelExcluded(m) {
+  return state.excludedModels.has(modelBaseKey(m));
 }
 function chartModel(models) {
   const canvas = $("mr-chart");
@@ -880,11 +898,11 @@ function chartModel(models) {
     },
   });
   // models 始终为全量: 重建后按排除集恢复隐藏态 (扇区隐藏 + 图例项删除线), 演示与数据同源
-  top.forEach((m, i) => { if (state.excludedModels.has(m.model)) cModel.toggleDataVisibility(i); });
+  top.forEach((m, i) => { if (isModelExcluded(m)) cModel.toggleDataVisibility(i); });
   cModel.update();
   cModel.resize();
   // 排行只列参与统计的模型 (与总卡/构成/趋势口径一致)
-  const visible = sorted.filter((m) => !state.excludedModels.has(m.model));
+  const visible = sorted.filter((m) => !isModelExcluded(m));
   $("mr-list").innerHTML = visible.length ? visible.slice(0, 3).map((m, i) => `
     <div class="mr-item"><span class="mr-rank">#${i + 1}</span>
     <span class="mr-name">${modelIcon(m.model)}<span class="txt">${escapeHtml(m.model)}</span></span>
@@ -919,11 +937,11 @@ function chartModelTrend(rangeModels) {
   // 配色基准 (两图同模型同色), 环形图没有的模型按自身用量续后。排除集即时过滤
   const order = new Map();
   [...(rangeModels || [])]
-    .filter((m) => !state.excludedModels.has(m.model))
+    .filter((m) => !isModelExcluded(m))
     .sort((a, b) => modelDimValue(b, dim) - modelDimValue(a, dim))
     .forEach((m, i) => order.set(m.model, i));
   const ranked = modelTrendData.series
-    .filter((s) => !state.excludedModels.has(s.model))
+    .filter((s) => !isModelExcluded(s))
     .map((s) => ({ s, total: (s[dim] || []).reduce((a, b) => a + b, 0) }))
     .filter((x) => x.total > 0)
     .sort((a, b) => {
@@ -935,7 +953,7 @@ function chartModelTrend(rangeModels) {
   // 前置空档不画 (与用量趋势同口径): 从可见模型里第一天有量的开始, 中间/末尾的 0 保留.
   // 判定用 input/output/cost 任一非零 —— 与当前维度无关, 换维度时起点不会跳;
   // 排除集是用户显式过滤, 所以只看可见模型 (top6 截取属展示细节, 不参与判定)
-  const visSeries = modelTrendData.series.filter((s) => !state.excludedModels.has(s.model));
+  const visSeries = modelTrendData.series.filter((s) => !isModelExcluded(s));
   const firstOn = modelTrendData.days.findIndex((_, i) => visSeries.some((s) =>
     (s.input?.[i] || 0) + (s.output?.[i] || 0) + (s.cost?.[i] || 0) > 0));
   const from = firstOn > 0 ? firstOn : 0;
@@ -1407,6 +1425,7 @@ async function renderSettings() {
   if (macApp) $("set-autostart").checked = settings.autostart === true;
   $("set-overview-panel").checked = settings.show_accounts_panel === true;
   $("set-chart-anim").checked = settings.chart_animation === true;
+  $("set-peak-split").checked = settings.ds_peak_split === true;
     await fetchAccounts();  // 账户列表 (失败不阻塞其他设置渲染)
   } catch (e) { toast(e.message || t("loadFailed"), "err"); }
 }
@@ -1971,6 +1990,23 @@ function bindEvents() {
     applyChartAnimation(e.target.checked);
     rerenderCharts();
   });
+  // DeepSeek 峰谷分档: 纯展示口径开关 —— 只重算聚合, 不触碰任何落库数据
+  $("set-peak-split").addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    state.settings.ds_peak_split = on;
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ ds_peak_split: on }) });
+    } catch (err) {
+      e.target.checked = !on;
+      state.settings.ds_peak_split = !on;
+      toast(String(err.message || err), "err");
+      return;
+    }
+    toast(t(on ? "peakSplitOn" : "peakSplitOff"));
+    // force: 客户端复用表按「口径」缓存, 模型名集合变了必须整体作废
+    await loadDashboard(false, true);
+    loadModelTrend();
+  });
   // 账户操作已合并进「OpenCode 账户」卡片内的账号行 (relogin/logout 为行级动作)
   // 多用户: 顶栏切换器 + 设置页账户列表
   $("tb-login").addEventListener("click", () => toggleUserMenu());
@@ -2058,6 +2094,7 @@ let APP_VERSION = "";  // 后端版本号 (app/__init__.py), 唯一版本源
   $("set-auto-sync").checked = state.settings.auto_sync !== false;
   $("set-overview-panel").checked = state.settings.show_accounts_panel === true;
   $("set-chart-anim").checked = state.settings.chart_animation === true;
+  $("set-peak-split").checked = state.settings.ds_peak_split === true;
   applyOverviewPanel(state.settings.show_accounts_panel === true);
   applyChartAnimation(state.settings.chart_animation === true);
   await checkState();
