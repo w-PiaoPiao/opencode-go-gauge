@@ -50,6 +50,27 @@ ADD_DATA_DIRS = ("app/web", "assets")
 PLATFORM_ALIASES = {"windows": "windows", "win": "windows", "macos": "macos", "darwin": "macos"}
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 强制成 UTF-8, 避免中文日志在非 UTF-8 控制台上崩掉构建。
+
+    Windows runner 的控制台编码是 cp1252 (中文系统为 cp936), ``print`` 中文会抛
+    UnicodeEncodeError —— v2.2.2b 首次 Windows CI 实证: ``GoGauge.exe`` 已构建成功,
+    却在最后一行「完成」上 exit 1, 整条发布链因此失败。``errors='replace'`` 保证极端
+    情况 (输出被重定向到非 UTF-8 图形界面) 也只损失字形, 不改变退出码与产物。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):  # 已关闭/不可重配置的流: 保持原样
+            pass
+
+
+_force_utf8_stdio()
+
+
 class BuildError(RuntimeError):
     """构建前置条件/后处理失败 (打印可读原因并以非 0 退出)。"""
 
