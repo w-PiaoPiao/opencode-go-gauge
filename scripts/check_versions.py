@@ -43,6 +43,25 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 强制成 UTF-8, 避免中文输出在非 UTF-8 控制台上崩掉校验。
+
+    Windows runner 的控制台编码是 cp1252 (中文系统 cp936), ``print`` 中文会抛
+    UnicodeEncodeError —— v2.2.2b 的 ci 实证: 版本号全部打印正常、结论也正确, 却在
+    最后一行「OK: 版本一致性校验通过」上 exit 1, 让 windows-latest 的 pytest 之外的
+    版本校验 job 判失败。``errors='replace'`` 保证极端情况只损失字形, 不改退出码。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):  # 已关闭/不可重配置的流: 保持原样
+            pass
+
+
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+[a-z]?$")
 # tag 允许: v2.2.2 / 2.2.2 / v2.2.1d / v2.2.1d-macos / v2.2.1d-windows /
 #          v2.2.1d-android / v2.2.1d-harmony
@@ -192,6 +211,7 @@ def _emit(lines: list[str], stream) -> None:  # type: ignore[no-untyped-def]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    _force_utf8_stdio()
     parser = argparse.ArgumentParser(
         description="GoGauge 三平台版本一致性校验（preflight 用，只读）",
         formatter_class=argparse.RawDescriptionHelpFormatter,

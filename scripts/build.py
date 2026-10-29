@@ -68,8 +68,6 @@ def _force_utf8_stdio() -> None:
             pass
 
 
-_force_utf8_stdio()
-
 
 class BuildError(RuntimeError):
     """构建前置条件/后处理失败 (打印可读原因并以非 0 退出)。"""
@@ -259,6 +257,7 @@ def build(platform: str, repo: Optional[str] = None) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    _force_utf8_stdio()
     parser = argparse.ArgumentParser(description="GoGauge PyInstaller 统一打包入口")
     parser.add_argument("--platform", required=True, choices=("windows", "macos", "win", "darwin"),
                         help="目标平台 (必须与当前运行平台一致)")
