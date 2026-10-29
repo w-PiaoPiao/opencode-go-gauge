@@ -38,6 +38,19 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+
+def _force_utf8_stdio() -> None:
+    """stdout/stderr 强制 UTF-8 (Windows 控制台 cp1252 打印中文会抛 UnicodeEncodeError)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 # 允许从任意 cwd 运行: 规则/节假日/起始门以 app/db.py 为唯一事实来源 (I9);
 # 导入失败 (脚本被单独拷走) 时退回本文件内的等价常量, parity 测试会校验两者一致.
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -247,6 +260,7 @@ def _fmt_ratio(cost: float, theo: float) -> str:
 
 
 def main() -> None:
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser(description="按 DeepSeek 峰谷口径切分本地用量")
     ap.add_argument("--db", help="gousage.db 路径 (默认自动探测数据最多的库)")
     ap.add_argument("--model", default="deepseek-v4.1-flash",
