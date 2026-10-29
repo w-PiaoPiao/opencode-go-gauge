@@ -439,7 +439,13 @@ def test_unknown_api_route_returns_json_404(http):
 
 
 def test_nul_byte_static_path_returns_400(http):
-    """GET /%00 曾让 os.path.realpath 抛 ValueError -> 空响应 + traceback."""
+    """GET /%00 曾让 os.path.realpath 抛 ValueError -> 空响应 + traceback.
+
+    要守住的是「返回一个正常的错误响应、不崩」: 具体状态码随平台而定 ——
+    POSIX 上 NUL 会让 realpath 抛 ValueError, 服务端映射成 400; Windows 的路径
+    API 直接把它当非法/不存在的名字, 走 404 分支 (v2.2.2b ci 实证)。两者都不是
+    「空响应 + traceback」, 所以这里接受 400 或 404。
+    """
     from http.client import HTTPConnection
 
     port = int(http.rsplit(":", 1)[1])
@@ -447,8 +453,8 @@ def test_nul_byte_static_path_returns_400(http):
     try:
         conn.request("GET", "/%00")
         resp = conn.getresponse()
-        resp.read()
-        assert resp.status == 400
+        body = resp.read()
+        assert resp.status in (400, 404), (resp.status, body[:120])
     finally:
         conn.close()
 

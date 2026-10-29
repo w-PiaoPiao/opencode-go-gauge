@@ -27,6 +27,12 @@ def _run(*args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess[str]:
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        # 子进程 (scripts/check_versions.py) 入口就强制 UTF-8 输出, 这里必须显式按
+        # UTF-8 解码: 否则 Windows 上 text=True 会用 locale (cp1252/cp936) 去解码中文,
+        # 直接抛 UnicodeDecodeError / 拿到 None (v2.2.2b ci 实证: 6 个用例在
+        # windows-latest 上连环失败)。errors=replace 保证断言失败时能看到可读信息。
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
 
