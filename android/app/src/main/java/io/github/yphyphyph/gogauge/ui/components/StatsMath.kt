@@ -2,6 +2,7 @@ package io.github.yphyphyph.gogauge.ui.components
 
 import io.github.yphyphyph.gogauge.data.model.DailyStat
 import io.github.yphyphyph.gogauge.data.model.ModelTrendSeries
+import kotlin.math.floor
 
 /**
  * 统计页纯计算 — 对齐桌面 app/web/app.js 的 c866440 / aa389b7 / df22e97 语义.
@@ -23,6 +24,46 @@ fun dailyMetricValue(d: DailyStat, metric: String): Double = when (metric) {
     "cost" -> d.totalCostUsd
     "requests" -> d.requestCount.toDouble()
     else -> (d.totalInputTokens + d.totalOutputTokens + d.totalReasoningTokens).toDouble()
+}
+
+/**
+ * 热力图分档锚点 — desktop heatmapBreaks parity.
+ *
+ * 只在「有量日」上取分位: 窗口里大量 0 值会把分位压到 0 附近, 取出来的锚点毫无区分度.
+ * p50 / p75 / p90 三个锚点切出 4 个非零档 —— 一个异常峰值再高也只占满色那一档,
+ * 不会像「按峰值线性归一」那样把其余日子全挤进最低档 (档 3 甚至整档空置).
+ * 有量日不足 8 天时分位不稳, 退回等比四档.
+ */
+fun heatmapBreaks(values: List<Double>): List<Double> {
+    val on = values.filter { it > 0 }.sorted()
+    if (on.size < 8) {
+        val max = maxOf(values.maxOrNull() ?: 0.0, 1.0)
+        return listOf(max * 0.25, max * 0.5, max * 0.75)
+    }
+    fun q(p: Double): Double {
+        val i = p * (on.size - 1)
+        val lo = floor(i).toInt()
+        val hi = minOf(lo + 1, on.size - 1)
+        return on[lo] + (on[hi] - on[lo]) * (i - lo)
+    }
+    return listOf(q(0.5), q(0.75), q(0.9))
+}
+
+/**
+ * 逐日档位 0..4 — desktop levelOf parity.
+ *
+ * 0 = 无数据; 1..4 按 [heatmapBreaks] 的锚点递增. 有请求但该指标为 0 的日子
+ * (免费模型 / 空转请求) 落最低可见档 1 —— 它不属于「没数据」, 画成空白会丢信息.
+ */
+fun heatmapLevels(values: List<Double>, active: List<Boolean>): List<Int> {
+    val breaks = heatmapBreaks(values)
+    return values.mapIndexed { i, v ->
+        when {
+            v > 0 -> minOf(4, 1 + breaks.count { v > it })
+            active.getOrElse(i) { false } -> 1
+            else -> 0
+        }
+    }
 }
 
 /**

@@ -102,4 +102,46 @@ class StatsMathTest {
         )
         assertEquals(1, modelTrendLeadIndex(listOf("d0", "d1"), costOnly, emptySet()))
     }
+
+    @Test
+    fun `heatmap levels split by quantiles of active days`() {
+        // 8 个有量日 → 走分位口径. 锚点 p50=4.5 / p75=6.25 / p90=34.9
+        val values = listOf(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 100.0)
+        val breaks = heatmapBreaks(values)
+        assertEquals(4.5, breaks[0], 1e-9)
+        assertEquals(6.25, breaks[1], 1e-9)
+        assertEquals(34.9, breaks[2], 1e-9)
+        assertEquals(
+            listOf(1, 1, 1, 1, 2, 2, 3, 4),
+            heatmapLevels(values, List(values.size) { true }),
+        )
+    }
+
+    @Test
+    fun `heatmap levels fall back to even steps when active days are few`() {
+        // 只有 3 个有量日: 分位不稳, 退回按峰值等比 (7.5 / 15 / 22.5)
+        val values = listOf(0.0, 0.0, 10.0, 20.0, 30.0)
+        val active = listOf(false, false, true, true, true)
+        assertEquals(listOf(7.5, 15.0, 22.5), heatmapBreaks(values))
+        assertEquals(listOf(0, 0, 2, 3, 4), heatmapLevels(values, active))
+    }
+
+    @Test
+    fun `active day with zero metric is not painted as empty`() {
+        // 有请求但该指标为 0 (免费模型 / 空转请求): 落最低可见档, 不是空档
+        val values = listOf(0.0, 0.0, 0.0)
+        val active = listOf(true, false, false)
+        assertEquals(listOf(1, 0, 0), heatmapLevels(values, active))
+    }
+
+    @Test
+    fun `single huge peak does not flatten the rest into the lowest tier`() {
+        // 旧口径: floor(v / 1e9 * 4) + 1 会把所有小量日压成 1 档, 且第 3 档整档空置
+        val typical = listOf(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0)
+        val values = typical + 1_000.0
+        val levels = heatmapLevels(values, List(values.size) { true })
+        assertEquals(4, levels.last())
+        assertEquals(setOf(1, 2, 3, 4), levels.toSet())
+        assertEquals(values.size, levels.count { it > 0 })
+    }
 }
