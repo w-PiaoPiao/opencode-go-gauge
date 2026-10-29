@@ -51,6 +51,7 @@
 - **Usage overview**: cache hit rate / hit amount / total tokens (incl. cache hits) / requests / cost / sessions
 - **Today's trend**: 24-hour input / output bar chart
 - **Usage stats**: token breakdown (input / output / reasoning / cache read / cache write / sessions), model usage donut + ranking, cost / requests / total tokens triple-line trend; click a donut legend item to exclude / restore a model (hidden items get a strikethrough) — KPI cards, token breakdown, ranking and trend all follow
+- **DeepSeek peak / off-peak split**: an opt-in toggle on the Stats page (off by default) that lists DeepSeek flash models as two rows, peak vs. off-peak (Beijing working days 09:00–12:00 and 14:00–18:00 are peak; all other hours, weekends and public holidays are off-peak). Display-only: synced data and billed cost are untouched
 - **Session history**: per-session aggregation of requests / input / output / reasoning / total tokens / cost, paginated
 - **Usage records**: request-level detail with pagination and model filtering, incl. model / key-name columns
 - **Multi-account support**: user management (add / switch / rename / remove / re-login), usage isolated per account, key-name column on records & sessions; accounts can come from OpenCode or Command Code (with source badge)

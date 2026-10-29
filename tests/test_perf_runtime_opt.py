@@ -23,17 +23,11 @@ import sys
 import textwrap
 import threading
 import time
-import types
 from pathlib import Path
 
 import pytest
 
-# app.auth/app.main 顶层 import webview (仅打包环境可用): 与 test_auth_login.py
-# 一致, 先补一个占位模块再导入被测模块.
-_webview_stub = types.ModuleType("webview")
-_webview_stub.windows = []
-sys.modules.setdefault("webview", _webview_stub)
-
+# webview 占位模块由 tests/conftest.py 统一注入 (无 pywebview 的 CI 也能导入).
 from app import auth, main  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +37,69 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def _isolated_login_log(tmp_path, monkeypatch):
     """登录日志写临时目录: 不污染公共 /tmp/gousage_login.log."""
     monkeypatch.setattr(auth, "_LOG_FILE", str(tmp_path / "gousage_login.log"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    """每个用例全程把 db 数据目录钳在 tmp —— 用户真实库零接触 (安全红线).
+
+    源码运行的默认数据目录在 macOS 上是
+    ``~/Library/Application Support/GoGauge/data``, 那里是用户真实登录库;
+    任何忘记切目录的 db 调用都会跑迁移/读写真实凭证.
+    双保险: set_data_dir (override) + GOUSAGE_DATA (环境变量).
+    """
+    from app import db as _db
+
+    monkeypatch.setenv("GOUSAGE_DATA", str(tmp_path))
+    _db.close_db()
+    _db.set_data_dir(str(tmp_path))
+    try:
+        yield
+    finally:
+        try:
+            _db.close_db()
+        finally:
+            _db.set_data_dir(None)
+
+
+@pytest.fixture(autouse=True)
+def _drain_main_background_threads():
+    """兜底: 本文件假跑 main() 后不允许残留 main/sync 后台线程污染后续文件.
+
+    正常情况下 sync/quota 都已被替身; 这里再按线程名有界等待一次 (≤5s),
+    确认本文件对全局线程状态零副作用.
+    """
+    yield
+    watched = ("gousage-sync", "gousage-quota", "gousage-update-dl", "gousage-login-arm")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        alive = [t for t in threading.enumerate() if t.name in watched and t.is_alive()]
+        if not alive:
+            return
+        time.sleep(0.05)
+
+
+@pytest.fixture(autouse=True)
+def _reset_main_module_globals():
+    """假跑 main() 会写模块级引用 (token/窗口/UDP 回调): 用例后复位, 防跨用例污染."""
+    yield
+    main._auth_token_ref["token"] = ""
+    main._main_win_ref["win"] = None
+    main._udp_show_ref["fn"] = None
+    main._quitting = False
+
+
+@pytest.fixture(autouse=True)
+def _fresh_bounded_worker():
+    """每个用例前后重置 auth 的有界 worker: 挂死用例不能污染后续用例.
+
+    P2-10 之后 _bounded_call 使用单例 worker, 一旦某个用例把它挂在原生调用上,
+    后续用例都会快速拿到 None. 测试侧用 _reset_bounded_worker 换一个新 worker
+    (卡死的旧线程会随 release 自行退出).
+    """
+    auth._reset_bounded_worker()
+    yield
+    auth._reset_bounded_worker()
 
 
 @pytest.fixture(scope="module")
@@ -62,6 +119,10 @@ def pystray_mod():
     try:
         import pystray  # noqa: PLC0415  仅托盘用例需要; 不涉及 Icon/窗口创建
     except Exception as exc:  # noqa: BLE001  无图形栈时后端探测的抛法不止一种
+        # 只有无头 Linux CI 才允许跳过: Windows/macOS 上 pystray 导入失败是真的
+        # 回归, 必须让用例红, 不能被笼统的 skip 掩盖.
+        if not sys.platform.startswith("linux"):
+            raise
         pytest.skip(f"本机没有可用的 pystray 后端 ({type(exc).__name__}: {exc}); 托盘用例需要真实 pystray")
 
     return pystray
@@ -387,8 +448,8 @@ def test_watcher_url_read_is_bounded(monkeypatch):
             time.sleep(0.01)
     finally:
         w.stop()
-        # 先确认轮询线程退出, 再放掉被超时抛弃的 worker (避免它把 URL 送回
-        # 已经超时的调用方, 让观测出现竞态)
+        # 先确认轮询线程退出, 再放掉卡在原生等待里的单例 worker (避免它把 URL
+        # 送回已经超时的调用方, 让观测出现竞态)
         if w._thread is not None:
             w._thread.join(timeout=2.0)
         release.set()
@@ -396,6 +457,40 @@ def test_watcher_url_read_is_bounded(monkeypatch):
     assert calls["url"] >= 1, "假窗口的 URL 读取没被调用, 用例没走到目标路径"
     assert calls["bounded"] >= 2, "URL 读取未经 _bounded_call: macOS 上会永久挂起"
     assert len(ticks) >= 2, f"监听线程卡住未继续推进 (ticks={len(ticks)})"
+
+
+def test_bounded_call_reuses_single_worker_thread(monkeypatch):
+    """P2-10: 超时不再每次新建线程 —— 挂 N 次后 worker 线程数不增长 (≤1).
+
+    旧实现每次 `_bounded_call` 都起一个新线程, 超时即丢弃 (不可回收): 主线程
+    被占住时登录监听按轮询频率累积线程. 新实现是单例 worker: 超时丢弃任务,
+    worker 忙碌期间新调用直接返回 None, 线程数恒定.
+    """
+    release = threading.Event()
+
+    def hang():
+        release.wait(30)
+
+    worker_name = "gousage-bounded-call"
+    before = {t.ident for t in threading.enumerate()}
+    try:
+        for _ in range(5):
+            started = time.monotonic()
+            assert auth._bounded_call(hang, 0.02) is None
+            assert time.monotonic() - started < 1.0, "超时没有及时返回"
+        new_workers = [
+            t for t in threading.enumerate()
+            if t.name == worker_name and t.ident not in before
+        ]
+        assert len(new_workers) <= 1, f"每次超时都新建线程: {len(new_workers)} 个"
+    finally:
+        release.set()
+
+    # release 后单例 worker 应自行回到空闲 (下一单可正常执行); worker 完成挂住
+    # 的那一单需要一点时间, 轮询等待而不是立刻断言
+    assert _wait_until(lambda: auth._bounded_call(lambda: "ok", 0.5) == "ok", timeout=2.0), (
+        "单例 worker 在原生调用返回后没有恢复可用"
+    )
 
 
 def test_bounded_call_returns_none_on_hang():
@@ -409,3 +504,343 @@ def test_bounded_call_returns_none_on_hang():
         release.set()
     assert got is None
     assert elapsed < 1.0
+
+
+# ---------------------------------------------------------------------------
+# ⑤ open_login 并发锁 + I4 dashboard token (用假 webview 跑真实 main())
+# ---------------------------------------------------------------------------
+# 不启动 GUI: `webview.create_window` / `webview.start` / 托盘 / 单实例全部替身,
+# 只验证 main() 的装配逻辑 (登录窗并发与 dashboard URL 的 token 传递).
+
+
+from types import SimpleNamespace
+
+
+class _FakeEvent:
+    def __init__(self) -> None:
+        self.handlers: list = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+    def fire(self, *args) -> None:  # pragma: no cover - 用例不触发原生事件
+        for handler in list(self.handlers):
+            handler(*args)
+
+
+class _FakeWindow:
+    def __init__(self, title: str, url: str) -> None:
+        self.title = title
+        self.url = url
+        self.destroyed = False
+        self.loaded_urls: list[str] = []
+        self.js_calls: list[str] = []
+        self.events = SimpleNamespace(
+            closed=_FakeEvent(),
+            shown=_FakeEvent(),
+            restored=_FakeEvent(),
+            closing=_FakeEvent(),
+            loaded=_FakeEvent(),
+        )
+        self.native = SimpleNamespace(Handle=None)
+        self.x = self.y = 0
+        self.width, self.height = 1280, 840
+
+    # pywebview Window 的最小替身 (登录链路只用到这些)
+    def get_current_url(self):
+        return self.url
+
+    def get_cookies(self):
+        return []
+
+    def clear_cookies(self):
+        pass
+
+    def load_url(self, url):
+        self.loaded_urls.append(url)
+        self.url = url
+        _FakeAppState.calls.append(("load_url", self.title))
+
+    def load_html(self, html, base):
+        pass
+
+    def evaluate_js(self, script):
+        self.js_calls.append(script)
+        _FakeAppState.calls.append(("evaluate_js", self.title))
+        return None
+
+    def create_file_dialog(self, *args, **kwargs):  # pragma: no cover
+        return None
+
+    def show(self):
+        _FakeAppState.calls.append(("show", self.title))
+
+    def restore(self):
+        pass
+
+    def hide(self):
+        _FakeAppState.calls.append(("hide", self.title))
+
+    def minimize(self):
+        pass
+
+    def destroy(self):
+        self.destroyed = True
+        if self in _FakeAppState.windows:
+            _FakeAppState.windows.remove(self)
+
+
+class _FakeAppState:
+    windows: list = []
+    calls: list = []
+
+
+class _StubLoginWatcher:
+    """替代真实 LoginWatcher: 只记录创建/引用关系, 不轮询."""
+
+    created: list = []
+
+    def __init__(self, win, provider, on_success, on_cancelled=None,
+                 stale_fps=None, baseline_value=None):
+        self.win = win
+        self.provider = provider
+        self.on_success = on_success
+        self.done = False
+        self._thread = None
+        self.started = False
+        _StubLoginWatcher.created.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        pass
+
+    def seconds_since_tick(self) -> float:
+        return 0.0
+
+
+class _FakeApp:
+    def __init__(self) -> None:
+        self.dashboard_url = ""
+        self.auth_token_calls: list[str] = []
+        self.logs: list[str] = []
+        self.open_login = None
+        # main() 启动路径 (已登录但空库) 会触发首次全量同步: 测试里必须替身掉,
+        # 否则会真的起后台线程拿假 token 打网络, 并把 server._sync_state 置为
+        # running=True 污染后续 HTTP 缓存用例 (T6 实测跨文件污染).
+        self.sync_calls: list[str] = []
+
+
+def _build_fake_app(monkeypatch, tmp_path, clear_delay: float = 0.0) -> _FakeApp:
+    """把 main() 的外部依赖全部替身化并真实跑一遍 main() (不启动 GUI)."""
+    app = _FakeApp()
+    _FakeAppState.windows = []
+    _FakeAppState.calls = []
+    _StubLoginWatcher.created = []
+
+    def _create_window(title, url="", **kwargs):
+        win = _FakeWindow(title, url)
+        _FakeAppState.windows.append(win)
+        if title == main.APP_TITLE:
+            app.dashboard_url = url
+        return win
+
+    monkeypatch.setattr(main.webview, "windows", _FakeAppState.windows)
+    monkeypatch.setattr(main.webview, "create_window", _create_window)
+    monkeypatch.setattr(main.webview, "start", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_ensure_single_instance", lambda: None)
+    monkeypatch.setattr(main, "_ensure_single_instance_mac", lambda: None)
+    monkeypatch.setattr(main, "_screen_workarea_logical", lambda: (1440, 900))
+    monkeypatch.setattr(main, "_screen_visible_frame_logical", lambda: (1440, 900))
+    monkeypatch.setattr(main, "_install_macos_app_delegate", lambda: None)
+    monkeypatch.setattr(main, "_log_runtime_banner", lambda: None)
+    # 固定成"非 Windows 非 macOS"分支: 登录窗装配走纯 Python 路径, 不依赖宿主
+    # 平台, 也不会拉起 macOS 的登录页看门狗线程 (那是真实 GUI 行为, 测试不跑).
+    monkeypatch.setattr(main, "_IS_MAC", False)
+    monkeypatch.setattr(main, "_IS_WIN", False)
+    monkeypatch.setattr(main.https_ca, "install", lambda: None)
+    monkeypatch.setattr(main.TrayIcon, "start", lambda self: False)
+    monkeypatch.setattr(main, "LoginWatcher", _StubLoginWatcher)
+    monkeypatch.setattr(main, "_mlog", app.logs.append)
+
+    def _fake_sync(mode: str) -> None:
+        # 替身而非真跑: main() 启动路径/登录成功路径都会触发首次全量同步,
+        # 真跑会起 gousage-sync 线程拿假 token 打网络, 并残留 _sync_state
+        # running=True 污染后续 HTTP 缓存用例 (T2/T6 实测跨文件假红).
+        app.sync_calls.append(mode)
+        _FakeAppState.calls.append(("sync", mode))
+
+    monkeypatch.setattr(main.server, "sync_all_async", _fake_sync)
+
+    def _slow_clear(provider, win=None):
+        if clear_delay:
+            time.sleep(clear_delay)
+        return 0
+
+    monkeypatch.setattr(main, "clear_provider_cookies", _slow_clear)
+
+    import app.server as _server  # noqa: PLC0415
+
+    monkeypatch.setattr(_server, "start_server", lambda *a, **k: ("127.0.0.1", 12345))
+    monkeypatch.setattr(
+        _server,
+        "set_login_callback",
+        lambda cb: setattr(app, "open_login", cb),
+    )
+    from app import db as _db  # noqa: PLC0415
+
+    # 数据目录在调用 main() **之前**切到 tmp: main() 里 db.get_db() 会跑迁移,
+    # 绝不能落到用户真实数据目录 (源码运行默认是 ~/Library/Application Support/...).
+    # 保持到用例结束, 由文件级 _isolated_data_dir fixture 统一复位.
+    _db.set_data_dir(str(tmp_path))
+    main.main()
+    assert app.open_login is not None, "main() 未注册登录回调"
+    return app
+
+
+def test_main_dashboard_url_passes_http_token_in_fragment(monkeypatch, tmp_path):
+    """I4: main 生成随机 token 交给 server, 并用 URL fragment 传给 WebView.
+
+    fragment 不进 HTTP 请求行/Referer; 日志里不得出现含 token 的 URL.
+    """
+    import app.server as _server  # noqa: PLC0415
+
+    tokens: list[str] = []
+    monkeypatch.setattr(_server, "set_auth_token", tokens.append, raising=False)
+
+    app = _build_fake_app(monkeypatch, tmp_path)
+
+    assert app.dashboard_url.startswith("http://127.0.0.1:12345/")
+    assert "#" in app.dashboard_url, "dashboard URL 必须用 fragment 传 token"
+    token = app.dashboard_url.split("#", 1)[1]
+    assert len(token) >= 20, "HTTP token 太短 (需要 secrets.token_urlsafe(32) 量级)"
+    assert tokens == [token], "server.set_auth_token 必须收到同一个 token"
+
+    assert main._auth_token_ref["token"] == token
+    assert main.WindowApi().get_auth_token() == token, "js_api 兜底拿不到 token"
+    assert app.sync_calls == [], "空库启动不应触发全量同步 (根因: 替身未生效)"
+
+    joined = "\n".join(app.logs)
+    assert token not in joined, "日志泄漏了 HTTP token"
+    assert "127.0.0.1:12345/#" not in joined, "日志打印了含 token 的完整 URL"
+
+
+def test_login_success_writes_back_captured_target_account(monkeypatch, tmp_path):
+    """P1-1 端到端: 经真实 main() 走一遍 open_login -> 登录中途切号 -> on_success.
+
+    目标账号在 open_login 发起时固化; 回调时活跃账号已变成 B, 新凭证仍必须写回 A.
+    """
+    from app import db as _db  # noqa: PLC0415
+
+    _db.set_data_dir(str(tmp_path))
+    try:
+        aid_a = _db.add_account("__Host-console_session=OLD_A", "wsA", switch=True)
+        aid_b = _db.add_account("__Host-console_session=B", "wsB", switch=True)
+        _db.set_active_account(aid_a)
+    finally:
+        _db.close_db()
+
+    app = _build_fake_app(monkeypatch, tmp_path)
+    startup_syncs = list(app.sync_calls)  # 已登录但空库: main() 启动路径会触发一次
+
+    # I1: db.save_token 支持 account_id, 这里用等价替身避免依赖真实凭证加密: 模拟"db.save_token 支持 account_id 且按 id 写入"
+    def _fake_save(token, workspace_id="Default", provider="opencode", account_id=None):
+        if account_id is None:
+            return False
+        conn = _db.get_db()
+        conn.execute(
+            "UPDATE accounts SET token = ?, token_fp = ?, provider = ?,"
+            " workspace_id = ?, updated_at = ? WHERE id = ?",
+            (token, _db._token_fp(token), provider, workspace_id,
+             "2026-10-27T00:00:00Z", int(account_id)),
+        )
+        conn.commit()
+        _db._invalidate_cred_cache(int(account_id))
+        return True
+
+    monkeypatch.setattr(_db, "save_token", _fake_save)
+
+    app.open_login("relogin", "opencode")
+    assert _StubLoginWatcher.created, "open_login 没有启动 watcher"
+    watcher = _StubLoginWatcher.created[-1]
+
+    # OAuth 期间用户在主窗口切到 B (数据目录仍是本用例的 tmp, 与 main() 一致)
+    _db.set_active_account(aid_b)
+    _db.close_db()
+
+    watcher.on_success("__Host-console_session=NEW_A", "wsA", "opencode")
+
+    try:
+        assert _db.get_account_credentials(aid_a)[0] == "__Host-console_session=NEW_A"
+        assert _db.get_account_credentials(aid_b)[0] == "__Host-console_session=B"
+        assert _db.get_active_account_id() == aid_b
+        assert app.sync_calls == startup_syncs + ["full"], (
+            "登录成功必须先触发首次全量同步 (且只多触发一次)"
+        )
+    finally:
+        _db.close_db()
+
+
+def test_login_success_syncs_before_ui_wiring(monkeypatch, tmp_path):
+    """P2-10 端到端: 登录成功后先触发全量同步, 再隐藏登录窗/刷新主窗."""
+    app = _build_fake_app(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "_persist_login_credential", lambda *a, **k: True)
+
+    app.open_login("relogin", "opencode")
+    watcher = _StubLoginWatcher.created[-1]
+    watcher.on_success("__Host-console_session=NEW", "ws", "opencode")
+
+    assert app.sync_calls == ["full"], "登录成功必须恰好触发一次首次全量同步"
+    calls = _FakeAppState.calls
+    assert ("sync", "full") in calls
+    assert ("hide", "GoGauge - Login") in calls
+    sync_index = calls.index(("sync", "full"))
+    hide_index = calls.index(("hide", "GoGauge - Login"))
+    assert sync_index < hide_index, "全量同步必须排在 UI 收尾之前"
+    assert any(
+        "gousageOnLoginSuccess" in script for script in _FakeAppState.windows[-1].js_calls
+    ) or any(
+        "gousageOnLoginSuccess" in script
+        for win in _FakeAppState.windows for script in win.js_calls
+    )
+
+
+def test_login_success_failure_keeps_login_window_and_skips_sync(monkeypatch, tmp_path):
+    """P2-10: 凭证保存失败 -> 不隐藏登录窗、不刷新、不触发同步, 并尽量提示."""
+    app = _build_fake_app(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "_persist_login_credential", lambda *a, **k: False)
+
+    app.open_login("relogin", "opencode")
+    watcher = _StubLoginWatcher.created[-1]
+    watcher.on_success("__Host-console_session=NEW", "ws", "opencode")
+
+    calls = _FakeAppState.calls
+    assert app.sync_calls == [], "保存失败不得触发全量同步"
+    assert ("sync", "full") not in calls, "保存失败不得触发全量同步"
+    assert ("hide", "GoGauge - Login") not in calls, "保存失败必须保持登录窗打开"
+    assert any("credential NOT saved" in line for line in app.logs)
+    assert any(
+        "gousageOnLoginFailed" in script
+        for win in _FakeAppState.windows for script in win.js_calls
+    ), "保存失败应尽力通知前端"
+
+
+def test_open_login_concurrent_click_creates_single_window(monkeypatch, tmp_path):
+    """P2-10: 快速双击 (并发进入 open_login) 只能产生一个登录窗口/一个 watcher."""
+    app = _build_fake_app(monkeypatch, tmp_path, clear_delay=0.3)
+
+    first = threading.Thread(target=app.open_login, args=("relogin", "opencode"))
+    first.start()
+    time.sleep(0.05)  # 让第一次调用进入 _prepare_login_session (慢路径)
+
+    started = time.monotonic()
+    app.open_login("relogin", "opencode")  # 第二次点击: 非阻塞锁应直接忽略
+    second_elapsed = time.monotonic() - started
+    first.join(timeout=5.0)
+
+    login_windows = [w for w in _FakeAppState.windows if w.title == "GoGauge - Login"]
+    assert len(login_windows) == 1, f"并发双击创建了 {len(login_windows)} 个登录窗口"
+    assert len(_StubLoginWatcher.created) == 1, "并发双击创建了多个 watcher"
+    assert second_elapsed < 0.2, "重复点击没有被非阻塞锁立即忽略"

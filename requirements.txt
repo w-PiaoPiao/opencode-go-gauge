@@ -1,3 +1,6 @@
+# 运行时依赖 (源码运行/开发用; 打包构建请用对应平台的全量 lock:
+# requirements-macos.lock.txt / requirements-windows.lock.txt —— lock 里已含
+# pyinstaller 与全部传递依赖, 保证产物可复现).
 pywebview>=6.0
 pystray>=0.19
 pillow>=10.0

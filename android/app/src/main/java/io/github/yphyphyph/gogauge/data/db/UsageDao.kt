@@ -143,16 +143,19 @@ abstract class UsageDao {
                 clause = "local_date >= date(?, 'localtime') AND datetime(created_at) >= datetime(?)"
                 args = arrayOf(cycleStart, cycleStart)
             } else {
-                // 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 日历口径一致)
+                // 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 日历口径一致)。
+                // 恰好 30 个日历日 (今天-29 … 今天), 与 daily_stats 的 30 个点同源 (I10)
                 clause = "local_date >= date('now', 'localtime', ?)"
-                args = arrayOf("-${MonthlyCycle.PERIOD_DAYS} days")
+                args = arrayOf("-${MonthlyCycle.PERIOD_DAYS - 1} days")
             }
             "all" -> return null to emptyArray()
             else -> {
                 val days = Regex("^(\\d+)d$").find(period)?.groupValues?.get(1)?.toIntOrNull()?.coerceIn(1, 365) ?: 30
-                // "7d"/"30d" 等: 日历日口径 (与 daily_stats/today_trend 一致), 走索引
+                // "7d"/"30d" 等: 日历日口径 (与 daily_stats/today_trend 一致), 走索引。
+                // 恰好 days 个日历日 (今天-days+1 … 今天): 原先 "-N days" 含首尾共 N+1 天,
+                // 与前端「N 日」文案/totals 的 N 个日历日不一致 (desktop I10 parity)
                 clause = "local_date >= date('now', 'localtime', ?)"
-                args = arrayOf("-${days} days")
+                args = arrayOf("-${days - 1} days")
             }
         }
         return clause to args
@@ -183,9 +186,16 @@ abstract class UsageDao {
     /**
      * 「排除模型」SQL 片段 — mirrors db._exclude_clause (参数化 NOT IN, 模型名不拼进 SQL 文本).
      * 去空白去重后为空返回 null.
+     *
+     * 峰谷分档打开时统计页图例给出的是带「 峰 / 谷」后缀的名称; 排除是**模型级**动作
+     * (总量/趋势无法按档拆), 这里先剥后缀还原真实模型名 —— 否则
+     * `model NOT IN ('xxx 峰')` 一条也匹配不上, 点图例等于没反应 (desktop 同口径).
      */
     private fun excludeClause(excludeModels: Collection<String>): Pair<String?, List<String>> {
-        val cleaned = excludeModels.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val cleaned = excludeModels
+            .map { PeakSplit.stripSuffix(it) }
+            .filter { it.isNotEmpty() }
+            .distinct()
         if (cleaned.isEmpty()) return null to emptyList()
         return "model NOT IN (${cleaned.joinToString(", ") { "?" }})" to cleaned
     }
@@ -262,15 +272,16 @@ abstract class UsageDao {
                 GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
-                (listOf<Any>(accountId, "-${clamped} days") + exArgs).toTypedArray(),
+                (listOf<Any>(accountId, "-${clamped - 1} days") + exArgs).toTypedArray(),
             )
         )
         // 连续日期补 0 (desktop db.daily_stats parity): 无记录的天也占位,
-        // 避免折线/柱状图 x 轴错位跳线
+        // 避免折线/柱状图 x 轴错位跳线。恰好 clamped 个日历日 (今天-clamped+1 … 今天),
+        // 与「N 日」文案同源 (I10: 原先 clamped+1 个点, 多出最早一天)
         val byDate = rows.associateBy { it.date }
         val today = java.time.LocalDate.now()
-        val out = ArrayList<DailyStat>(clamped + 1)
-        for (i in clamped downTo 0) {
+        val out = ArrayList<DailyStat>(clamped)
+        for (i in (clamped - 1) downTo 0) {
             val key = today.minusDays(i.toLong()).toString()
             val r = byDate[key]
             if (r == null) {
@@ -338,7 +349,7 @@ abstract class UsageDao {
 
     @Query(
         """
-        SELECT local_date AS date, model,
+        SELECT local_date AS date, model, '' AS tier,
                COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS input,
                COALESCE(SUM(output_tokens), 0) AS output,
                COALESCE(SUM(cost_usd), 0) AS cost_usd
@@ -353,18 +364,59 @@ abstract class UsageDao {
      * 近 N 天「日 × 模型」原始聚合 — mirrors db.model_daily_stats 聚合行 (desktop
      * /api/model_trend): input 含缓存读/写 (与环形图 input 口径一致); 连续日期补齐与
      * series 组装在 repository 层 (与 charts 源共用同一份组装逻辑).
+     *
+     * @param peakSplit 峰谷分档: 命中 DeepSeek flash 白名单的行按档位拆成
+     *   「模型 峰」「模型 谷」两条序列 (desktop model_daily_stats peak_split parity)。
      */
-    suspend fun modelDailyStatsRows(days: Int, accountId: Int): List<ModelDailyRow> =
-        modelDailyStatsRaw(accountId, "-${days.coerceIn(1, 365)} days")
-
-    /** Per-model aggregation — mirrors db.model_stats (按账号). */
-    suspend fun modelStats(period: String, accountId: Int, cycleStart: String? = null): List<ModelStat> {
-        val (where, args) = buildWhere(period, accountId, cycleStart)
-        val rows = modelStatsRaw(
+    suspend fun modelDailyStatsRows(
+        days: Int,
+        accountId: Int,
+        peakSplit: Boolean = false,
+    ): List<ModelDailyRow> {
+        val clamped = days.coerceIn(1, 365)
+        // 恰好 N 个日历日 (今天-N+1 … 今天), 与「N 日」文案同源 (I10)
+        val intervalArg = "-${clamped - 1} days"
+        if (!peakSplit) return modelDailyStatsRaw(accountId, intervalArg)
+        val consts = """
+            COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS input,
+            COALESCE(SUM(output_tokens), 0) AS output,
+            COALESCE(SUM(cost_usd), 0) AS cost_usd
+        """.trimIndent()
+        val (tierExpr, holidays) = PeakSplit.tierSql("created_at")
+        // 两段式 (P2-1): 基准分支不碰 tier 表达式; 仅分档模型求值后按 (model, tier) 分组。
+        // GROUP BY 用输出别名 tier, 使表达式与节假日占位符只出现一次
+        val base = modelDailyQuery(
             SimpleSQLiteQuery(
                 """
-                SELECT model,
-                       COALESCE(COUNT(*), 0) AS request_count,
+                SELECT local_date AS date, model, '' AS tier, $consts
+                FROM usage_records
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?) AND ${PeakSplit.baseSql}
+                GROUP BY local_date, model
+                """.trimIndent(),
+                arrayOf<Any>(accountId, intervalArg),
+            )
+        )
+        val split = modelDailyQuery(
+            SimpleSQLiteQuery(
+                """
+                SELECT local_date AS date, model, $tierExpr AS tier, $consts
+                FROM usage_records
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?) AND ${PeakSplit.flashSql}
+                GROUP BY local_date, model, tier
+                """.trimIndent(),
+                // tier 表达式占位符 (法定节假日) 在 SELECT 列表, 先于 WHERE 参数绑定
+                (holidays + listOf<Any>(accountId, intervalArg)).toTypedArray(),
+            )
+        )
+        return (base + split).map { it.copy(model = PeakSplit.labelFor(it.model, it.tier)) }
+    }
+
+    @RawQuery(observedEntities = [UsageRecordEntity::class])
+    abstract suspend fun modelDailyQuery(query: SupportSQLiteQuery): List<ModelDailyRow>
+
+    /** model_stats 的聚合列 (明细源; charts 源见 ChartDao.modelStats)。 */
+    private val modelAggCols = """
+        COALESCE(COUNT(*), 0) AS request_count,
                        COALESCE(COUNT(DISTINCT CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id END), 0) AS session_count,
                        COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS total_input_tokens,
                        COALESCE(SUM(input_tokens), 0) AS uncached_input_tokens,
@@ -373,32 +425,89 @@ abstract class UsageDao {
                        COALESCE(SUM(cache_write_5m_tokens + cache_write_1h_tokens), 0) AS cache_write_tokens,
                        COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
                        COALESCE(SUM(cost_usd), 0) AS total_cost_usd
+    """.trimIndent()
+
+    /**
+     * Per-model aggregation — mirrors db.model_stats (按账号).
+     *
+     * @param peakSplit 峰谷分档 (desktop v2.2.2): 命中 DeepSeek flash 白名单的行按档位
+     *   拆成「模型 峰」「模型 谷」两条; 起始门之前的行与非分档模型保持整条。
+     *   两段式查询 (P2-1): 非分档模型走基准聚合 (完全不求值 tier 表达式), 分档模型
+     *   单独一段求值 —— 全量行上求 tier 会让聚合慢 2.6–12×。
+     */
+    suspend fun modelStats(
+        period: String,
+        accountId: Int,
+        cycleStart: String? = null,
+        peakSplit: Boolean = false,
+    ): List<ModelStat> {
+        val (where, args) = buildWhere(period, accountId, cycleStart)
+        if (!peakSplit) {
+            val rows = modelStatsRaw(
+                SimpleSQLiteQuery(
+                    """
+                    SELECT model, '' AS tier, $modelAggCols
+                    FROM usage_records
+                    $where
+                    GROUP BY model
+                    ORDER BY (COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) + COALESCE(SUM(output_tokens), 0)) DESC
+                    """.trimIndent(),
+                    args,
+                )
+            )
+            return rows.map { it.toModelStat() }
+        }
+        val (tierExpr, holidays) = PeakSplit.tierSql("created_at")
+        // 1) 非分档模型: 基准聚合 (不求值 tier 表达式)
+        val baseRows = modelStatsRaw(
+            SimpleSQLiteQuery(
+                """
+                SELECT model, '' AS tier, $modelAggCols
                 FROM usage_records
-                $where
+                $where AND ${PeakSplit.baseSql}
                 GROUP BY model
-                ORDER BY (COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) + COALESCE(SUM(output_tokens), 0)) DESC
                 """.trimIndent(),
                 args,
             )
         )
-        return rows.map { r ->
-            val hit = r.cacheHitTokens
-            val miss = r.uncachedInputTokens
-            val hitRate = if (hit + miss > 0) hit.toDouble() / (hit + miss) * 100 else 0.0
-            ModelStat(
-                model = r.model,
-                requestCount = r.requestCount,
-                sessionCount = r.sessionCount,
-                totalInputTokens = r.totalInputTokens,
-                uncachedInputTokens = miss,
-                totalReasoningTokens = r.totalReasoningTokens,
-                cacheHitTokens = hit,
-                cacheWriteTokens = r.cacheWriteTokens,
-                totalOutputTokens = r.totalOutputTokens,
-                totalCostUsd = r.totalCostUsd,
-                hitRate = Math.round(hitRate * 100) / 100.0,
+        // 2) 仅分档模型: 求值 tier 后按 (model, tier) 分组。GROUP BY 用**输出别名**
+        //    tier —— 表达式只出现一次, 节假日占位符也只绑定一次 (写两遍会让参数个数翻倍)
+        val tierRows = modelStatsRaw(
+            SimpleSQLiteQuery(
+                """
+                SELECT model, $tierExpr AS tier, $modelAggCols
+                FROM usage_records
+                $where AND ${PeakSplit.flashSql}
+                GROUP BY model, tier
+                """.trimIndent(),
+                // tier 表达式在 SELECT 列表, 其占位符 (法定节假日) 要先于 WHERE 参数绑定
+                (holidays + args.toList()).toTypedArray(),
             )
-        }
+        )
+        // 与旧 SQL 的 ORDER BY (含缓存输入 + 输出) DESC 同口径; 并列时保持稳定次序
+        return (baseRows + tierRows)
+            .map { it.toModelStat() }
+            .sortedByDescending { it.totalInputTokens + it.totalOutputTokens }
+    }
+
+    /** ModelStatRow -> ModelStat 的公共映射 (峰谷档位在后缀里体现)。 */
+    private fun ModelStatRow.toModelStat(): ModelStat {
+        val hit = cacheHitTokens
+        val miss = uncachedInputTokens
+        val hitRate = if (hit + miss > 0) hit.toDouble() / (hit + miss) * 100 else 0.0
+        return ModelStat(
+            model = PeakSplit.labelFor(model, tier),
+            requestCount = requestCount,
+            sessionCount = sessionCount,
+            totalInputTokens = totalInputTokens,
+            uncachedInputTokens = miss,
+            totalReasoningTokens = totalReasoningTokens,
+            cacheHitTokens = hit,
+            cacheWriteTokens = cacheWriteTokens,
+            totalOutputTokens = totalOutputTokens,
+            totalCostUsd = totalCostUsd,
+            hitRate = Math.round(hitRate * 100) / 100.0,
+        )
     }
 
     @RawQuery(observedEntities = [UsageRecordEntity::class])
@@ -601,6 +710,8 @@ abstract class UsageDao {
         val input: Long,
         val output: Long,
         @androidx.room.ColumnInfo(name = "cost_usd") val costUsd: Double,
+        /** 峰谷档位 ('peak'/'off'/''), 仅分档查询填充; 展示名由调用方拼后缀. */
+        val tier: String = "",
     )
 
     data class ModelStatRow(
@@ -614,6 +725,8 @@ abstract class UsageDao {
         @androidx.room.ColumnInfo(name = "cache_write_tokens") val cacheWriteTokens: Long,
         @androidx.room.ColumnInfo(name = "total_output_tokens") val totalOutputTokens: Long,
         @androidx.room.ColumnInfo(name = "total_cost_usd") val totalCostUsd: Double,
+        /** 峰谷档位 ('peak'/'off'/''), 仅分档查询填充; 展示名由 [PeakSplit.labelFor] 拼后缀. */
+        val tier: String = "",
     )
 
     data class SessionRow(

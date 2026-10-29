@@ -14,6 +14,10 @@ tests/evidence/
 .venv/
 venv/
 .venv-build/
+# 覆盖率产物（ci.yml 用 --cov-report=term-missing 只打终端, 本地跑 --cov 才会落盘）
+.coverage
+.coverage.*
+htmlcov/
 
 # 编辑器 / AI 工具
 .vscode/

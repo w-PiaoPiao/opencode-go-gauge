@@ -4,6 +4,11 @@
 # 假对象隔离, 不必把 pywebview 的图形栈拖进 runner. 例外是要验证"真实上游语义"
 # 的用例 —— 它们依赖的包在此显式列出.
 pytest>=8
+# 覆盖率（ci.yml 用 --cov=app 输出 term-missing; 不设失败阈值, 只做可见性）
+pytest-cov>=5
+# 用例级超时（ci.yml 用 --timeout=120）: 真实 HTTP 服务/后台线程类用例挂死时
+# 让 CI 快速失败, 而不是烧到 job 的 timeout-minutes.
+pytest-timeout>=2.3
 # 真实 pystray: tests/test_perf_runtime_opt.py 的托盘面板用例要验证 pystray 自身
 # 的 callable/visible 求值语义 (MenuItem.text / Menu.items -> _visible_items),
 # 占位模块验不出来 (见该文件 pystray_mod fixture). 这些用例只构造 Menu/MenuItem,

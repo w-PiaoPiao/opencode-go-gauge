@@ -43,6 +43,8 @@ abstract class SettingsDao {
                     ?.toBooleanStrictOrNull() ?: defaults().chartAnimation,
                 persistentNotification = obj["persistent_notification"]?.jsonPrimitive?.contentOrNull()
                     ?.toBooleanStrictOrNull() ?: defaults().persistentNotification,
+                dsPeakSplit = obj["ds_peak_split"]?.jsonPrimitive?.contentOrNull()
+                    ?.toBooleanStrictOrNull() ?: defaults().dsPeakSplit,
             )
         } catch (e: Exception) {
             defaults()
@@ -57,6 +59,7 @@ abstract class SettingsDao {
             showAccountsPanel = patch.showAccountsPanel,
             chartAnimation = patch.chartAnimation,
             persistentNotification = patch.persistentNotification,
+            dsPeakSplit = patch.dsPeakSplit,
         )
         // 保存时在既有 payload 上合并覆盖 (与桌面 db.save_settings 的整行 JSON 覆盖不同,
         // 安卓端 settings 行还承载 active_account_id 等运行时键, 不能整包丢弃)
@@ -75,6 +78,7 @@ abstract class SettingsDao {
                 put("show_accounts_panel", JsonPrimitive(merged.showAccountsPanel))
                 put("chart_animation", JsonPrimitive(merged.chartAnimation))
                 put("persistent_notification", JsonPrimitive(merged.persistentNotification))
+                put("ds_peak_split", JsonPrimitive(merged.dsPeakSplit))
                 put("key_names", buildJsonObject { for ((k, v) in keyNames) put(k, JsonPrimitive(v)) })
             }.toString()
             savePayload(payload, java.time.Instant.now().toString())

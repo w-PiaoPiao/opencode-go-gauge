@@ -1,5 +1,5 @@
-# macOS 双架构自动构建 (旧式单平台发布; 统一发布见 release.yml): 推送 v*-macos tag 时触发,
-# 构建产物自动附到同名 release.
+# macOS 双架构自动构建 (旧式单平台发布; 统一发布见 release.yml): 推送 v*-macos
+# tag 时触发, 构建产物自动附到同名 release.
 # arm64 = Apple Silicon (macos-14), x86_64 = Intel (macos-15-intel).
 #
 # 注: Intel 构建原用 macos-13, 该镜像已从 GitHub 退役 —— 标签失效后 job 会
@@ -7,6 +7,9 @@
 # 整个 macOS release 静默缺失 (v2.1.0b/v2.1.0c 均只发出 arm64 包)。
 # 改为 macos-15-intel; 并显式设置 timeout-minutes, 让未来的标签失效在
 # 45 分钟内失败而不是挂满 24h。
+#
+# 与统一发布一样先过 preflight: 全量 pytest + tag 去 -macos 后缀后必须等于
+# 桌面 __version__（否则产物里是旧版本号, 客户端会陷入"永远有新版本"循环）。
 name: release-macos
 
 on:
@@ -18,7 +21,38 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ --timeout=120 -W error::DeprecationWarning
+
+      - name: Verify tag matches desktop version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: >
+          python scripts/check_versions.py
+          --tag "$GITHUB_REF_NAME" --platform desktop
+
   build:
+    needs: preflight
     strategy:
       matrix:
         include:
@@ -29,17 +63,24 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          # 构建 job 会执行第三方依赖 (pip/gradle), 不把 token 落进 .git/config
+          # 构建 job 会执行第三方依赖 (pip), 不把 token 落进 .git/config
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-macos.lock.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -q -r requirements-macos.lock.txt
 
       - name: Build .app
-        run: ./build_macos.sh
+        # 构建参数统一在 scripts/build.py（含 icns 图标 / Info.plist 版本 /
+        # ad-hoc 重签等后处理）, 不再直接调 build_macos.sh
+        run: python scripts/build.py --platform macos --repo "${{ github.repository }}"
 
       - name: Zip (保留签名/权限)
         run: ditto -c -k --keepParent dist/GoGauge.app "GoGauge-${{ matrix.arch }}.zip"

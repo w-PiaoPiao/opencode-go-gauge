@@ -20,9 +20,26 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+from ._http_retry import (
+    ResponseTooLarge,
+    is_retryable_status,
+    read_body,
+    retry_delay,
+)
+# 配额窗口/结果模型与 label 常量收敛到 opencode_api (server/前端只认一份结构):
+# QuotaWindow 的 kind 字段是稳定协议 (rolling/weekly/monthly), label 仅是展示文案.
+from .opencode_api import (
+    LABEL_MONTHLY,
+    LABEL_ROLLING,
+    LABEL_WEEKLY,
+    QuotaResult,
+    QuotaWindow,
+    _clamp_percent,
+)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -36,12 +53,7 @@ USER_AGENT = (
 )
 REQUEST_TIMEOUT = 30.0
 MAX_BODY_BYTES = 4 << 20  # 4 MiB
-FETCH_RETRIES = 3
-RETRY_BACKOFF = [0.5, 1.5, 3.0]
-
-LABEL_ROLLING = "5h Rolling"
-LABEL_WEEKLY = "Weekly"
-LABEL_MONTHLY = "Monthly"
+FETCH_RETRIES = 3  # 网络抖动/5xx/429 重试次数; 确定性 4xx 不重试
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
 
@@ -74,34 +86,31 @@ def build_cookie_header(token: str) -> str:
 
 
 def _fetch(url: str, headers: dict[str, str], timeout: float = REQUEST_TIMEOUT) -> str:
-    """GET 并返回响应文本; 带重试; 401/403 抛 AuthError (不重试)."""
-    last_exc: Optional[Exception] = None
+    """GET 并返回响应文本; 带重试; 401/403 抛 AuthError (不重试).
+
+    可重试: 5xx / 408 / 425 / 429 / 连接错误; 等待优先取 ``Retry-After`` (封顶 10s)。
+    400/404/410/422 等确定性 4xx 立刻失败, 不再白重试三次。
+    """
+    last_exc: Optional[BaseException] = None
     for attempt in range(FETCH_RETRIES):
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = resp.status
-                if status == 401 or status == 403:
-                    raise AuthError("认证失败 (HTTP %d)，请重新登录" % status)
-                if status < 200 or status >= 300:
-                    raise CommandCodeAPIError(f"请求返回 HTTP {status}")
-                body = resp.read(MAX_BODY_BYTES)
-                # 截断检测: Content-Length 声明超限时明确报错, 而非静默解析半包丢尾部数据
-                declared = resp.headers.get("Content-Length") or ""
-                if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-                    raise CommandCodeAPIError(
-                        f"响应过大 ({int(declared) // (1 << 20)} MiB, 上限 4 MiB)")
-                return body.decode("utf-8", errors="replace")
+                # urlopen 对 4xx/5xx 直接抛 HTTPError, 成功分支无需再判状态码
+                return read_body(resp, MAX_BODY_BYTES).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise AuthError("认证失败 (HTTP %d)，请重新登录" % exc.code) from exc
-            # 瞬时 5xx 等与网络错误同样重试 (对齐 opencode_api._fetch;
-            # 此前直接抛出, 一次抖动就把整轮同步打成 partial)
+            if not is_retryable_status(exc.code):
+                raise CommandCodeAPIError(f"请求返回 HTTP {exc.code}") from exc
             last_exc = exc
+        except ResponseTooLarge as exc:
+            raise CommandCodeAPIError(str(exc)) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_exc = exc
         if attempt < FETCH_RETRIES - 1:
-            time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
+            headers_of_exc = getattr(last_exc, "headers", None)
+            time.sleep(retry_delay(attempt, headers_of_exc))
     if isinstance(last_exc, urllib.error.HTTPError):
         raise CommandCodeAPIError(f"请求返回 HTTP {last_exc.code}") from last_exc
     raise CommandCodeAPIError(f"网络错误: {last_exc}") from last_exc
@@ -135,66 +144,8 @@ def _get(path: str, token: str, params: Optional[dict[str, Any]] = None) -> Any:
 # ---------------------------------------------------------------------------
 # 配额
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class QuotaWindow:
-    label: str
-    used: float  # 已用百分比 0-100
-    remaining: float
-    total: float
-    unit: str
-    reset_at: str  # ISO
-    reset_in_sec: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "label": self.label,
-            "used": self.used,
-            "remaining": self.remaining,
-            "total": self.total,
-            "unit": self.unit,
-            "reset_at": self.reset_at,
-            "reset_in_sec": self.reset_in_sec,
-        }
-
-
-@dataclass
-class QuotaResult:
-    """与 opencode_api.QuotaResult 同构, 便于 server/前端统一消费."""
-
-    name: str
-    workspace_id: str
-    success: bool
-    updated_at: str
-    plan: Optional[str] = None
-    period_start: Optional[str] = None  # ISO
-    period_end: Optional[str] = None    # ISO
-    windows: list[QuotaWindow] = field(default_factory=list)
-    error: Optional[str] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "name": self.name,
-            "workspace_id": self.workspace_id,
-            "success": self.success,
-            "updated_at": self.updated_at,
-        }
-        if self.plan:
-            payload["plan"] = self.plan
-        if self.period_start:
-            payload["period_start"] = self.period_start
-        if self.period_end:
-            payload["period_end"] = self.period_end
-        if self.error:
-            payload["error"] = self.error
-        if self.windows:
-            payload["windows"] = [w.to_dict() for w in self.windows]
-        return payload
-
-
-def _clamp_percent(value: float) -> float:
-    return max(0.0, min(100.0, value))
+# QuotaWindow / QuotaResult / _clamp_percent 直接复用 opencode_api 中的共享实现
+# (字段与 to_dict 输出与历史完全一致, commandcode 额外填 plan; 见模块顶部 import).
 
 
 def _ms_to_iso(ms: int) -> str:
@@ -257,6 +208,7 @@ def parse_credits_response(
             int(five.get("resetAt") or 0), now,
         )
         w.label = LABEL_ROLLING
+        w.kind = "rolling"
         windows.append(w)
     weekly = limits.get("weekly")
     if isinstance(weekly, dict):
@@ -265,6 +217,7 @@ def parse_credits_response(
             int(weekly.get("resetAt") or 0), now,
         )
         w.label = LABEL_WEEKLY
+        w.kind = "weekly"
         windows.append(w)
 
     # 订阅期 (月度): 月池 = 订阅期总额; 已用 = 月池 - 剩余 credits
@@ -302,6 +255,7 @@ def parse_credits_response(
         windows.append(
             QuotaWindow(
                 label=LABEL_MONTHLY,
+                kind="monthly",
                 used=used_pct,
                 remaining=round(100.0 - used_pct, 1),
                 total=plan_total,

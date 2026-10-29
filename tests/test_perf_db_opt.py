@@ -19,6 +19,7 @@ import csv
 import gc
 import gzip
 import json
+import os
 import re
 import sqlite3
 import time
@@ -699,6 +700,8 @@ def _legacy_export_backup(path: str) -> int:
     参照实现刻意**不复用** backup._record_payload: 复用会让"字段名/顺序被改错"
     这类回归在两边同时发生, 对拍就失去意义.
     """
+    # 与 app/backup.py 现行导出形态保持逐字节一致 (P2-2): **全部账号** (含无
+    # token 占位行, 它们在导入后可能带着记录且下一次导出不能丢) + accountKey.
     accounts = [
         {
             "id": a["id"],
@@ -706,8 +709,12 @@ def _legacy_export_backup(path: str) -> int:
             "workspaceId": a.get("workspace_id") or "",
             "provider": a.get("provider") or db.PROVIDER_OPENCODE,
             "hasToken": bool(a.get("has_token")),
+            "accountKey": (
+                f"{a.get('provider') or db.PROVIDER_OPENCODE}:"
+                f"{a.get('workspace_id') or ''}:{a.get('name') or ''}"
+            ),
         }
-        for a in [a for a in db.list_accounts() if a.get("has_token")]
+        for a in db.list_accounts()
     ]
     records: list[dict] = []
     for acc in accounts:
@@ -933,3 +940,200 @@ def test_export_backup_survives_chmod_failure(tmp_db, monkeypatch):
     assert backup.export_backup(str(path)) == 30   # 权限沿用失败不影响备份
     monkeypatch.undo()
     assert len(json.loads(_read_backup(path))["records"]) == 30
+
+
+# ---------------------------------------------------------------------------
+# 7) P3-7: 明细页 days 过滤的排序修复 (加 local_date 首键, 免 TEMP B-TREE)
+# ---------------------------------------------------------------------------
+
+
+def test_records_page_days_order_matches_created_at_order(tmp_db):
+    """days 过滤下逐页拼接 == 旧排序 (created_at DESC, usg_id DESC) 的行序.
+
+    复用 local_date 索引后输出顺序不变; 若 local_date 与 created_at 派生不一致,
+    这里会直接暴露页边界重/漏.
+    """
+    aid = _account()
+    now = datetime.now(timezone.utc)
+    recs = [
+        _rec(
+            f"d-{i:04d}",
+            created_at=(now - timedelta(seconds=i * 600)).isoformat().replace("+00:00", "Z"),
+            model=f"m{i % 3}",
+        )
+        for i in range(120)
+    ]
+    # created_at 大量并列 (批量同步一次插多条是常态): usg_id 是唯一次序键
+    tied = (now - timedelta(days=2)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    recs += [_rec(f"t-{i:03d}", created_at=tied, model="m0") for i in range(30)]
+    db.insert_usage_records(recs, aid)
+
+    days = 30
+    where = ["local_date >= date('now', 'localtime', ?)"]
+    params: list = [f"-{days - 1} days"]
+    where_sql, ref_params = db._account_filter("WHERE " + " AND ".join(where), params, aid)
+    ref = [
+        r["usg_id"]
+        for r in db.get_db().execute(
+            f"SELECT usg_id FROM usage_records {where_sql}"
+            " ORDER BY created_at DESC, usg_id DESC",
+            ref_params,
+        ).fetchall()
+    ]
+    got: list[str] = []
+    page = 1
+    while True:
+        rows, total = db.usage_records_page(page, 17, days=days, account_id=aid)
+        if not rows:
+            break
+        got.extend(r["usg_id"] for r in rows)
+        page += 1
+    assert len(got) == len(set(got)) == len(ref) == total
+    assert got == ref
+
+    # SQL 层: 走 (account_id, local_date) 索引顺序, 不再对 8 万行做 TEMP B-TREE
+    seen: list[str] = []
+    conn = db.get_db()
+    conn.set_trace_callback(seen.append)
+    try:
+        db.usage_records_page(1, 17, days=days, account_id=aid)
+    finally:
+        conn.set_trace_callback(None)
+    sql = next(s for s in seen if "ORDER BY local_date DESC" in s and "LIMIT" in s)
+    plan = " ".join(
+        str(r["detail"]) for r in db.get_db().execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+    )
+    assert "idx_usage_account_localdate" in plan, plan
+    # 旧实现的 created_at 首键会让整个窗口 (8 万行) 进一个 TEMP B-TREE;
+    # 新排序把排序范围收敛到单个 local_date 分组内 ("LAST 2 TERMS"), 代价 O(每天行数).
+    assert "TEMP B-TREE FOR ORDER BY" not in plan, plan
+    assert "TEMP B-TREE FOR LAST" in plan or "TEMP B-TREE" not in plan, plan
+
+
+# ---------------------------------------------------------------------------
+# 8) P2-8: data_dir() 进程内缓存 / 探针只跑一次 / 失败沿用上次可用路径
+# ---------------------------------------------------------------------------
+
+
+def _reset_data_dir_globals(monkeypatch, monkeypatch_none=True):
+    """把 data_dir 的模块级缓存重置到"未解析"状态 (测试内自包含, 不影响其他用例)."""
+    import sys
+
+    if monkeypatch_none:
+        monkeypatch.setattr(db, "_data_dir_cache", None)
+        monkeypatch.setattr(db, "_data_dir_cache_env", None)
+    monkeypatch.setattr(db, "_data_dir_override", None)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+
+def test_data_dir_resolution_is_cached(monkeypatch, tmp_path):
+    """Windows frozen 分支的写删探针只在首次解析时跑 (旧实现每次 data_dir 都跑)."""
+    import sys
+
+    monkeypatch.delenv("GOUSAGE_DATA", raising=False)
+    monkeypatch.setattr(db, "_last_good_data_dir", None)
+    _reset_data_dir_globals(monkeypatch)
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "GoGauge.exe"))
+    calls: list[str] = []
+    monkeypatch.setattr(db, "_probe_writable", lambda p: calls.append(p) or True)
+
+    first = db.data_dir()
+    second = db.data_dir()
+    assert first == second == str(exe_dir / "data")
+    assert len(calls) == 1  # 第二次命中进程内缓存, 不再做写删探针
+
+
+def test_data_dir_probe_failure_keeps_last_good_path(monkeypatch, tmp_path):
+    """探针瞬时失败 (磁盘满/杀软锁文件) 沿用上次成功路径, 不静默换到空库."""
+    import sys
+
+    monkeypatch.delenv("GOUSAGE_DATA", raising=False)
+    good = tmp_path / "known-good" / "data"
+    monkeypatch.setattr(db, "_last_good_data_dir", str(good))
+    _reset_data_dir_globals(monkeypatch)
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "GoGauge.exe"))
+
+    def failing_probe(_path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(db, "_probe_writable", failing_probe)
+    assert db.data_dir() == str(good)  # 不是 LOCALAPPDATA 的空库
+
+
+def test_set_data_dir_invalidates_data_dir_cache(monkeypatch, tmp_path):
+    """set_data_dir 切目录后必须重新解析 (缓存/探针结果不能沿用)."""
+    import sys
+
+    monkeypatch.delenv("GOUSAGE_DATA", raising=False)
+    _reset_data_dir_globals(monkeypatch)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "GoGauge.exe"))
+    monkeypatch.setattr(db, "_probe_writable", lambda p: True)
+    default_path = db.data_dir()
+    assert default_path == str(tmp_path / "data")
+
+    db.set_data_dir(str(tmp_path / "other"))
+    try:
+        assert db.data_dir() == str(tmp_path / "other")
+        db.set_data_dir(None)
+        assert db.data_dir() == default_path
+    finally:
+        db.set_data_dir(None)
+
+
+# ---------------------------------------------------------------------------
+# 9) P2-5: 数据目录 0700 / DB 文件 0600
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows 无 POSIX 权限位")
+def test_data_dir_and_db_file_permissions(tmp_db, monkeypatch):
+    """默认解析目录: DB 文件 0600 + 数据目录 0700."""
+    import stat
+
+    # data_dir 被 fixture monkeypatch 到 tmp_db, 这里模拟"默认解析目录"分支
+    monkeypatch.delenv("GOUSAGE_DATA", raising=False)
+    monkeypatch.setattr(db, "_data_dir_override", None)
+    db.get_db()
+    dir_mode = stat.S_IMODE(os.stat(tmp_db).st_mode)
+    db_mode = stat.S_IMODE(os.stat(tmp_db / "gousage.db").st_mode)
+    assert dir_mode == 0o700, oct(dir_mode)
+    assert db_mode == 0o600, oct(db_mode)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows 无 POSIX 权限位")
+def test_override_data_dir_permissions_are_respected(tmp_path, monkeypatch):
+    """N2b: set_data_dir 指定的既有目录不改权限 (DB 文件仍 0600)."""
+    import stat
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o755)
+    monkeypatch.setattr(db, "data_dir", lambda: str(shared))
+    db.set_data_dir(str(shared))
+    try:
+        db.get_db()
+        assert stat.S_IMODE(os.stat(shared).st_mode) == 0o755
+        assert stat.S_IMODE(os.stat(shared / "gousage.db").st_mode) == 0o600
+    finally:
+        db.set_data_dir(None)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows 无 POSIX 权限位")
+def test_env_data_dir_permissions_are_respected(tmp_path, monkeypatch):
+    """N2b: GOUSAGE_DATA 指定的既有目录同样不改权限."""
+    import stat
+
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    os.chmod(custom, 0o755)
+    monkeypatch.setenv("GOUSAGE_DATA", str(custom))
+    monkeypatch.setattr(db, "data_dir", lambda: str(custom))
+    monkeypatch.setattr(db, "_data_dir_override", None)
+    db.get_db()
+    assert stat.S_IMODE(os.stat(custom).st_mode) == 0o755
+    assert stat.S_IMODE(os.stat(custom / "gousage.db").st_mode) == 0o600

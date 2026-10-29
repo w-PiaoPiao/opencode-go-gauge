@@ -7,33 +7,78 @@
 
 ## 一次发布要做什么
 
-1. 修改版本号并提交：
-   - 桌面端：`app/__init__.py` 的 `__version__`
-   - Android：`android/app/build.gradle.kts` 的 `versionName` / `versionCode`
-2. 推送 `main`。
-3. 打 tag 并推送（**不带平台后缀**）：
+1. **只在需要推进版本时**修改版本号并提交：
+   - 桌面端：`app/__init__.py` 的 `__version__`（tag 必须与它完全一致）；
+   - Android：`android/app/build.gradle.kts` 的 `versionName` / `versionCode` ——
+     **仅当 Android 侧已适配本次桌面改动时才升**；未适配就保持旧版本，统一
+     release 会自动跳过 APK（见「版本号策略」）。
+2. 本地自检（可选但推荐）：
+
+   ```bash
+   python -m pytest tests/ -q
+   python scripts/check_versions.py          # 仓库内版本不变量
+   python scripts/build.py --platform macos  # 需要时本地验证打包链路
+   ```
+
+3. 推送 `main`。
+4. 打 tag 并推送（**不带平台后缀**）：
 
    ```bash
    git tag v2.2.1d
    git push origin v2.2.1d
    ```
 
-4. GitHub Actions 的 `release` workflow 并行构建：
+5. GitHub Actions 的 `release` workflow 先跑 `preflight`（全量 pytest + 版本
+   一致性），通过后才并行构建：
 
    | 平台 | runner | release asset |
    |---|---|---|
    | Windows | `windows-latest` | `GoGauge-v2.2.1d-windows.exe` |
    | macOS arm64 | `macos-14` | `GoGauge-v2.2.1d-macos-arm64.zip` |
    | macOS x86_64 | `macos-15-intel` | `GoGauge-v2.2.1d-macos-x86_64.zip` |
-   | Android | `ubuntu-latest` | `GoGauge-v2.2.1d-android.apk` |
+   | Android（仅当已适配/版本==tag） | `ubuntu-latest` | `GoGauge-v2.2.1d-android.apk` |
 
-   另附 `SHA256SUMS.txt` 校验清单。
+   构建统一由 `python scripts/build.py --platform windows|macos` 完成（同时生成
+   冻结产物所需的 `app/_build_info.py`）。另附 `SHA256SUMS.txt` 校验清单。
 
-5. 三端都构建成功后，`publish` job 创建 release（`--generate-notes`）并把全部
-   资产上传到同一个 release。若该 tag 的 release 已存在（重跑/补发），改为
-   `gh release upload --clobber` 覆盖资产，不会重复建 release。
+6. 桌面平台都构建成功后，`publish` job 创建 release（`--generate-notes`）并把
+   构建成功的资产上传到同一个 release；Android 未适配时 release 里只有桌面
+   资产（**这是预期行为，不是构建失败**）。若该 tag 的 release 已存在（重跑/
+   补发），改为 `gh release upload --clobber` 覆盖资产，不会重复建 release。
 
-## 重跑 / 补发
+7. **`--platform android` 的 hotfix**：走 `vX.Y.Za-android` tag 与
+   `release-android.yml`，该 workflow 也要求 tag 版本与 Android `versionName`
+   完全一致。
+
+## 版本号策略（重要）
+
+版本号格式为 `x.y.za`（x/y/z 为数字，a 为可选小写字母），**只在维护者要求推进版本时才修改**：
+
+- **桌面端** `app/__init__.py` 的 `__version__` 是发布版本的唯一来源，tag 必须与它完全一致。
+- **Android** 的 `versionName` / `versionCode` **取决于 Android 侧是否已适配桌面端最新改动**。Android 未适配时，它可以落后于桌面版本（例如桌面 2.2.2、Android 2.2.1d 是合法状态），此时统一 release **不会构建/附带 Android APK**（release 只有 Windows/macOS，属预期行为，不是构建失败）。
+- **HarmonyOS** 暂未纳入统一发布，版本独立管理。
+
+`scripts/check_versions.py` 实现了上述校验（发布前置闸门调用）：
+
+```bash
+python scripts/check_versions.py                 # 本地检查
+python scripts/check_versions.py --tag v2.2.2    # release preflight 用
+```
+
+## 发布闸门（preflight）
+
+`release.yml` 的 `publish` 之前现在有 `preflight` job，**任何平台构建都依赖它**：
+
+1. 跑三平台 pytest；
+2. 校验 tag 与桌面版本一致、Android 版本不超前于桌面版本、`versionCode` 单调；
+3. 检查通过才进入构建，避免「构建 45 分钟后才发现版本号不一致」。
+
+另外 `ci.yml` 也会响应 `v*` tag push，发布页可直接看到该 commit 的测试结论。
+
+> **建议手动开启分支保护**：GitHub → Settings → Branches → 保护 `main`，required
+> status checks 选 `pytest (ubuntu-latest)` / `pytest (windows-latest)` /
+> `pytest (macos-latest)`。这是仓库代码无法自动完成的设置，开启后可直接阻断
+> 「红灯提交合并」。
 
 - Actions 页面 → `release` → **Re-run all jobs**；
 - 或 **Run workflow**（`workflow_dispatch`）：

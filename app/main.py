@@ -12,11 +12,12 @@ import ctypes.wintypes  # noqa: F401  Win32 单实例/窗口枚举用 (macOS 可
 
 import json
 import os
+import secrets
 import sys
 import tempfile
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import webview
 
@@ -24,6 +25,7 @@ from . import __version__, db, https_ca, server
 from .auth import (
     BOOT_SETTLE_SEC,
     LoginWatcher,
+    _bounded_ok,
     build_login_url,
     clear_provider_cookies,
     ensure_login_page_loaded,
@@ -50,6 +52,18 @@ _LOGIN_ENTRY_RETRIES = 2
 # 登录监听的"僵尸"判定: 监听每秒轮询一轮, 超过这么久没有进展就认为某个原生
 # 调用把它挂住了 (单飞守卫会因此永久静默吞掉用户的点击), 停掉并重建窗口
 _LOGIN_WATCHER_STALE_SEC = 20.0
+# 登录成功收尾时的跨线程 UI 调用 (hide/load_url/evaluate_js) 等待上限:
+# pywebview 这些方法在 UI 线程被占时无超时阻塞; 超时只当"这次没做完"
+# (前端登录监视会兜底刷新), 绝不能拖住监听线程并吞掉首次全量同步.
+_LOGIN_UI_CALL_TIMEOUT = 3.0
+# open_login 非阻塞锁: pywebview 的 js_api 每次调用都是新线程, 快速双击会并发
+# 进入 open_login; 拿不到锁说明已有登录流程正在启动, 直接忽略 (与单飞守卫同语义).
+_LOGIN_OPEN_LOCK = threading.Lock()
+# I4 双保险: 本地 HTTP API token 的进程内引用. 正常路径经 dashboard URL fragment
+# 传给前端 (不进请求行/日志); 个别 WebView/导航路径可能丢 fragment, 此时前端用
+# js_api 的 get_auth_token() 读这里兜底. 登录窗口不挂 js_api, 主窗口只加载本地
+# 页面, 所以该只读方法不会把 token 暴露给外部站点.
+_auth_token_ref: dict[str, str] = {"token": ""}
 
 
 # ── Win32 窗口辅助 (仅 Windows 运行时使用; ctypes 为跨平台标准库) ──
@@ -114,8 +128,7 @@ def _install_macos_app_delegate() -> None:
 
     class _GoGaugeAppDelegate(BrowserView.AppDelegate):  # type: ignore[misc, valid-type]
         def applicationShouldTerminate_(self, app) -> bool:  # noqa: N802
-            global _quitting
-            _quitting = True
+            _prepare_mac_terminate()
             return super().applicationShouldTerminate_(app)
 
         def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag) -> bool:  # noqa: N802
@@ -351,6 +364,20 @@ def _arm_quit_fallback(timeout: float = 3.0) -> None:
     timer.name = "gousage-quit-fallback"
     timer.daemon = True
     timer.start()
+
+
+def _prepare_mac_terminate() -> None:
+    """macOS Cmd+Q / Dock Quit / 菜单 Quit 的退出前置 (P3-18).
+
+    pywebview 的 js_api / 事件回调线程是**非 daemon** 的, 且其内部原生调用
+    有无超时等待: 某个 bridge 线程若卡在原生信号量上, 窗口全部销毁后进程会在
+    解释器 shutdown 的 thread join 上挂住 (界面消失但进程残留, 只能强杀).
+    托盘退出/前端退出早已武装 os._exit 兜底, 这里让 Cmd+Q 路径也一致 ——
+    先置退出标志 (让 on_closing 放行), 再武装 3s 强制退出.
+    """
+    global _quitting
+    _quitting = True
+    _arm_quit_fallback()
 
 
 # ── 单实例检测 (仅 Windows: Win32 命名互斥体; macOS 不走此路径) ──
@@ -763,6 +790,15 @@ class WindowApi:
     def set_login_callback(self, cb) -> None:
         self._on_open_login = cb
 
+    def get_auth_token(self) -> str:
+        """主窗口前端在 URL fragment 丢失时兜底获取本地 API token (I4 双保险).
+
+        只读、无参数、不触发任何副作用. 登录窗口不挂 js_api, 主窗口只加载本地
+        页面 (fragment 本身也不进 HTTP 请求行/Referer/日志), 因此不会把 token
+        交给外部站点. 未设置 token (dev/浏览器模式) 返回空串.
+        """
+        return _auth_token_ref.get("token", "")
+
     def open_login(self, mode: str = "relogin", provider: str = "opencode") -> bool:
         """前端登录入口: 弹出独立登录窗口. mode: "add"=添加新用户 / "relogin"=重登当前用户."""
         if self._on_open_login:
@@ -917,6 +953,90 @@ def _destroy_all_windows() -> None:
             pass
 
 
+def _persist_login_credential(
+    auth_cookie: str,
+    workspace_hint: str,
+    provider: str,
+    *,
+    mode: str,
+    target_account_id: Optional[int],
+) -> bool:
+    """按登录模式落库凭证, 返回是否成功 (P1-1).
+
+    与旧行为的唯一区别: relogin 使用**发起登录时固化**的 ``target_account_id``,
+    而不是回调时刻的活跃账号 —— 登录窗是非模态的, 用户可能在 OAuth 期间切换
+    账号, 按活跃账号写会把 A 的新凭证写进 B, 并毁掉 B 的原凭证.
+
+    - add 模式: 新增账号并切换为活跃 (原语义);
+    - relogin + 目标账号存在: 只更新该账号; 目标账号已被删除时回退为新增
+      (与"无活跃账号"兜底同语义, 避免凭证被静默丢弃);
+    - relogin 但没拿到目标快照 (旧调用/DB 异常): 保持旧语义更新活跃账号.
+    """
+    if mode == "add":
+        db.add_account(auth_cookie, workspace_hint, switch=True, provider=provider)
+        return True
+    # I1: save_token 支持按 id 写入并返回是否成功 (None = 更新活跃账号).
+    # target_account_id 为 None 时保持旧的"更新活跃账号"语义 (I1 内部有
+    # 无活跃账号的 add_account 兜底).
+    if db.save_token(
+        auth_cookie,
+        workspace_hint,
+        provider=provider,
+        account_id=target_account_id,
+    ):
+        return True
+    if target_account_id is None:
+        return False  # 理论上不可达: 无目标时 I1 要么成功要么抛异常
+    # 目标账号已被删除: 回退为新增账号, 避免本次登录凭证被静默丢弃.
+    db.add_account(auth_cookie, workspace_hint, switch=True, provider=provider)
+    return True
+
+
+def _complete_login(
+    auth_cookie: str,
+    workspace_hint: str,
+    provider: str,
+    *,
+    mode: str,
+    target_account_id: Optional[int],
+    after_save: Optional[Callable[[], None]],
+    sync: Callable[[str], None],
+    on_ui: Callable[[], None],
+    log: Callable[[str], None],
+) -> bool:
+    """登录成功的落库与副作用顺序 (P2-10), 返回凭证是否保存成功.
+
+    顺序固定为: 保存凭证 -> 后续清理 (配额缓存失效) -> **首次全量同步** -> UI 收尾.
+    同步必须先于 UI: UI 调用是跨线程的 pywebview 方法, UI 线程被占时无超时阻塞,
+    一旦卡住, 排在它后面的同步就永远不会触发 (新账号面板长时间空白).
+    保存失败时: 不跑任何副作用并返回 False, 由调用方保持登录窗打开让用户重试 —
+    不允许"窗口关了、界面刷新了、其实没存上"的假成功.
+    """
+    try:
+        saved = _persist_login_credential(
+            auth_cookie,
+            workspace_hint,
+            provider,
+            mode=mode,
+            target_account_id=target_account_id,
+        )
+    except Exception as exc:  # noqa: BLE001 DB 锁/磁盘满/账号并发删除
+        log(f"  save_token ERROR: {exc}")
+        saved = False
+    if not saved:
+        log("  credential NOT saved -> keep login window open for retry")
+        return False
+    log("  token saved")
+    if after_save is not None:
+        try:
+            after_save()
+        except Exception as exc:  # noqa: BLE001 缓存失效失败不影响已保存的凭证
+            log(f"  post-save cleanup ERROR: {exc}")
+    sync("full")
+    on_ui()
+    return True
+
+
 def _log_runtime_banner() -> None:
     """把运行时版本写进主日志.
 
@@ -990,8 +1110,17 @@ def main() -> None:
     )
     _log_runtime_banner()
 
+    # I4: 本地 HTTP API token (WebView ↔ 本机 server 的唯一凭证). 用 URL fragment
+    # 传给 WebView: fragment 不进入 HTTP 请求行/Referer, server 侧与日志都不会
+    # 看到它; server 尚未实现 token 校验的版本上 set_auth_token 不存在, 此时
+    # fragment 只被前端忽略 (兼容联调期).
+    auth_token = secrets.token_urlsafe(32)
+    _auth_token_ref["token"] = auth_token  # WindowApi.get_auth_token 兜底源
     host, port = server.start_server()
-    dashboard_url = f"http://{host}:{port}/"
+    _set_server_auth_token = getattr(server, "set_auth_token", None)
+    if callable(_set_server_auth_token):
+        _set_server_auth_token(auth_token)
+    dashboard_url = f"http://{host}:{port}/#{auth_token}"
     watcher: dict[str, object] = {"ref": None}
     api = WindowApi()
 
@@ -1089,55 +1218,119 @@ def main() -> None:
         _bind_login_close_cleanup(w)
         return w
 
-    # 登录模式: open_login(mode, provider) 记录意图, on_login_success 按模式落库
-    pending_mode = {"mode": "relogin", "provider": "opencode"}
+    # 登录模式: open_login(mode, provider) 记录意图, on_login_success 按模式落库.
+    # account_id 必须在**发起登录时**固化: 登录窗是非模态的, 用户在 OAuth 期间
+    # 切换活跃账号时, 回调里再解析活跃账号会把 A 的新凭证写进 B (并毁掉 B 的
+    # 原凭证) —— 见 P1-1.
+    pending_mode: dict[str, object] = {
+        "mode": "relogin",
+        "provider": "opencode",
+        "account_id": None,
+    }
 
-    def on_login_success(auth_cookie: str, workspace_hint: str, provider: str = "opencode") -> None:
-        """登录成功: 按模式保存 → 隐藏登录窗口 → 主窗口进入面板 → 全量同步.
+    def _capture_pending_target(mode: str, provider: str) -> None:
+        """固化本次登录意图 (必须在登录流程启动前调用)."""
+        normalized_mode = mode if mode in ("add", "relogin") else "relogin"
+        pending_mode["mode"] = normalized_mode
+        pending_mode["provider"] = (
+            provider if provider in ("opencode", "commandcode") else "opencode"
+        )
+        account_id: Optional[int] = None
+        if normalized_mode == "relogin":
+            try:
+                account_id = db.get_active_account_id() or None
+            except Exception as exc:  # noqa: BLE001 DB 未就绪: 退回旧语义 (回调时活跃账号)
+                _mlog(f"[main] capture login target failed: {exc}")
+        pending_mode["account_id"] = account_id
 
-        - add: 新建账号 (同 provider+token 自动去重为既有账号) 并切换为活跃
-        - relogin: 更新当前活跃账号凭证 (含 provider)
+    def _notify_login_failed(message: str) -> None:
+        """凭证落库失败: 保持登录窗打开, 尽力通知前端 (可选钩子, 失败只记日志)."""
+        js = (
+            "window.gousageOnLoginFailed && "
+            f"window.gousageOnLoginFailed({json.dumps(message)});"
+        )
+        try:
+            if not _bounded_ok(lambda: main_win.evaluate_js(js), _LOGIN_UI_CALL_TIMEOUT):
+                _mlog("  login-failed notify skipped (UI busy)")
+        except Exception as exc:  # noqa: BLE001
+            _mlog(f"  login-failed notify ERROR: {type(exc).__name__}")
+
+    def _post_login_ui() -> None:
+        """登录成功后的 UI 收尾 (顺序与旧实现一致: 先隐藏登录窗, 再刷新主窗).
+
+        三处都是跨线程 pywebview 调用 (WinForms 上是 Invoke + 无超时信号量),
+        一律经 _bounded_ok 有界执行: 超时只当"这次没做完", 前端登录监视
+        (/api/accounts 轮询) 会兜底刷新; 绝不允许拖住监听线程或延后首次同步.
         """
-        mode = pending_mode.get("mode", "relogin")
-        provider = provider if provider in ("opencode", "commandcode") else "opencode"
-        _mlog(f"on_login_success: ws={workspace_hint} mode={mode} provider={provider}")
-        watcher["ref"] = None  # 本次登录已完结: 释放单飞守卫占用
-        try:
-            if mode == "add":
-                db.add_account(auth_cookie, workspace_hint, switch=True, provider=provider)
-            else:
-                db.save_token(auth_cookie, workspace_hint, provider=provider)
-            _mlog("  token saved")
-        except Exception as exc:  # noqa: BLE001
-            _mlog(f"  save_token ERROR: {exc}")
-        # 凭证已更换: 丢弃旧 token 的配额缓存槽, 否则面板在 TTL 内仍返回
-        # 旧凭证的 401 结果, 看起来像"重新登录了但配额还是空的"
-        try:
-            server.invalidate_quota_cache(db.get_active_account_id())
-            _mlog("  quota cache invalidated")
-        except Exception as exc:  # noqa: BLE001
-            _mlog(f"  invalidate quota cache ERROR: {exc}")
         try:
             if _login_win_alive():
-                login_win_ref["win"].hide()
-                _mlog("  login window hidden")
+                if _bounded_ok(login_win_ref["win"].hide, _LOGIN_UI_CALL_TIMEOUT):
+                    _mlog("  login window hidden")
+                else:
+                    _mlog("  login window hide skipped (UI busy)")
         except Exception as exc:  # noqa: BLE001
-            _mlog(f"  hide ERROR: {exc}")
+            _mlog(f"  hide ERROR: {type(exc).__name__}")
         try:
-            main_win.load_url(dashboard_url)
-            _mlog("  dashboard load_url called")
+            if _bounded_ok(lambda: main_win.load_url(dashboard_url), _LOGIN_UI_CALL_TIMEOUT):
+                _mlog("  dashboard load_url called")
+            else:
+                _mlog("  dashboard load_url skipped (UI busy)")
         except Exception as exc:  # noqa: BLE001
-            _mlog(f"  load_url ERROR: {exc}")
+            # 不打 URL (I4 的 fragment 是 token), 也不打可能夹带 URL 的异常原文
+            _mlog(f"  load_url ERROR: {type(exc).__name__}")
         # 同 URL 的 load_url 可能被 WebView 跳过 (不重载): 显式通知前端就地刷新,
         # 否则停留在设置页时看不到新增账号 (需手动切页才会拉取)
+        js = "window.gousageOnLoginSuccess && window.gousageOnLoginSuccess();"
         try:
-            main_win.evaluate_js(
-                "window.gousageOnLoginSuccess && window.gousageOnLoginSuccess();"
-            )
-            _mlog("  evaluate_js gousageOnLoginSuccess sent")
+            if _bounded_ok(lambda: main_win.evaluate_js(js), _LOGIN_UI_CALL_TIMEOUT):
+                _mlog("  evaluate_js gousageOnLoginSuccess sent")
+            else:
+                _mlog("  evaluate_js skipped (UI busy)")
         except Exception as exc:  # noqa: BLE001
-            _mlog(f"  evaluate_js ERROR: {exc}")
-        server.sync_all_async("full")
+            _mlog(f"  evaluate_js ERROR: {type(exc).__name__}")
+
+    def _invalidate_login_quota_cache() -> None:
+        """凭证已更换: 丢弃旧 token 的配额缓存槽 (after_save 阶段).
+
+        否则面板在 TTL 内仍返回旧凭证的 401 结果, 看起来像"重新登录了但配额
+        还是空的". 登录期间切号是合法的, 目标账号与当前活跃账号的槽都清.
+        """
+        target = pending_mode.get("account_id")
+        for aid in {db.get_active_account_id(), target if isinstance(target, int) else None}:
+            if aid:
+                server.invalidate_quota_cache(int(aid))
+        _mlog("  quota cache invalidated")
+
+    def on_login_success(auth_cookie: str, workspace_hint: str, provider: str = "opencode") -> None:
+        """登录成功: 按模式保存凭证 → 首次全量同步 → 隐藏登录窗/主窗刷新.
+
+        - add: 新建账号 (同 provider+token 自动去重为既有账号) 并切换为活跃
+        - relogin: 更新**发起登录时固化的**账号凭证 (P1-1; 中途切号也不会串号)
+
+        保存失败不假装成功: 保持登录窗打开, 不触发同步与 UI 刷新 (P2-10).
+        """
+        mode = str(pending_mode.get("mode", "relogin"))
+        target = pending_mode.get("account_id")
+        target_account_id = target if isinstance(target, int) else None
+        provider = provider if provider in ("opencode", "commandcode") else "opencode"
+        _mlog(
+            f"on_login_success: ws={workspace_hint} mode={mode} "
+            f"provider={provider} target={target_account_id}"
+        )
+        watcher["ref"] = None  # 本次登录已完结: 释放单飞守卫占用
+        ok = _complete_login(
+            auth_cookie,
+            workspace_hint,
+            provider,
+            mode=mode,
+            target_account_id=target_account_id,
+            after_save=_invalidate_login_quota_cache,
+            sync=server.sync_all_async,
+            on_ui=_post_login_ui,
+            log=_mlog,
+        )
+        if not ok:
+            _notify_login_failed("登录凭证保存失败, 请重试")
 
     def _stale_credential_fps(provider: str) -> list[str]:
         """该 provider 名下已知凭证的指纹 (库内旧 token).
@@ -1239,7 +1432,24 @@ def main() -> None:
             _mlog(f"[main] cookie purge ERROR: {exc}")
 
     def open_login(mode: str = "relogin", provider: str = "opencode") -> None:
-        """弹出独立登录窗口并开始监听 (欢迎页/设置页按钮). 单飞守卫: 已有登录流程时忽略."""
+        """弹出独立登录窗口并开始监听 (欢迎页/设置页按钮).
+
+        并发保护 (P2-10): pywebview 的 js_api 每次调用都在新线程里, 快速双击会
+        并发进入本函数 —— 单飞守卫的 watcher["ref"] 要等窗口创建/清残留 cookie
+        之后才写入, 挡不住这段窗口期, 结果是两个登录窗口/两个 watcher (其中
+        一个窗口的登录永远不会被捕获). 这里用非阻塞锁把"守卫 + 清残留 + 建窗
+        + 起 watcher"整体串行化, 重复点击直接忽略 (与单飞守卫同语义).
+        """
+        if not _LOGIN_OPEN_LOCK.acquire(blocking=False):
+            _mlog("[main] open_login ignored: another login flow is starting")
+            return
+        try:
+            _open_login_locked(mode, provider)
+        finally:
+            _LOGIN_OPEN_LOCK.release()
+
+    def _open_login_locked(mode: str = "relogin", provider: str = "opencode") -> None:
+        """open_login 的实际流程 (调用方已持有 _LOGIN_OPEN_LOCK)."""
         if provider not in ("opencode", "commandcode"):
             provider = "opencode"
         # 登录窗已被手动关闭 => 旧监听已失效: 先停旧线程再重建窗口.
@@ -1250,8 +1460,7 @@ def main() -> None:
                 w.stop()
             watcher["ref"] = None
             _mlog("[main] login window gone -> recreate")
-            pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
-            pending_mode["provider"] = provider
+            _capture_pending_target(mode, provider)
             _recreate_login_window(provider)
             return
         w = watcher.get("ref")
@@ -1282,8 +1491,7 @@ def main() -> None:
             else:
                 _mlog(f"[main] open_login ignored: login in progress (provider={provider})")
                 return
-        pending_mode["mode"] = mode if mode in ("add", "relogin") else "relogin"
-        pending_mode["provider"] = provider
+        _capture_pending_target(mode, provider)
         lw = login_win()
         # 清残留会话必须在加载登录页之前完成: 否则登录页带着旧凭证请求, 会被
         # 直接带到套餐后台, 用户根本没有重新选择账号的机会

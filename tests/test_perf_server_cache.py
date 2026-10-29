@@ -30,9 +30,33 @@ import pytest
 from app import db, server
 
 
+def _drain_server_background(timeout: float = 20.0) -> None:
+    """等待前序用例遗留的后台同步/配额线程退出 (测试隔离).
+
+    其它测试文件 (如 main() 冒烟) 可能真实触发 sync_all_async; 残留线程让
+    _agg_cached 走"同步中不吃缓存"分支, 本文件随后的缓存断言会变成假红.
+    按线程名做有界等待, 并兜底复位同步状态 (daemon 线程无法强杀).
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with server._sync_lock:
+            running = bool(server._sync_state.get("running"))
+        stray = [
+            t for t in threading.enumerate()
+            if t.name in ("gousage-sync", "gousage-quota") and t.is_alive()
+        ]
+        if not running and not stray:
+            break
+        time.sleep(0.05)
+    with server._sync_lock:
+        server._sync_state.update(
+            running=False, mode="", page=0, inserted=0, phase="idle", message="", account="")
+
+
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
     """独立临时库 + 干净缓存: 不打网络, 不受其它测试残留影响."""
+    _drain_server_background()
     monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
     monkeypatch.setattr(server, "_fetch_usd_cny", lambda: 7.2)  # 汇率不走网络
     with server._agg_lock:

@@ -14,10 +14,13 @@ from app import db
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
-    db._DB = None
+    # 真实复位 (db 没有 _DB 属性)
+    db._schema_init_path = None
+    db._invalidate_payload_cache()
     db._invalidate_cred_cache()
     yield tmp_path
     db.close_db()
+    db._schema_init_path = None
 
 
 def _rec(usg_id, model="m", cost_usd=0.5):
@@ -132,7 +135,8 @@ def test_migration_rebuilds_legacy_global_pk(tmp_db):
     conn.commit()
     conn.close()
 
-    db._DB = None
+    db._schema_init_path = None
+    db._invalidate_payload_cache()
     db._invalidate_cred_cache()
 
     # 旧行原样保留, 归属不变
@@ -165,4 +169,52 @@ def test_migration_rebuilds_legacy_global_pk(tmp_db):
         "idx_usage_account_time",
         "idx_usage_account_localdate",
         "idx_usage_account_model",
+        # 性能审计集群 A 的两个索引也是"旧表的索引": 重建分支必须一并补建,
+        # 否则升级后的首个进程漏掉它们 (导出 O(n²) / dashboard 全表扫)
+        "idx_usage_account_time_usgid",
+        "idx_usage_cover_dash",
     } <= indexes, f"迁移后缺少索引: {indexes}"
+
+
+def test_rebuild_keeps_exact_index_column_order(tmp_db):
+    """重建后的索引列序必须精确 (覆盖索引少/错一列就退化为非覆盖查询)."""
+    path = str(tmp_db / "gousage.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE accounts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL, workspace_id TEXT NOT NULL, resolved_workspace_id TEXT,
+          token TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT 'opencode',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE usage_records (
+          usg_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, model TEXT NOT NULL,
+          provider TEXT, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+          reasoning_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0, cost_raw INTEGER NOT NULL,
+          cost_usd REAL NOT NULL, key_id TEXT, session_id TEXT, plan TEXT,
+          synced_at TEXT NOT NULL, account_id INTEGER NOT NULL DEFAULT 1, local_date TEXT
+        );
+        INSERT INTO accounts (name, workspace_id, token, created_at, updated_at)
+          VALUES ('A', 'ws-A', 'kc:', '2026-01-01', '2026-01-01');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    def cols(name: str) -> list[str]:
+        return [
+            r["name"]
+            for r in db.get_db().execute(f"PRAGMA index_info({name})").fetchall()
+        ]
+
+    assert cols("idx_usage_account_time_usgid") == ["account_id", "created_at", "usg_id"]
+    assert cols("idx_usage_cover_dash") == [
+        "account_id", "local_date", "model",
+        "input_tokens", "output_tokens", "reasoning_tokens",
+        "cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens",
+        "cost_usd", "session_id",
+    ]
+    assert cols("idx_usage_account_usgid") == ["account_id", "usg_id"]

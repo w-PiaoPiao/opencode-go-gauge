@@ -67,8 +67,9 @@ abstract class ChartDao {
             "all" -> return null to emptyArray()
             else -> {
                 val days = Regex("^(\\d+)d$").find(period)?.groupValues?.get(1)?.toIntOrNull()?.coerceIn(1, 365) ?: 30
+                // 恰好 days 个日历日 (今天-days+1 … 今天), 与 daily_stats/totals 同源 (I10)
                 clause = "local_date >= date('now', 'localtime', ?)"
-                args = arrayOf("-${days} days")
+                args = arrayOf("-${days - 1} days")
             }
         }
         return clause to args
@@ -77,9 +78,15 @@ abstract class ChartDao {
     /**
      * 「排除模型」SQL 片段 — mirrors db._exclude_clause (参数化 NOT IN, 模型名不拼进 SQL 文本).
      * 去空白去重后为空返回 null.
+     *
+     * 峰谷分档打开时图例给的是带「 峰 / 谷」后缀的名称; 排除是模型级动作, 先剥后缀
+     * 还原真实模型名, 否则 `model NOT IN ('xxx 峰')` 一条也匹配不上 (desktop 同口径).
      */
     private fun excludeClause(excludeModels: Collection<String>): Pair<String?, List<String>> {
-        val cleaned = excludeModels.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val cleaned = excludeModels
+            .map { PeakSplit.stripSuffix(it) }
+            .filter { it.isNotEmpty() }
+            .distinct()
         if (cleaned.isEmpty()) return null to emptyList()
         return "model NOT IN (${cleaned.joinToString(", ") { "?" }})" to cleaned
     }
@@ -154,13 +161,9 @@ abstract class ChartDao {
     @RawQuery(observedEntities = [UsageChartEntity::class])
     abstract suspend fun modelStatsRaw(query: SupportSQLiteQuery): List<UsageDao.ModelStatRow>
 
-    suspend fun modelStats(period: String, accountId: Int, cycleStart: String? = null): List<ModelStat> {
-        val (where, args) = buildWhere(period, accountId, cycleStart)
-        val rows = modelStatsRaw(
-            SimpleSQLiteQuery(
-                """
-                SELECT model,
-                       SUM(requests) AS request_count,
+    /** charts 源 model_stats 的聚合列。 */
+    private val modelAggCols = """
+        SUM(requests) AS request_count,
                        0 AS session_count,
                        SUM(tokens_in) AS total_input_tokens,
                        SUM(tokens_in - cache_read_tokens) AS uncached_input_tokens,
@@ -169,32 +172,78 @@ abstract class ChartDao {
                        SUM(cache_creation_tokens) AS cache_write_tokens,
                        SUM(tokens_out) AS total_output_tokens,
                        SUM(total_cost) AS total_cost_usd
+    """.trimIndent()
+
+    suspend fun modelStats(
+        period: String,
+        accountId: Int,
+        cycleStart: String? = null,
+        peakSplit: Boolean = false,
+    ): List<ModelStat> {
+        val (where, args) = buildWhere(period, accountId, cycleStart)
+        if (!peakSplit) {
+            val rows = modelStatsRaw(
+                SimpleSQLiteQuery(
+                    """
+                    SELECT model, '' AS tier, $modelAggCols
+                    FROM usage_charts
+                    $where
+                    GROUP BY model
+                    ORDER BY SUM(tokens_in + tokens_out) DESC
+                    """.trimIndent(),
+                    args,
+                )
+            )
+            return rows.map { it.toModelStat() }
+        }
+        // 两段式 (P2-1) — 与 UsageDao.modelStats 同口径, 时间列换成 charts 的 time_bucket
+        val (tierExpr, holidays) = PeakSplit.tierSql("time_bucket")
+        val baseRows = modelStatsRaw(
+            SimpleSQLiteQuery(
+                """
+                SELECT model, '' AS tier, $modelAggCols
                 FROM usage_charts
-                $where
+                $where AND ${PeakSplit.baseSql}
                 GROUP BY model
-                ORDER BY SUM(tokens_in + tokens_out) DESC
                 """.trimIndent(),
                 args,
             )
         )
-        return rows.map { r ->
-            val hit = r.cacheHitTokens
-            val miss = r.uncachedInputTokens
-            val hitRate = if (hit + miss > 0) hit.toDouble() / (hit + miss) * 100 else 0.0
-            ModelStat(
-                model = r.model,
-                requestCount = r.requestCount,
-                sessionCount = 0,
-                totalInputTokens = r.totalInputTokens,
-                uncachedInputTokens = miss,
-                totalReasoningTokens = 0,
-                cacheHitTokens = hit,
-                cacheWriteTokens = r.cacheWriteTokens,
-                totalOutputTokens = r.totalOutputTokens,
-                totalCostUsd = r.totalCostUsd,
-                hitRate = Math.round(hitRate * 100) / 100.0,
+        // GROUP BY 用输出别名 tier: tier 表达式与节假日占位符只出现一次
+        val tierRows = modelStatsRaw(
+            SimpleSQLiteQuery(
+                """
+                SELECT model, $tierExpr AS tier, $modelAggCols
+                FROM usage_charts
+                $where AND ${PeakSplit.flashSql}
+                GROUP BY model, tier
+                """.trimIndent(),
+                (holidays + args.toList()).toTypedArray(),
             )
-        }
+        )
+        return (baseRows + tierRows)
+            .map { it.toModelStat() }
+            .sortedByDescending { it.totalInputTokens + it.totalOutputTokens }
+    }
+
+    /** charts 行的 ModelStat 映射 (会话数/推理 token 服务端聚合无此维度, 恒为 0)。 */
+    private fun UsageDao.ModelStatRow.toModelStat(): ModelStat {
+        val hit = cacheHitTokens
+        val miss = uncachedInputTokens
+        val hitRate = if (hit + miss > 0) hit.toDouble() / (hit + miss) * 100 else 0.0
+        return ModelStat(
+            model = PeakSplit.labelFor(model, tier),
+            requestCount = requestCount,
+            sessionCount = 0,
+            totalInputTokens = totalInputTokens,
+            uncachedInputTokens = miss,
+            totalReasoningTokens = 0,
+            cacheHitTokens = hit,
+            cacheWriteTokens = cacheWriteTokens,
+            totalOutputTokens = totalOutputTokens,
+            totalCostUsd = totalCostUsd,
+            hitRate = Math.round(hitRate * 100) / 100.0,
+        )
     }
 
     @RawQuery(observedEntities = [UsageChartEntity::class])
@@ -222,14 +271,14 @@ abstract class ChartDao {
                 GROUP BY local_date
                 ORDER BY date ASC
                 """.trimIndent(),
-                (listOf<Any>(accountId, "-${clamped} days") + exArgs).toTypedArray(),
+                (listOf<Any>(accountId, "-${clamped - 1} days") + exArgs).toTypedArray(),
             )
         )
-        // 连续日期补 0 (与 UsageDao.dailyStats 同口径)
+        // 连续日期补 0 (与 UsageDao.dailyStats 同口径), 恰好 clamped 个日历日 (I10)
         val byDate = rows.associateBy { it.date }
         val today = java.time.LocalDate.now()
-        val out = ArrayList<io.github.yphyphyph.gogauge.data.model.DailyStat>(clamped + 1)
-        for (i in clamped downTo 0) {
+        val out = ArrayList<io.github.yphyphyph.gogauge.data.model.DailyStat>(clamped)
+        for (i in (clamped - 1) downTo 0) {
             val key = today.minusDays(i.toLong()).toString()
             val r = byDate[key]
             if (r == null) {
@@ -297,7 +346,7 @@ abstract class ChartDao {
 
     @Query(
         """
-        SELECT local_date AS date, model,
+        SELECT local_date AS date, model, '' AS tier,
                COALESCE(SUM(tokens_in), 0) AS input,
                COALESCE(SUM(tokens_out), 0) AS output,
                COALESCE(SUM(total_cost), 0) AS cost_usd
@@ -308,11 +357,74 @@ abstract class ChartDao {
     )
     abstract suspend fun modelDailyStatsRaw(accountId: Int, intervalArg: String): List<UsageDao.ModelDailyRow>
 
-    /** 近 N 天「日 × 模型」原始聚合 (charts 源; tokens_in 含缓存) — desktop model_daily_stats charts 分支 parity. */
-    suspend fun modelDailyStatsRows(days: Int, accountId: Int): List<UsageDao.ModelDailyRow> =
-        modelDailyStatsRaw(accountId, "-${days.coerceIn(1, 365)} days")
+    /** 近 N 天「日 × 模型」原始聚合 (charts 源; tokens_in 含缓存) — desktop model_daily_stats charts 分支 parity.
+     *
+     * @param peakSplit 峰谷分档: 命中 DeepSeek flash 白名单的桶按档位拆成两条序列。
+     */
+    suspend fun modelDailyStatsRows(
+        days: Int,
+        accountId: Int,
+        peakSplit: Boolean = false,
+    ): List<UsageDao.ModelDailyRow> {
+        val clamped = days.coerceIn(1, 365)
+        val intervalArg = "-${clamped - 1} days"
+        if (!peakSplit) return modelDailyStatsRaw(accountId, intervalArg)
+        val consts = """
+            COALESCE(SUM(tokens_in), 0) AS input,
+            COALESCE(SUM(tokens_out), 0) AS output,
+            COALESCE(SUM(total_cost), 0) AS cost_usd
+        """.trimIndent()
+        val (tierExpr, holidays) = PeakSplit.tierSql("time_bucket")
+        val base = modelDailyQuery(
+            SimpleSQLiteQuery(
+                """
+                SELECT local_date AS date, model, '' AS tier, $consts
+                FROM usage_charts
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?) AND ${PeakSplit.baseSql}
+                GROUP BY local_date, model
+                """.trimIndent(),
+                arrayOf<Any>(accountId, intervalArg),
+            )
+        )
+        val split = modelDailyQuery(
+            SimpleSQLiteQuery(
+                """
+                SELECT local_date AS date, model, $tierExpr AS tier, $consts
+                FROM usage_charts
+                WHERE account_id = ? AND local_date >= date('now', 'localtime', ?) AND ${PeakSplit.flashSql}
+                GROUP BY local_date, model, tier
+                """.trimIndent(),
+                (holidays + listOf<Any>(accountId, intervalArg)).toTypedArray(),
+            )
+        )
+        return (base + split).map { it.copy(model = PeakSplit.labelFor(it.model, it.tier)) }
+    }
+
+    @RawQuery(observedEntities = [UsageChartEntity::class])
+    abstract suspend fun modelDailyQuery(query: SupportSQLiteQuery): List<UsageDao.ModelDailyRow>
 
     @Query("SELECT DISTINCT model FROM usage_charts WHERE account_id = :accountId " +
         "UNION SELECT DISTINCT model FROM usage_records WHERE account_id = :accountId ORDER BY model")
     abstract suspend fun listModelsUnionRecords(accountId: Int): List<String>
+
+    // ------------------------------------------------------------------
+    // 「按同步范围清理」的聚合表侧 (desktop P2-7 parity)
+    //
+    // GOAT 账号统计主口径来自 usage_charts: 只删明细会让「已清理 N 条」之后
+    // totals("all") 仍含历史, charts 也会跨计费周期无限累积.
+    // ------------------------------------------------------------------
+
+    /** 待删的过期聚合桶数 (与明细侧同一 local_date 边界, 不写库)。 */
+    @Query(
+        "SELECT COUNT(*) FROM usage_charts" +
+            " WHERE local_date IS NOT NULL AND local_date < :cutoff"
+    )
+    abstract suspend fun prunePreviewCount(cutoff: String): Int
+
+    /** 按边界删除**所有账号**的过期聚合桶, 返回删除条数 (删除不可恢复)。 */
+    @Query(
+        "DELETE FROM usage_charts" +
+            " WHERE local_date IS NOT NULL AND local_date < :cutoff"
+    )
+    abstract suspend fun pruneExpiredAll(cutoff: String): Int
 }

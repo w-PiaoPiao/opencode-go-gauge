@@ -50,12 +50,12 @@ def test_continuous_days_with_zero_fill(tmp_db):
         _rec("u3", "beta", inp=20, out=2, cost=0.2, days_ago=2),
     ])
     out = db.model_daily_stats(days=3)
-    assert len(out["days"]) == 4  # [今天-3, 今天]
+    assert len(out["days"]) == 3  # 恰好 3 个点: [今天-2, 今天] (I10)
     assert out["days"][-1] == _today()
     by_model = {s["model"]: s for s in out["series"]}
     assert set(by_model) == {"alpha", "beta"}
     alpha = by_model["alpha"]
-    assert len(alpha["input"]) == 4
+    assert len(alpha["input"]) == 3
     assert alpha["input"][-1] == 200 and alpha["input"][-2] == 0  # 同日两条累加, 其余补 0
     assert alpha["output"][-1] == 20
     assert alpha["cost"][-1] == pytest.approx(2.0)
@@ -81,5 +81,5 @@ def test_exclude_models_filters_series(tmp_db):
 
 def test_empty_db_returns_continuous_days(tmp_db):
     out = db.model_daily_stats(days=7)
-    assert len(out["days"]) == 8
+    assert len(out["days"]) == 7  # 恰好 N 个点 (I10)
     assert out["series"] == []

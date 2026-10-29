@@ -1,7 +1,30 @@
-# macOS 打包依赖锁定 (build_macos.sh 优先使用本文件, 保证构建可复现).
-# 升级依赖时: pip3 freeze 后更新对应版本并重新构建验证.
+# macOS 打包依赖锁定 (build_macos.sh / scripts/build.py 使用本文件, 保证构建可复现).
+#
+# 必须是**全量**锁: 只列顶层包时, pyobjc 的 WebKit/Cocoa 绑定与 pywebview 的传递
+# 依赖会随上游漂移 —— 真机行为 (cookie 抓取、WebKit 版本) 和 CI 产物都不可复现
+# (与 requirements-windows.lock.txt 里 pythonnet 事故同一类风险).
+#
+# 来源: 2026-10-27 在本机 macOS 构建 venv 执行 `pip install -r requirements.txt
+# pyinstaller` 后的 `pip freeze` 全量结果 (去掉仅测试用的 pytest/iniconfig/pluggy/
+# Pygments)。**不升级**顶层包版本; 新增传递依赖时只补其已用版本。
+# 更新方式: 在干净 venv 里安装 -> 跑一次 scripts/build.py --platform macos 验证
+#           -> 用 pip freeze 全量结果替换本文件。
+altgraph==0.17.5
 bottle==0.13.4
+macholib==1.16.4
+packaging==26.3
 pillow==11.3.0
+proxy_tools==0.1.0
 pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+pyobjc-core==12.2.2
+pyobjc-framework-Cocoa==12.2.2
+pyobjc-framework-Quartz==12.2.2
+pyobjc-framework-Security==12.2.2
+pyobjc-framework-UniformTypeIdentifiers==12.2.2
+pyobjc-framework-WebKit==12.2.2
 pystray==0.19.5
 pywebview==6.2.1
+setuptools==84.0.0
+six==1.17.0
+typing_extensions==4.16.0

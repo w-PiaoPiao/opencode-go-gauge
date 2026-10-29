@@ -202,3 +202,57 @@ def test_negative_content_length_does_not_hang(http):
 
     status_line = resp.split("\r\n")[0]
     assert status_line.split(" ")[1].startswith("4"), status_line
+
+def test_malformed_json_body_returns_400_and_writes_nothing(http, tmp_path):
+    """非法 JSON body 曾被并进"路径未授权"的 403; 应为 400 且不碰任何文件."""
+    target = tmp_path / "out.csv"
+    server.approve_path(str(target), server.APPROVAL_SAVE)
+    import http.client as http_client
+
+    port = int(http.rsplit(":", 1)[1])
+    conn = http_client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        conn.request(
+            "POST", "/api/export/csv", body=b"{not-json",
+            headers={"Content-Type": "application/json", "Content-Length": "9"})
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode("utf-8"))
+        assert resp.status == 400
+        assert body["ok"] is False
+    finally:
+        conn.close()
+    assert not target.exists()
+
+
+def test_import_invalid_backup_returns_400_not_500(http, tmp_path):
+    """坏备份文件 (非 gzip / 非 GoGauge / 字段损坏) 是用户输入错误 -> 400 而非 500."""
+    cases = {
+        "not-gzip.json.gz": b"this is not gzip",
+        "foreign.json.gz": gzip.compress(json.dumps({"app": "Other"}).encode()),
+        "bad-fields.json.gz": gzip.compress(json.dumps(
+            {"app": "GoGauge", "version": 1, "accounts": "oops", "records": []}).encode()),
+        # N1: 任意精度大整数 (10**400) 让 float() 抛 OverflowError; 必须映射 400
+        "huge-number.json.gz": gzip.compress(json.dumps({
+            "app": "GoGauge", "version": 1,
+            "accounts": [{"id": 7, "name": "a", "workspaceId": "ws",
+                          "provider": "opencode"}],
+            "records": [{"usgId": "u1", "createdAt": "2026-09-02T10:00:00Z",
+                         "accountId": 7, "model": "m", "costUsd": 10**400}],
+        }).encode()),
+    }
+    for name, payload in cases.items():
+        path = tmp_path / name
+        path.write_bytes(payload)
+        server.approve_path(str(path), server.APPROVAL_OPEN)
+        body, status = _post(f"{http}/api/backup/import", {"path": str(path)})
+        assert status == 400, (name, body)
+        assert body["ok"] is False
+        assert "500" not in str(body.get("error", ""))
+
+
+def test_unapproved_path_still_403_even_for_bad_file(http, tmp_path):
+    """路径授权先于文件内容: 未登记的路径一律 403 (不因内容好坏改变)."""
+    path = tmp_path / "unknown.json.gz"
+    path.write_bytes(b"garbage")
+    body, status = _post(f"{http}/api/backup/import", {"path": str(path)})
+    assert status == 403 and body["ok"] is False

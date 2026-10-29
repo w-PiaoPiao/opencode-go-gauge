@@ -28,6 +28,8 @@ NEW_CC = "cUZ3munSEBkvnE0yce8rwTH2Kq7Th1i7.NEWSESSION"
 
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
+    # 双保险: 模块级 data_dir 替身 + GOUSAGE_DATA (防任何绕过前缀的 db 路径)
+    monkeypatch.setenv("GOUSAGE_DATA", str(tmp_path))
     monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
     yield tmp_path
     db.close_db()
@@ -245,6 +247,13 @@ def test_install_login_network_rules_skips_non_macos(monkeypatch):
 def test_wait_window_view_returns_none_for_unknown_window(monkeypatch):
     """窗口查不到时必须按时返回 None, 不能无限轮询拖死登录流程."""
     monkeypatch.setattr(auth.sys, "platform", "darwin")
+    # 预热 pywebview 的 cocoa 后端: 首次 import 会拉 pyobjc (数百 ms~秒级), 若落在
+    # 计时区内, 在装了真实 pywebview 的机器/带 coverage 的跑法下会误判为"超时后
+    # 没有按时返回". 这里先把一次性 import 成本付掉, 计时只覆盖等待逻辑本身.
+    try:
+        import webview.platforms.cocoa  # noqa: F401
+    except Exception:  # noqa: BLE001 CI 用 webview 替身/非 macOS: 预热失败不影响断言
+        pass
     started = time.time()
     assert auth.wait_window_view(object(), timeout=0.3) is None
     assert time.time() - started < 2.0

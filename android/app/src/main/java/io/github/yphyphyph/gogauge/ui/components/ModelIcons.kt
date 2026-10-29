@@ -36,9 +36,12 @@ object ModelIcons {
     /**
      * 解析模型名 → 图标键。未命中精确匹配时 hy2/hy3 等混元系列按前缀回退到 hy,
      * 其余兜底 deepseek (desktop v1.0.3 语义)。
+     *
+     * 峰谷分档打开后统计页给的是「模型 峰 / 模型 谷」, 先剥后缀再匹配 —— 否则
+     * 拆出来的两条会双双落到兜底图标 (desktop 前端按 base 名取图标, 同口径)。
      */
     fun resolve(model: String): String {
-        val s = model.trim().lowercase()
+        val s = io.github.yphyphyph.gogauge.data.db.PeakSplit.stripSuffix(model).trim().lowercase()
         val base = s.split("-").firstOrNull().orEmpty()
         return MAP[base] ?: if (base.startsWith("hy")) "hy" else "deepseek"
     }

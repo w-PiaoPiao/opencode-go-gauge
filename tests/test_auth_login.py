@@ -1,22 +1,13 @@
-"""登录监听逻辑测试: 会话 Cookie 挑选 / 工作区提取 / 登录 URL.
+"""登录监听逻辑测试: 会话 Cookie 挑选 / 工作区提取 / 登录 URL / 日志打码.
 
-auth.py 顶层 import webview (仅打包环境可用), 这里先用空模块占位再导入,
-被测函数本身不触碰窗口对象。
+webview 占位模块由 tests/conftest.py 统一注入 (无 pywebview 的 CI 也能导入).
 """
 from __future__ import annotations
 
-import sys
-import types
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse
 
-# 占位模块补 windows 属性: LoginWatcher/_window_alive 与其它测试的
-# monkeypatch.setattr(auth.webview, "windows", ...) 都依赖它存在
-_webview_stub = types.ModuleType("webview")
-_webview_stub.windows = []
-sys.modules.setdefault("webview", _webview_stub)
-
-from app import auth  # noqa: E402
+from app import auth
 
 
 def _pywebview_cookie(name: str, value: str) -> SimpleCookie:
@@ -242,3 +233,103 @@ def test_github_logged_user_reads_meta():
             raise RuntimeError("page gone")
 
     assert auth._github_logged_user(BrokenWin()) == ""
+
+
+# ── 日志 URL 打码 (P3-17: OAuth code/state/return_to 不落盘) ────────────────
+
+
+def test_redact_url_hides_oauth_code_and_state():
+    """导航日志必须保留 host/path 便于定位, 但凭证类 query 值要打码."""
+    raw = (
+        "https://commandcode.ai/api/auth/callback/github"
+        "?code=SECRET_CODE_123&state=SECRET_STATE&provider=github"
+    )
+    redacted = auth.redact_url(raw)
+    assert "SECRET_CODE_123" not in redacted
+    assert "SECRET_STATE" not in redacted
+    assert "code=***" in redacted
+    assert "state=***" in redacted
+    # 非敏感参数与定位信息保留
+    assert "provider=github" in redacted
+    assert redacted.startswith("https://commandcode.ai/api/auth/callback/github")
+
+
+def test_redact_url_hides_return_to_and_nested_secret():
+    """GitHub 入口的 return_to 里嵌着 authorize URL (含 code_challenge), 整值打码."""
+    raw = (
+        "https://github.com/login?client_id=Ov23abc"
+        "&return_to=%2Flogin%2Foauth%2Fauthorize%3Fclient_id%3DOv23abc"
+        "%26code_challenge%3DSECRET_CHALLENGE%26state%3Dst_x"
+    )
+    redacted = auth.redact_url(raw)
+    assert "return_to=***" in redacted
+    assert "SECRET_CHALLENGE" not in redacted
+    assert "client_id=Ov23abc" in redacted  # client_id 不是凭证, 保留便于排障
+
+
+def test_redact_url_hides_fragment_token():
+    """fragment 历史上被用来传 token: 一律打码 (I4 的 dashboard URL 也是 fragment)."""
+    assert auth.redact_url("https://opencode.ai/console/#access_token=SECRET") == (
+        "https://opencode.ai/console/#***"
+    )
+
+
+def test_redact_url_handles_plain_text_and_bad_input():
+    """非 URL 文本 (异常消息等) 里的 http(s) 片段也要打码; 空值安全."""
+    assert auth.redact_url("") == ""
+    assert auth.redact_url(None) == ""
+    message = "load failed: https://x.test/cb?code=SECRET&x=1 (window gone)"
+    redacted = auth.redact_url(message)
+    assert "SECRET" not in redacted
+    assert "window gone" in redacted
+
+
+def test_watcher_nav_logging_redacts_oauth_secrets(monkeypatch):
+    """P3-17 集成: LoginWatcher 的导航日志不能把 OAuth code/state 落盘."""
+    import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    from app import auth as auth_mod  # noqa: PLC0415
+
+    logged: list[str] = []
+    monkeypatch.setattr(auth_mod, "_log", logged.append)
+    monkeypatch.setattr(auth_mod, "COOKIE_POLL_SEC", 0.01)
+    monkeypatch.setattr(auth_mod, "COOKIE_READ_TIMEOUT", 0.1)
+
+    class CallbackWin:
+        url = (
+            "https://commandcode.ai/api/auth/callback/github"
+            "?code=SECRET_OAUTH_CODE&state=SECRET_STATE_VALUE"
+        )
+
+        def get_current_url(self):
+            return self.url
+
+        def get_cookies(self):
+            return []
+
+        def clear_cookies(self):
+            pass
+
+        def load_url(self, url):
+            self.url = url
+
+    win = CallbackWin()
+    monkeypatch.setattr(auth_mod.webview, "windows", [win])
+    watcher = auth_mod.LoginWatcher(win, "commandcode", lambda *a: None)
+    # 禁止漂移自愈 (本用例只看日志, 不验证 reset)
+    watcher._entry_resets = auth_mod._ENTRY_RESET_MAX
+    watcher.start()
+    try:
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not any("[login] nav:" in line for line in logged):
+            time.sleep(0.01)
+    finally:
+        watcher.stop()
+        if watcher._thread is not None:
+            watcher._thread.join(timeout=2.0)
+
+    nav_lines = [line for line in logged if "[login] nav:" in line]
+    assert nav_lines, "导航日志没有产生, 用例没走到目标路径"
+    assert "SECRET_OAUTH_CODE" not in nav_lines[0]
+    assert "SECRET_STATE_VALUE" not in nav_lines[0]

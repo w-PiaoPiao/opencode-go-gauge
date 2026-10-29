@@ -1,8 +1,15 @@
-# 全平台统一发布: 推送版本 tag (如 v2.2.1d) 后, 并行构建 Windows / macOS(双架构) /
-# Android, 全部安装包作为 assets 附到同一个 GitHub Release.
+# 全平台统一发布: 推送版本 tag (如 v2.2.1d) 后, 先过 preflight（测试 + 三端版本
+# 一致性）, 再并行构建 Windows / macOS(双架构) / Android, 全部安装包作为 assets
+# 附到同一个 GitHub Release.
 #
-# - 统一发布只认「不带平台后缀」的版本 tag; 旧的 v*-macos / v*-windows / v*-android
-#   单平台 workflow 继续保留 (用于过渡期或单平台热修), 见 docs/release.md.
+# - preflight 是所有 build 的 `needs`: 测试红/版本号不一致时**在构建之前**失败,
+#   不会像以前那样跑完 45 分钟才发现 tag 与 __version__ 对不上。
+# - 统一发布只认「不带平台后缀」的版本 tag; 旧的 v*-macos / v*-windows /
+#   v*-android / v*-harmony 单平台 workflow 继续保留 (用于过渡期或单平台热修),
+#   它们各自也加了 preflight, 见对应 workflow 与 docs/release.md.
+# - Android 版本可以与 tag 不同（当前 desktop=2.2.2 / Android=2.2.1d 是允许的
+#   滞后状态）: preflight 输出 android_ready, 只有 Android 版本 == tag 时才构建
+#   APK; publish 按实际构建结果决定是否附带 Android 资产。
 # - release 已存在时用 gh release upload --clobber 覆盖资产, 不会重复建 release.
 # - 重新跑: Actions 页面 Re-run jobs, 或 workflow_dispatch 选中 tag.
 name: release
@@ -21,41 +28,74 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-windows:
+  # 构建前硬闸门: 全量 pytest + scripts/check_versions.py。
+  # android_ready 决定是否构建 APK（Android 版本必须等于 tag 才出包）。
+  preflight:
     # 带平台后缀的 tag 交给各自的旧 workflow, 避免同一 tag 建出两个 release
+    if: ${{ !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      # tag 推送时由脚本给出 true/false; workflow_dispatch 选分支时脚本步骤跳过,
+      # 此时默认允许构建 Android（发布步骤本身有 tag 判断, 不会误发）
+      android_ready: ${{ steps.versions.outputs.android_ready == 'false' && 'false' || 'true' }}
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        # tag 推送也要真的跑测试: 之前发布链上没有任何测试闸门, 曾从 ci=failure
+        # 的 commit 发过 v2.2.1a/b 三个平台产物.
+        run: |
+          python -m pytest tests/ \
+            --timeout=120 \
+            -W error::DeprecationWarning
+
+      - name: Verify tag matches versions
+        id: versions
+        if: startsWith(github.ref, 'refs/tags/')
+        run: >
+          python scripts/check_versions.py
+          --tag "$GITHUB_REF_NAME" --platform all --github-output "$GITHUB_OUTPUT"
+
+  build-windows:
+    needs: preflight
     if: ${{ !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          # 构建 job 会执行第三方依赖 (pip/gradle), 不把 token 落进 .git/config
+          # 构建 job 会执行第三方依赖 (pip), 不把 token 落进 .git/config
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-windows.lock.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -q -r requirements-windows.lock.txt
 
       - name: Build GoGauge.exe
-        shell: pwsh
-        run: |
-          python -m pip install -q -r requirements-windows.lock.txt
-          @"
-          """构建时自动生成 (gitignored): 打包产物元信息, 供更新检查使用."""
-          UPDATE_REPO = "${{ github.repository }}"
-          "@ | Out-File -Encoding utf8 app/_build_info.py
-          python -m PyInstaller --noconfirm --clean --onefile --noconsole --name GoGauge `
-            --add-data "app/web;app/web" `
-            --add-data "assets;assets" `
-            --icon assets/GoGauge.ico `
-            --collect-submodules webview `
-            --hidden-import clr `
-            --hidden-import pythonnet `
-            --hidden-import pystray `
-            --exclude-module numpy `
-            --exclude-module cryptography `
-            --exclude-module PIL._avif `
-            entry.py
+        # 构建参数统一收敛在 scripts/build.py（含 hiddenimports/excludes/--add-data/
+        # _build_info.py 生成），避免以前 4 处手抄命令互相漂移。
+        run: python scripts/build.py --platform windows --repo "${{ github.repository }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -64,6 +104,7 @@ jobs:
           if-no-files-found: error
 
   build-macos:
+    needs: preflight
     if: ${{ !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
     strategy:
       fail-fast: false
@@ -76,16 +117,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-macos.lock.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -q -r requirements-macos.lock.txt
 
       - name: Build .app
-        run: ./build_macos.sh
+        # 统一入口; macOS 侧的后处理（icns 图标 / Info.plist 版本 / ad-hoc 重签）
+        # 由 scripts/build.py 完成, 不再单独调 build_macos.sh
+        run: python scripts/build.py --platform macos --repo "${{ github.repository }}"
 
       - name: Zip (保留签名/权限)
         run: ditto -c -k --keepParent dist/GoGauge.app "GoGauge-${{ matrix.arch }}.zip"
@@ -97,11 +145,14 @@ jobs:
           if-no-files-found: error
 
   build-android:
-    if: ${{ !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
+    needs: preflight
+    # Android 版本必须 == tag 才出包（preflight 的 android_ready）; 否则统一 release
+    # 只发桌面端资产, 与 "Android 未适配时允许滞后" 的版本策略一致
+    if: ${{ needs.preflight.outputs.android_ready == 'true' && !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -110,10 +161,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # 仓库无 wrapper, 固定与 AGP 8.13 兼容的 Gradle 版本
+      # 固定与 AGP 8.13 兼容的 Gradle 版本（仓库 wrapper 是 9.1.0, 但发布链路一直
+      # 用 8.14.3; 统一升级时这里与 ci.yml 的 android-unit-tests 一起改）
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.3"
+
+      - name: Run JVM unit tests
+        # APK 发布前先跑 Android 单测: 以前 release 只 assembleRelease, 1571 行
+        # JVM 测试从未执行过
+        working-directory: android
+        run: gradle :app:testDebugUnitTest --no-daemon --console=plain
 
       - name: Build signed release APK
         working-directory: android
@@ -128,33 +186,27 @@ jobs:
   publish:
     permissions:
       contents: write
-    needs: [build-windows, build-macos, build-android]
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') && !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') }}
+    needs: [preflight, build-windows, build-macos, build-android]
+    # always(): 需要显式判断各 build 结果（preflight 失败/桌面构建失败不能发;
+    # Android 被跳过是合法的 —— Android 版本尚未适配该 tag）
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/') &&
+      !contains(github.ref_name, '-macos') && !contains(github.ref_name, '-windows') &&
+      !contains(github.ref_name, '-android') && !contains(github.ref_name, '-harmony') &&
+      needs.preflight.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-macos.result == 'success' &&
+      (needs.build-android.result == 'success' || needs.build-android.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
-      - name: Verify tag matches app versions
-        # tag 与代码内版本不一致会让已安装客户端「永远有新版本」: 产物里还是旧
-        # __version__, 下次检查仍判定旧 < tag. 发布前必须先升三处版本号.
-        run: |
-          set -euo pipefail
-          TAG="${{ github.ref_name }}"
-          VER="${TAG#v}"
-          PY_VER=$(grep -oE '__version__ = "[^"]+"' app/__init__.py | head -1 | sed -E 's/.*"([^"]+)"/\1/')
-          ANDROID_VER=$(grep -E 'versionName = "' android/app/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)"/\1/')
-          echo "tag=${TAG} desktop=${PY_VER} android=${ANDROID_VER}"
-          if [ "$VER" != "$PY_VER" ]; then
-            echo "::error::tag ${TAG} 与 app/__init__.py __version__=${PY_VER} 不一致, 请先升版本号"
-            exit 1
-          fi
-          if [ "$VER" != "$ANDROID_VER" ]; then
-            echo "::error::tag ${TAG} 与 Android versionName=${ANDROID_VER} 不一致, 请先升版本号"
-            exit 1
-          fi
+      - name: Verify tag matches versions (兜底)
+        # preflight 已校验过; 这里再跑一次防止 workflow 中途被改动/Re-run 旧 job
+        run: python3 scripts/check_versions.py --tag "$GITHUB_REF_NAME" --platform all
 
       - uses: actions/download-artifact@v4
         with:
@@ -172,6 +224,7 @@ jobs:
           path: artifacts/macos-x86_64
 
       - uses: actions/download-artifact@v4
+        if: needs.build-android.result == 'success'
         with:
           name: GoGauge-android-apk
           path: artifacts/android
@@ -183,13 +236,17 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # v2.2.1d -> GoGauge-v2.2.1d-{windows.exe,macos-arm64.zip,macos-x86_64.zip,android.apk}
+          # v2.2.1d -> GoGauge-v2.2.1d-{windows.exe,macos-arm64.zip,macos-x86_64.zip[,android.apk]}
           VER="${TAG#v}"
           mkdir -p dist
           mv artifacts/windows/GoGauge.exe "dist/GoGauge-v${VER}-windows.exe"
           mv artifacts/macos-arm64/GoGauge-arm64.zip "dist/GoGauge-v${VER}-macos-arm64.zip"
           mv artifacts/macos-x86_64/GoGauge-x86_64.zip "dist/GoGauge-v${VER}-macos-x86_64.zip"
-          mv artifacts/android/app-release.apk "dist/GoGauge-v${VER}-android.apk"
+          if [ -f artifacts/android/app-release.apk ]; then
+            mv artifacts/android/app-release.apk "dist/GoGauge-v${VER}-android.apk"
+          else
+            echo "::notice::Android 版本未适配 tag ${TAG}, 本次 release 不含 APK"
+          fi
           # 全平台资产 + 校验和清单 (资产名不含平台后缀, 不会被更新检查误选)
           ( cd dist && sha256sum * > SHA256SUMS.txt )
           ls -lh dist

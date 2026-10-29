@@ -41,7 +41,7 @@ import threading
 import time
 from http.cookies import SimpleCookie as SimpleCookieCls
 from typing import Callable, Iterable, Optional
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import webview
 
@@ -122,6 +122,63 @@ try:  # 历史版本可能以默认 0644 创建过日志: 收紧权限
     os.chmod(_LOG_FILE, 0o600)
 except OSError:
     pass
+
+
+# ── 日志 URL 打码 (诊断日志不落凭证类 query 参数) ─────────────────────────
+# 登录链路的导航 URL 会带 OAuth ``code``/``state``/``return_to`` (code 是短期
+# 单次可用的授权码), GitHub 授权入口还带 ``client_id``/``code_challenge``.
+# 日志只需要"走到哪一步", 不需要凭证值.
+_REDACTED = "***"
+# 命中即打码的 query 参数名片段 (小写子串匹配): 宁可多打, 不可漏打.
+_SENSITIVE_PARAM_HINTS = (
+    "code", "state", "return_to", "redirect", "token", "session",
+    "auth", "ticket", "secret", "password", "key",
+)
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s'\"<>]+")
+# urlsplit 异常/非 URL 文本的兜底: 直接把敏感 key 的值切掉.
+_SENSITIVE_QUERY_FALLBACK_RE = re.compile(
+    r"(?i)([?&][^=&#\s]*(?:code|state|return_to|redirect|token|session|auth|ticket|secret|password|key)[^=&#\s]*=)[^&#\s]*"
+)
+
+
+def _is_sensitive_param(name: str) -> bool:
+    lowered = (name or "").lower()
+    return any(hint in lowered for hint in _SENSITIVE_PARAM_HINTS)
+
+
+def _redact_query_params(url: str) -> str:
+    """把单个 URL 的敏感 query 值/fragment 替换为 ``***`` (纯函数)."""
+    try:
+        parts = urlsplit(url)
+        query = parts.query
+        if query:
+            pairs = parse_qsl(query, keep_blank_values=True)
+            # 手工拼 query: urlencode 会把 *** 再编码成 %2A%2A%2A (日志里难认)
+            rebuilt: list[str] = []
+            for key, value in pairs:
+                encoded_key = quote(str(key), safe="")
+                if _is_sensitive_param(key):
+                    rebuilt.append(f"{encoded_key}={_REDACTED}")
+                else:
+                    rebuilt.append(f"{encoded_key}={quote(str(value), safe='')}")
+            query = "&".join(rebuilt)
+        # fragment 一律打码: 历史上出现过把 token 塞进 fragment 的登录页.
+        fragment = _REDACTED if parts.fragment else ""
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
+    except Exception:  # noqa: BLE001 日志路径不允许因解析失败而丢日志
+        return _SENSITIVE_QUERY_FALLBACK_RE.sub(r"\1" + _REDACTED, url)
+
+
+def redact_url(text: str) -> str:
+    """日志用: 保留 scheme/host/path 便于定位, 敏感 query 值替换为 ``***``.
+
+    非 URL 文本也能安全传入 (内部按 http(s) 子串逐段打码), 所以异常消息这类
+    "可能夹带 URL" 的文本也可以直接过一遍.
+    """
+    raw = str(text or "")
+    if not raw:
+        return ""
+    return _URL_IN_TEXT_RE.sub(lambda m: _redact_query_params(m.group(0)), raw)
 
 
 def build_login_url(provider: str = PROVIDER_OPENCODE) -> str:
@@ -910,48 +967,133 @@ def read_provider_cookie(win, provider: str, timeout: float = COOKIE_READ_TIMEOU
     选取走 _pick_session_cookie: 按 session_cookie_names 的**优先级**取, 而不是
     按 get_cookies 返回顺序取 —— 两者都存在时新名 __Host-console_session 必须压过
     旧名 auth, 否则残留的历史 cookie 会盖掉当前会话.
+
+    执行复用 _bounded_call 的单例 worker (不再为每次基线采集新建线程).
     """
-    box: dict[str, Optional[str]] = {}
 
-    def worker() -> None:
-        try:
-            cookies = win.get_cookies() or []
-        except Exception:  # noqa: BLE001 窗口未加载完成/已销毁
-            return
+    def worker() -> str:
+        cookies = win.get_cookies() or []
         picked = _pick_session_cookie(cookies, provider)
-        if picked:
-            box["value"] = picked[1]
+        # 空串 = "读到了, 但没有目标 cookie" (与下面的超时 None 区分, 避免误报日志)
+        return picked[1] if picked else ""
 
-    reader = threading.Thread(target=worker, daemon=True, name="gousage-cookie-read")
-    reader.start()
-    reader.join(timeout)
-    if reader.is_alive():
+    value = _bounded_call(worker, timeout)
+    if value is None:  # 超时/异常: 窗口未就绪, 由调用方的旧凭证指纹兜底
         _log("[login] cookie snapshot timed out (window not ready) -> no baseline")
         return None
-    return box.get("value")
+    return str(value) if value else None
+
+
+class _BoundedExecutor:
+    """单例 daemon worker: 执行可能永久挂住的 pywebview 原生调用.
+
+    为什么固定一个 worker: pywebview 的 ``get_current_url``/``get_cookies``/
+    ``evaluate_js`` 内部用**无超时**信号量等 UI 线程回调, 主线程被占住时会挂到
+    回调返回为止. 旧实现每次超时都丢弃一个 worker 线程 (daemon, 不可回收),
+    登录窗留在后台时按轮询频率 (~1/s) 累积; 窗口在调用途中被销毁时回调永不
+    触发, 那些线程就永久卡在原生信号量上.
+
+    这里改为固定一个 worker: 超时的任务结果直接丢弃 (调用方按"这次读不到"
+    处理, 与旧实现语义一致), worker 忙碌期间的新调用**立即返回 None** 而不是
+    新建线程 —— 线程数恒定. 若某次原生调用真的永不返回, 后续调用会一直快速
+    失败, 监听线程本身不会变僵尸 (仍按轮询节奏推进, 单飞守卫不会卡死).
+    """
+
+    THREAD_NAME = "gousage-bounded-call"
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._fn: Optional[Callable[[], object]] = None
+        self._box: dict[str, object] = {}
+        self._done: Optional[threading.Event] = None
+        self._busy = False
+        self._thread: Optional[threading.Thread] = None
+        self._generation = 0
+
+    def call(self, fn, timeout: float):
+        """提交 fn 并最多等 timeout 秒; 忙碌/超时/异常一律返回 None."""
+        with self._cond:
+            if self._busy or self._fn is not None:
+                return None  # 上一单还没完成: 放弃本次, 不再新建线程
+            box: dict[str, object] = {}
+            done = threading.Event()
+            self._box = box
+            self._done = done
+            self._fn = fn
+            self._ensure_worker_locked()
+            self._cond.notify_all()
+        if not done.wait(timeout):
+            with self._cond:
+                # 还没被 worker 取走就撤销; 已被取走的话结果由 worker 丢弃
+                if self._fn is not None and self._done is done:
+                    self._fn = None
+            return None
+        return box.get("value")
+
+    def reset_for_tests(self) -> None:
+        """丢弃当前 worker 状态 (仅测试用).
+
+        无法回收已经卡死的线程 (Python 不能安全终止线程); 用 generation 让
+        旧 worker 在完成当前任务后自行退出, 新调用另起一个 worker.
+        """
+        with self._cond:
+            self._generation += 1
+            self._fn = None
+            self._box = {}
+            self._done = None
+            self._busy = False
+            self._thread = None
+            self._cond.notify_all()  # 唤醒旧 worker: generation 变了, 让它退休
+
+    def _ensure_worker_locked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        generation = self._generation
+        self._thread = threading.Thread(
+            target=self._run, args=(generation,), daemon=True, name=self.THREAD_NAME
+        )
+        self._thread.start()
+
+    def _run(self, generation: int) -> None:
+        while True:
+            with self._cond:
+                while self._generation == generation and self._fn is None:
+                    self._cond.wait()
+                if self._generation != generation:  # reset: 旧 worker 退休
+                    return
+                fn = self._fn
+                box = self._box
+                done = self._done
+                self._fn = None
+                self._busy = True
+            try:
+                box["value"] = fn()
+            except Exception:  # noqa: BLE001 窗口未加载完成/已销毁: 当"读不到"
+                pass
+            finally:
+                with self._cond:
+                    self._busy = False
+                if done is not None:
+                    done.set()
+
+
+_BOUNDED_EXECUTOR = _BoundedExecutor()
+
+
+def _reset_bounded_worker() -> None:
+    """测试/诊断用: 丢弃当前 bounded worker (见 _BoundedExecutor.reset_for_tests)."""
+    _BOUNDED_EXECUTOR.reset_for_tests()
 
 
 def _bounded_call(fn, timeout: float):
-    """在 daemon 子线程里执行 fn, 最多等 timeout 秒 (超时返回 None).
+    """在有界 worker 里执行 fn, 最多等 timeout 秒 (超时/忙碌/异常返回 None).
 
     pywebview 的部分窗口方法内部用**无超时**信号量等 UI 线程回调, 一旦不返回
     就永久挂住调用线程 —— 登录监听会因此变僵尸 (单飞守卫再也不放行, 用户再点
     登录被静默吞掉). 读取类操作用它兜底: 超时即当"读不到"处理, 下一轮照常.
+    线程数恒定 (单例 worker), 不会随超时次数增长 —— 见 _BoundedExecutor.
     """
-    box: dict[str, object] = {}
-
-    def worker() -> None:
-        try:
-            box["value"] = fn()
-        except Exception:  # noqa: BLE001 窗口未加载完成/已销毁
-            return
-
-    thread = threading.Thread(target=worker, daemon=True, name="gousage-bounded-call")
-    thread.start()
-    thread.join(timeout)
-    if thread.is_alive():
-        return None
-    return box.get("value")
+    return _BOUNDED_EXECUTOR.call(fn, timeout)
 
 
 def _bounded_ok(fn, timeout: float) -> bool:
@@ -1091,7 +1233,9 @@ class LoginWatcher:
             url = got or ""
 
             if url != self._last_nav:  # 任意域名的 URL 变化都记录 (暴露监听盲区)
-                _log(f"[login] nav: {url[:180]}")
+                # 打码 OAuth code/state/return_to 等敏感 query 值 (P3-17):
+                # 诊断只需要知道走到哪个域名/路径, 不应把一次性授权码落盘.
+                _log(f"[login] nav: {redact_url(url)[:180]}")
                 self._last_nav = url
 
             if url.startswith("https://" + target_host):
@@ -1149,7 +1293,7 @@ class LoginWatcher:
         except Exception as exc:  # noqa: BLE001
             pairs = []
             names_desc = [f"<read_cookies ERROR {type(exc).__name__}: {exc}>"]
-        _log(f"[login] on {self._target_host()}, url={url[:120]}, cookie_names={names_desc}")
+        _log(f"[login] on {self._target_host()}, url={redact_url(url)[:120]}, cookie_names={names_desc}")
 
         # 按候选名优先级挑会话 cookie (新版 __Host-console_session 优先)
         picked: Optional[tuple[str, str]] = None
@@ -1183,7 +1327,7 @@ class LoginWatcher:
         cls = _classify_github_url(url)
         if cls != self._github_cls:  # 页面状态变化时记日志 (诊断用)
             self._github_cls = cls
-            _log(f"[login] github page {cls}: {url[:180]}")
+            _log(f"[login] github page {cls}: {redact_url(url)[:180]}")
 
         if cls == "entry":
             self._oauth_entry = url
@@ -1218,7 +1362,7 @@ class LoginWatcher:
             return
         self._reloads += 1
         self._stuck_since = None
-        _log(f"[login] github signed-in but OAuth stalled -> resume #{self._reloads}: {target[:180]}")
+        _log(f"[login] github signed-in but OAuth stalled -> resume #{self._reloads}: {redact_url(target)[:180]}")
         if not _bounded_ok(lambda: self.win.load_url(target), COOKIE_PURGE_TIMEOUT):
             _log("[login] resume load_url failed (window busy)")
 

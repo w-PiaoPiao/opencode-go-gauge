@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
+import secrets
 import sys
 import threading
 import time
@@ -14,9 +14,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, backup, db, forecast
+from . import __version__, backup, db, forecast, updater
 from .autostart import disable as _autostart_disable, enable as _autostart_enable
-from .updater import RELEASE_PAGE_URL, check_update, download_update
+from .updater import check_update, download_update
 from .commandcode_api import (
     AuthError as CCAuthError,
     CommandCodeAPIError,
@@ -246,7 +246,12 @@ def _record_cycle_bounds(account_id: int, quota: dict[str, Any]) -> None:
         if quota.get("period_start") and quota.get("period_end"):
             db.record_period_bounds(account_id, quota["period_start"], quota["period_end"])
         for window in quota.get("windows") or []:
-            if window.get("label") == "Monthly" and window.get("reset_at"):
+            # P3-19: 窗口身份用 API 客户端提供的稳定 kind ("rolling"/"weekly"/
+            # "monthly"), 不再拿展示文案 "Monthly" 当协议 —— 文案本地化/改名
+            # 会静默破坏周期落库. 旧响应/旧测试无 kind 时回退 label 兼容.
+            kind = str(window.get("kind") or "").strip().lower()
+            label = str(window.get("label") or "").strip()
+            if (kind == "monthly" or (not kind and label == "Monthly")) and window.get("reset_at"):
                 db.record_monthly_reset(account_id, window["reset_at"])
                 break
         if db.monthly_cycle_start(account_id) != before:
@@ -733,6 +738,11 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
     - full: 仅对当前活跃账号全量拉取
     进度快照在原有字段上追加 account (当前正在同步的账号名), 前端兼容旧字段.
     """
+    # N4: 备份导入持写锁期间不启动新同步 —— 否则本线程读 settings/写记录会
+    # 排队等锁, 15s busy_timeout 用尽后报 "database is locked" (用户看到同步
+    # 失败). 路由层已 409, 这里兜住直达调用 (自动同步定时器/测试/后台线程).
+    if backup.is_importing():
+        return {"ok": False, "error": "导入进行中"}
     window_days = db.get_settings().get("window_days")
 
     if mode == "full":
@@ -802,11 +812,26 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
 def sync_all_async(mode: str) -> None:
     """后台线程执行 用量同步 (配额由独立后台线程刷新, 不阻塞用量)."""
     def worker() -> None:
+        # N4: 导入正在持写锁 -> 本轮直接跳过, 不排队等锁 (否则 15s 后
+        # database is locked). 路由层对显式请求返回 409, 这里是自动定时器兜底.
+        if backup.is_importing():
+            return
         try:
             _ensure_quota_async()  # 触发配额后台刷新 (独立线程, 防重入)
-            sync_usage(mode)
+        except Exception:  # noqa: BLE001 配额刷新失败不影响用量同步
+            pass
+        try:
+            result = sync_usage(mode)
         except Exception:  # noqa: BLE001
             _set_phase("error", "同步失败")
+            return
+        # P3-5: 请求被单飞闸门拒绝 (路由层检查与线程启动之间的竞态) 时不能静默:
+        # 把非 ok 结果写进 progress, 前端轮询能看到 "error" 而不是永远停在旧状态.
+        # "导入进行中" 是维护态跳过, 不写 error (避免前端误报同步失败).
+        if not result.get("ok"):
+            error = str(result.get("error") or "")
+            if error != "导入进行中":
+                _set_phase("error", error or "同步失败")
 
     thread = threading.Thread(target=worker, daemon=True, name="gousage-sync")
     thread.start()
@@ -819,9 +844,125 @@ def sync_all_async(mode: str) -> None:
 _on_open_login: Optional[Callable[[str, str], None]] = None
 _server: Optional[ThreadingHTTPServer] = None
 
+# ---------------------------------------------------------------------------
+# 本地 API 随机 token 鉴权 (I4)
+# ---------------------------------------------------------------------------
+#
+# loopback 只是**主机级**共享资源, 不是单用户边界: 同一台机器上的其他 OS 用户 /
+# 任意进程用 netstat 就能枚举到本服务的 ephemeral 端口, 读走账号/用量元数据,
+# 甚至执行 prune/logout/delete 这些不可恢复操作 (审查已实测 logout 后
+# usage_records 10 → 0). main.py 启动时生成每进程随机 token, 经 WebView URL
+# fragment 交给前端, 前端每个 /api/* 请求带 X-GoGauge-Token.
+#
+# 默认 None = 不校验: 现有测试/开发直连 HTTP 的用法保持兼容; 生产入口
+# (main.py) 必定设置 token. 静态资源不校验 —— token 本身经 fragment 交付,
+# 首屏 HTML/JS 的加载不能要求 header.
+_auth_token: Optional[str] = None
+
+
+def set_auth_token(token: Optional[str]) -> None:
+    """设置/清除本地 API 鉴权 token; None/空串表示不鉴权."""
+    global _auth_token
+    cleaned = (token or "").strip()
+    _auth_token = cleaned or None
+
+
+def auth_token() -> Optional[str]:
+    """当前鉴权 token (None = 未启用鉴权)."""
+    return _auth_token
+
+
+def _authorized(handler: BaseHTTPRequestHandler) -> bool:
+    """校验 /api/* 请求的 token; 未配置 token 时恒通过."""
+    expected = _auth_token
+    if not expected:
+        return True
+    supplied = handler.headers.get("X-GoGauge-Token") or ""
+    # compare_digest 要求同类型且 str 仅限 ASCII; 统一编码成 bytes 比较,
+    # 非 ASCII 的伪造 header 只会走到"不匹配"而不是抛 TypeError.
+    try:
+        ok = secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    except (TypeError, ValueError):
+        ok = False
+    if ok:
+        return True
+    _json_response(handler, {"ok": False, "error": "unauthorized"}, 401)
+    return False
+
+
 # 半自动更新下载状态机: idle -> checking -> downloading -> done/no_update/no_asset/error
 _update_download: dict[str, Any] = {"state": "idle", "path": "", "error": "", "latest": ""}
 _update_lock = threading.Lock()  # 下载状态机原子占位: 防并发双开写坏同一 .part
+
+# 检查更新状态机 (I5): idle -> checking -> done/error.
+# 保留原同步 GET /api/update/check (前端旧版/测试依赖), 新增 async+status 供前端
+# 轮询: 慢网/被墙时检查更新最坏 51.2s, 远超前端 15s 请求超时 (P2-11).
+_update_check: dict[str, Any] = {"state": "idle", "result": None, "error": ""}
+_update_check_lock = threading.Lock()
+
+
+def _start_update_check() -> bool:
+    """启动后台检查更新; 已在跑时不重复起线程并返回 True."""
+    with _update_check_lock:
+        if _update_check["state"] == "checking":
+            return True
+        _update_check.update(state="checking", result=None, error="")
+    threading.Thread(
+        target=_update_check_worker, daemon=True, name="gousage-update-check"
+    ).start()
+    return False
+
+
+def _update_check_worker() -> None:
+    try:
+        # 模块级引用 (而非局部 import): 测试可 monkeypatch server.check_update
+        result = check_update()
+    except Exception as exc:  # noqa: BLE001 网络/解析失败 -> 前端轮询看到 error
+        with _update_check_lock:
+            _update_check.update(state="error", result=None, error=str(exc)[:300])
+        return
+    with _update_check_lock:
+        _update_check.update(state="done", result=result, error="")
+
+
+def _update_check_snapshot() -> dict[str, Any]:
+    with _update_check_lock:
+        return {
+            "state": _update_check["state"],
+            "result": _update_check["result"],
+            "error": _update_check["error"],
+        }
+
+
+def _releases_list_url() -> str:
+    """本仓库的 releases 列表页 (I8: 兜底打开列表页, 不再用 /latest)."""
+    return f"https://github.com/{updater.REPO}/releases"
+
+
+def _is_allowed_update_url(url: str) -> bool:
+    """只允许打开本仓库的 GitHub releases 页面 (前端传入 check_update 的 release_url).
+
+    用 urlparse 而非字符串 startswith 校验: 防止 `.../releases@evil.example/`
+    之类的同前缀伪造, 也拒绝 userinfo/非 443 端口/非 https.
+    """
+    if not isinstance(url, str) or not url or len(url) > 500:
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    if parsed.username or parsed.password:
+        return False
+    if (parsed.hostname or "").lower() != "github.com":
+        return False
+    if parsed.port not in (None, 443):
+        return False
+    base = f"/{updater.REPO}/releases"
+    path = (parsed.path or "").rstrip("/")
+    return path == base or path.startswith(base + "/")
+
 
 
 def _update_download_worker() -> None:
@@ -854,45 +995,126 @@ def set_login_callback(callback: Callable[[str, str], None]) -> None:
 
 _MAX_BODY_BYTES = 1 << 20  # 1 MiB: 本地接口请求体上限 (防异常声明挂死线程)
 
+# P2-9: 所有响应 (静态/JSON/错误) 都必须带的四个安全头.
+# 点击劫持防线与 Host/Origin 校验互相独立: 被第三方站点 iframe 的本地页面仍是
+# same-origin, Host/Origin 全部通过, 只有 frame-ancestors/XFO 能挡住.
+_SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("X-Frame-Options", "DENY"),
+    ("Content-Security-Policy", "frame-ancestors 'none'"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+)
 
-def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
-    """读取并解析 JSON 请求体, 失败抛 ValueError."""
+# P3-1: 显式 MIME 表. Windows 上 mimetypes 会读注册表, .js 可能被第三方软件
+# 注册成 text/plain, 而 nosniff 下浏览器会拒绝执行 —— 不依赖系统注册表.
+_MIME_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+    ".wasm": "application/wasm",
+}
+
+
+def _content_type_for(path: str) -> str:
+    """按显式表取静态文件 MIME; 未知扩展一律 octet-stream (配合 nosniff)."""
+    return _MIME_TYPES.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+
+
+def _log_error(context: str, exc: BaseException) -> None:
+    """内部错误写 stderr; 回给客户端的文案必须泛化 (可能含绝对路径)."""
+    try:
+        sys.stderr.write(f"[server] {context}: {type(exc).__name__}: {exc}\n")
+    except Exception:  # noqa: BLE001 日志失败不得影响响应
+        pass
+
+
+def _read_json_body(handler: BaseHTTPRequestHandler, allow_empty: bool = False) -> Any:
+    """读取并解析 JSON 请求体, 失败抛 ValueError.
+
+    allow_empty=True 时 Content-Length 为 0/缺失按空对象处理: 可选 body 的端点
+    (如 POST /api/update/open) 既兼容不带 body 的旧前端, 也接受 {"url": ...}.
+    """
     length = int(handler.headers.get("Content-Length") or 0)
     # 必须一并挡掉负数: rfile.read(-1) 语义是"读到 EOF", 会一直阻塞到
     # Handler.timeout (15s). ThreadingHTTPServer 下每个畸形请求白占一个线程.
     if length < 0 or length > _MAX_BODY_BYTES:
         raise ValueError("请求体大小非法")
-    return json.loads(handler.rfile.read(length).decode("utf-8", errors="replace"))
+    if length == 0:
+        if allow_empty:
+            return {}
+        raise ValueError("请求体为空")
+    try:
+        return json.loads(handler.rfile.read(length).decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("请求体不是合法 JSON") from exc
+
+
+def _write_body(handler: BaseHTTPRequestHandler, body: bytes) -> None:
+    """写响应体; 客户端已断开 (前端 15s 超时/关窗) 时静默放弃.
+
+    不吞掉的话 socketserver 的 handle_error 会为 BrokenPipe 打印完整 traceback ——
+    GUI 日志噪音, 还会掩盖真实错误.
+    """
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
     body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        return  # 客户端已断开: 不写 body, 也不让异常冒到 handle_error
+    _write_body(handler, body)
 
 
 def _static_response(handler: BaseHTTPRequestHandler, rel: str) -> None:
     # 防目录穿越: 单纯过滤 '..' 不够 —— Windows 下 os.path.join 遇到盘符绝对
     # 组件会丢弃前缀 (GET /C:/Users/.../gousage.db 可读任意文件). 解码后做
     # realpath 包含校验, 双平台都强制落在资源目录内.
-    rel = unquote(rel or "").lstrip("/")
-    if ".." in rel.replace("\\", "/").split("/"):
-        handler.send_error(403)
-        return
-    path = _resource_path(rel)
-    root = os.path.normcase(os.path.dirname(os.path.realpath(_resource_path("index.html"))))
-    real = os.path.normcase(os.path.realpath(path))
-    if real != root and not real.startswith(root + os.sep):
-        handler.send_error(403)
+    try:
+        rel = unquote(rel or "").lstrip("/")
+        if ".." in rel.replace("\\", "/").split("/"):
+            handler.send_error(403)
+            return
+        path = _resource_path(rel)
+        root = os.path.normcase(
+            os.path.dirname(os.path.realpath(_resource_path("index.html")))
+        )
+        real = os.path.normcase(os.path.realpath(path))
+        if real != root and not real.startswith(root + os.sep):
+            handler.send_error(403)
+            return
+    except (ValueError, UnicodeError, OSError):
+        # GET /%00 会让 realpath 抛 "embedded null character": 原先直接空响应 +
+        # traceback, 现在明确 400
+        handler.send_error(400)
         return
     if not os.path.isfile(path):
         handler.send_error(404)
         return
-    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    ctype = _content_type_for(path)
     try:
         st = os.stat(path)
     except OSError:
@@ -922,18 +1144,22 @@ def _static_response(handler: BaseHTTPRequestHandler, rel: str) -> None:
     try:
         with open(path, "rb") as fh:
             body = fh.read()
-    except OSError:
+    except OSError as exc:
+        _log_error("static read", exc)
         handler.send_error(500)
         return
-    handler.send_response(200)
-    handler.send_header("Content-Type", ctype)
-    handler.send_header("Content-Length", str(len(body)))
-    # no-cache = 允许缓存但每次需校验 (304 时无 body, 省下重复传输)
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("ETag", etag)
-    handler.send_header("Last-Modified", last_modified)
-    handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", ctype)
+        handler.send_header("Content-Length", str(len(body)))
+        # no-cache = 允许缓存但每次需校验 (304 时无 body, 省下重复传输)
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("ETag", etag)
+        handler.send_header("Last-Modified", last_modified)
+        handler.end_headers()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        return
+    _write_body(handler, body)
 
 
 def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, list[str]]) -> None:
@@ -941,21 +1167,57 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     route = path
 
     if route == "/api/version" and method == "GET":
-        _json_response(handler, {"version": __version__})
+        _json_response(handler, {"ok": True, "version": __version__})
         return
 
     if route == "/api/update/check" and method == "GET":
+        # 同步版保留给旧前端/测试 (I5: additive), 慢网由 async+status 端点承担
         try:
-            _json_response(handler, check_update())
+            # N3: 契约统一 —— 成功响应带 ok=true, 检查结果字段结构不变
+            _json_response(handler, {"ok": True, **check_update()})
         except Exception as exc:  # noqa: BLE001 网络/解析失败 -> 前端提示
-            _json_response(handler, {"error": str(exc)}, status=502)
+            _json_response(handler, {"ok": False, "error": str(exc)}, status=502)
+        return
+
+    if route == "/api/update/check/async" and method == "POST":
+        # 触发后台检查 (I5): 慢网/被墙时一次检查最坏 51.2s, 前端只轮询状态
+        already = _start_update_check()
+        payload: dict[str, Any] = {"ok": True, "state": "checking"}
+        if already:
+            payload["already"] = True
+        _json_response(handler, payload)
+        return
+
+    if route == "/api/update/check/status" and method == "GET":
+        # N3: 成功响应统一带 ok=true; state/result/error 结构不变 (I5 契约)
+        _json_response(handler, {"ok": True, **_update_check_snapshot()})
         return
 
     if route == "/api/update/open" and method == "POST":
-        # 用系统默认浏览器打开 GitHub Releases 页 (WebView 内 window.open 不可靠)
+        # 用系统默认浏览器打开 GitHub Releases 页 (WebView 内 window.open 不可靠).
+        # I8: 默认打开**列表页** (不再 /latest —— 那是全平台共享标记, 可能不是
+        # 桌面 release); 传入 URL 仅允许本仓库 releases 域内地址, 否则 400.
+        try:
+            body = _read_json_body(handler, allow_empty=True)
+            if not isinstance(body, dict):
+                raise ValueError("无效请求体")
+        except ValueError:
+            _json_response(handler, {"ok": False, "error": "无效请求体"}, 400)
+            return
+        raw_url = body.get("url")
+        if raw_url in (None, ""):
+            url = _releases_list_url()
+        else:
+            url = str(raw_url).strip()
+            if not _is_allowed_update_url(url):
+                _json_response(handler, {"ok": False, "error": "更新地址无效"}, 400)
+                return
         import webbrowser
 
-        webbrowser.open(RELEASE_PAGE_URL)
+        try:
+            webbrowser.open(url)
+        except Exception as exc:  # noqa: BLE001 无默认浏览器等: 不阻塞 UI
+            _log_error("update/open", exc)
         _json_response(handler, {"ok": True})
         return
 
@@ -965,6 +1227,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         _json_response(
             handler,
             {
+                "ok": True,
                 "logged_in": bool(db.count_logged_in_accounts()),
                 "account": account,
                 "accounts": db.list_accounts(),
@@ -973,6 +1236,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "sync": sync,
                 "progress": _sync_progress_snapshot(),
                 "datadir": db.data_dir(),
+                # I11: 凭证存储形态只读展示 (不改变存储行为)
+                "token_storage": db.token_storage_mode(),
             },
         )
         return
@@ -981,6 +1246,18 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         mode = (query.get("mode") or ["incremental"])[0]
         if mode not in ("incremental", "full"):
             _json_response(handler, {"ok": False, "error": "invalid mode"}, 400)
+            return
+        # N4: 备份导入持写锁期间拒绝新同步 (排队等锁会 15s 后 database is locked,
+        # 表现为用户点同步却报同步失败). 维护态由 backup.import_backup 的
+        # try/finally 保证清理, 导入结束即可正常同步.
+        if backup.is_importing():
+            _json_response(handler, {"ok": False, "error": "导入进行中，请稍后重试"}, 409)
+            return
+        # P3-5: 同步进行中再点"全量同步"不得静默丢弃 —— 明确 409 让前端 toast.
+        # 检查-启动之间只有极小的竞态窗口; worker 内部 sync_usage 的单飞闸门
+        # 仍会兜住 (sync_all_async 会把非 ok 结果写进 progress).
+        if _sync_running():
+            _json_response(handler, {"ok": False, "error": "同步进行中"}, 409)
             return
         # incremental 轮询所有已登录账号; full 仅作用于活跃账号 (需其 token)
         if mode == "incremental":
@@ -996,6 +1273,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
     # 「按同步范围清理」: GET = 预演 (只算数不写库), POST = 真删 (不可恢复).
     # 同步流程不再自动删数据, 这里是唯一的删除入口, 由设置页按钮显式触发.
+    # I3: 预演/删除都同时覆盖 usage_records 与 usage_charts (GOAT 统计主口径是
+    # charts, 此前"已清理 N 条"后 totals("all") 仍含历史 = 承诺不一致).
     if route == "/api/usage/prune" and method == "GET":
         _json_response(
             handler,
@@ -1005,11 +1284,21 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
     if route == "/api/usage/prune" and method == "POST":
         window_days = db.get_settings().get("window_days")
-        preview = db.prune_preview(window_days)
-        deleted = db.prune_expired(window_days)
-        if deleted:
-            bump_data_generation()  # 存量记录变了: 聚合与明细缓存整体失效
-        _json_response(handler, {"ok": True, "deleted": deleted, **preview})
+        preview = db.prune_preview(window_days)  # 删除前口径 (前端确认文案)
+        result = db.prune_expired(window_days)
+        deleted = int(result["records"])
+        deleted_charts = int(result["charts"])
+        if deleted or deleted_charts:
+            bump_data_generation()  # 存量记录/charts 变了: 聚合缓存整体失效
+        _json_response(
+            handler,
+            {
+                "ok": True,
+                "deleted": deleted,
+                "deleted_charts": deleted_charts,
+                **preview,
+            },
+        )
         return
 
     if route == "/api/dashboard" and method == "GET":
@@ -1051,6 +1340,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         _json_response(
             handler,
             {
+                "ok": True,  # 契约统一: 成功响应都带 ok
                 "logged_in": bool(token),
                 "account": account,
                 "account_name": account.get("name", ""),
@@ -1235,7 +1525,9 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             try:
                 aid = db.add_account(token, "", switch=True, provider=provider)
             except Exception as exc:  # noqa: BLE001
-                _json_response(handler, {"ok": False, "error": str(exc)}, 500)
+                # 内部错误 (如 DB 异常) 的 str 可能含绝对路径: 详情只进日志
+                _log_error("accounts/add-token", exc)
+                _json_response(handler, {"ok": False, "error": "保存凭证失败, 请重试"}, 500)
                 return
             bump_data_generation(aid)  # 新凭证/新活跃账号: 聚合缓存按新账号重算
             _json_response(handler, {"ok": True, "id": aid, "provider": provider})
@@ -1272,6 +1564,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         _json_response(
             handler,
             {
+                "ok": True,
                 "records": records,
                 "total": total,
                 "page": page,
@@ -1306,6 +1599,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         _json_response(
             handler,
             {
+                "ok": True,
                 "records": records,
                 "total": total,
                 "page": page,
@@ -1326,7 +1620,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             (active_id, "heatmap", days, _agg_day()),
             lambda: {"days": db.daily_stats(days, active_id)},
         )
-        _json_response(handler, payload)
+        _json_response(handler, {"ok": True, **payload})
         return
 
     if route == "/api/model_trend" and method == "GET":
@@ -1354,55 +1648,95 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
     if route == "/api/export/csv" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = resolve_approved_path((body or {}).get("path"), APPROVAL_SAVE)
-        except Exception:  # noqa: BLE001
-            path = None
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError as exc:
+            # 请求体语法错误是 400; 此前被并进"路径未授权"的 403, 语义误导
+            _json_response(handler, {"ok": False, "error": str(exc)}, 400)
+            return
+        path = resolve_approved_path(body.get("path"), APPROVAL_SAVE)
         if not path:
             _json_response(handler, {"ok": False, "error": "导出路径未授权, 请重新选择保存位置"}, 403)
             return
         try:
             rows = backup.export_csv(path)
-            _json_response(handler, {"ok": True, "path": path, "rows": rows})
+        except OSError as exc:
+            # OS 错误文案含绝对路径: 只进日志, 回给前端泛化文案 (P3-6)
+            _log_error("export csv", exc)
+            _json_response(handler, {"ok": False, "error": "导出失败: 无法写入目标文件"}, 500)
+            return
         except Exception as exc:  # noqa: BLE001
-            _json_response(handler, {"ok": False, "error": str(exc)}, 500)
+            _log_error("export csv", exc)
+            _json_response(handler, {"ok": False, "error": "导出失败"}, 500)
+            return
+        _json_response(handler, {"ok": True, "path": path, "rows": rows})
         return
 
     if route == "/api/backup/export" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = resolve_approved_path((body or {}).get("path"), APPROVAL_SAVE)
-        except Exception:  # noqa: BLE001
-            path = None
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError as exc:
+            _json_response(handler, {"ok": False, "error": str(exc)}, 400)
+            return
+        path = resolve_approved_path(body.get("path"), APPROVAL_SAVE)
         if not path:
             _json_response(handler, {"ok": False, "error": "导出路径未授权, 请重新选择保存位置"}, 403)
             return
         try:
             n = backup.export_backup(path)
-            _json_response(handler, {"ok": True, "path": path, "records": n})
+        except OSError as exc:
+            _log_error("backup export", exc)
+            _json_response(handler, {"ok": False, "error": "备份导出失败: 无法写入目标文件"}, 500)
+            return
         except Exception as exc:  # noqa: BLE001
-            _json_response(handler, {"ok": False, "error": str(exc)}, 500)
+            _log_error("backup export", exc)
+            _json_response(handler, {"ok": False, "error": "备份导出失败"}, 500)
+            return
+        _json_response(handler, {"ok": True, "path": path, "records": n})
         return
 
     if route == "/api/backup/import" and method == "POST":
         try:
             body = _read_json_body(handler)
-            path = resolve_approved_path((body or {}).get("path"), APPROVAL_OPEN)
-        except Exception:  # noqa: BLE001
-            path = None
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError as exc:
+            _json_response(handler, {"ok": False, "error": str(exc)}, 400)
+            return
+        path = resolve_approved_path(body.get("path"), APPROVAL_OPEN)
         if not path:
             _json_response(handler, {"ok": False, "error": "备份路径未授权, 请重新选择文件"}, 403)
             return
+        # N4: 导入持写锁最长可达数十秒 —— 与进行中的同步/另一个导入互斥, 直接
+        # 409 而不是排队等锁 (排队 15s 后会 database is locked). 维护态标志由
+        # import_backup 的 try/finally 清理, 失败/异常路径不会残留.
+        if backup.is_importing():
+            _json_response(handler, {"ok": False, "error": "导入进行中，请稍后重试"}, 409)
+            return
+        if _sync_running():
+            _json_response(handler, {"ok": False, "error": "同步进行中，请稍后重试"}, 409)
+            return
         try:
             result = backup.import_backup(path)
-            # 导入可能跨账号写入 usage 明细 -> 全局失效 (不做按账号精细判断)
-            bump_data_generation()
-            _json_response(handler, {"ok": True, **result})
+        except ValueError as exc:
+            # 预校验失败 (不是备份/字段损坏/超限): 400 + 具体原因, 且 import_backup
+            # 保证此时未写入任何行 (校验全部在事务之前)
+            _json_response(handler, {"ok": False, "error": str(exc)}, 400)
+            return
         except Exception as exc:  # noqa: BLE001
-            _json_response(handler, {"ok": False, "error": str(exc)}, 500)
+            _log_error("backup import", exc)
+            _json_response(handler, {"ok": False, "error": "导入失败: 备份文件无法读取或已损坏"}, 500)
+            return
+        # 只有成功路径需要失效聚合缓存: 失败时事务已回滚 (零写入), 无需 bump.
+        # 导入可能跨账号写入 usage 明细 -> 全局失效 (不做按账号精细判断).
+        bump_data_generation()
+        _json_response(handler, {"ok": True, **result})
         return
 
     if route == "/api/settings" and method == "GET":
-        _json_response(handler, db.get_settings())
+        _json_response(handler, {"ok": True, **db.get_settings()})
         return
 
     if route == "/api/settings" and method == "PUT":
@@ -1410,8 +1744,8 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             body = _read_json_body(handler)
             if not isinstance(body, dict):
                 raise ValueError
-        except Exception:  # noqa: BLE001
-            _json_response(handler, {"ok": False, "error": "无效请求体"}, 400)
+        except ValueError as exc:
+            _json_response(handler, {"ok": False, "error": str(exc)}, 400)
             return
         old_settings = db.get_settings()
         old_autostart = bool(old_settings.get("autostart"))
@@ -1428,13 +1762,10 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 ok = _autostart_enable() if new_autostart else _autostart_disable()
             except Exception:  # noqa: BLE001
                 ok = False
-            if not ok:
-                saved["autostart_applied"] = False
-            else:
-                saved["autostart_applied"] = True
+            saved["autostart_applied"] = bool(ok)
         else:
             saved["autostart_applied"] = True
-        _json_response(handler, saved)
+        _json_response(handler, {"ok": True, **saved})
         return
 
     if route == "/api/update/download" and method == "POST":
@@ -1449,10 +1780,12 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
         return
 
     if route == "/api/update/download/status" and method == "GET":
-        _json_response(handler, dict(_update_download))
+        # N3: 成功响应统一带 ok=true; state/path/latest/error 结构不变
+        _json_response(handler, {"ok": True, **dict(_update_download)})
         return
 
-    handler.send_error(404)
+    # 未知 /api 路由: 统一 JSON 404 (此前 send_error -> HTML, 前端只能显示 "HTTP 404")
+    _json_response(handler, {"ok": False, "error": "not found"}, 404)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1462,10 +1795,29 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # 静默日志
         pass
 
+    def send_response(self, code: int, message: Optional[str] = None) -> None:
+        """所有响应 (静态/JSON/304/send_error 的错误页) 统一注入 P2-9 安全头.
+
+        放在 send_response 而不是各响应构造函数里: 既有静态 304、send_error
+        生成的 HTML 错误页, 也有 JSON 路由, 逐个补容易漏; 而点击劫持只需一条
+        未加固的响应即可被利用.
+        """
+        super().send_response(code, message)
+        for name, value in _SECURITY_HEADERS:
+            self.send_header(name, value)
+
     def _reject_non_local(self) -> bool:
         """请求来自本机才处理. Host 必须为本机 (防 DNS rebinding 把外部域名
         解析到 127.0.0.1); 浏览器跨站请求必带 Origin (CSRF), 只允许本机来源.
-        无 Origin 的请求 (本机进程/脚本) 放行 —— 本机可信边界即安全边界."""
+        无 Origin 的请求 (本机进程/脚本) 放行 —— 本机可信边界即安全边界.
+
+        SEC-3: 浏览器对跨站 GET (<img>/<script>/fetch(no-cors)) 本来就不发
+        Origin, 这类请求会命中"无 Origin 放行"分支, 进而驱动 /api/dashboard、
+        /api/accounts/overview 等端点用**用户凭证**发起上游配额/汇率/更新检查
+        请求. Sec-Fetch-Site 是浏览器在 GET 上也必带的请求元数据: 仅当它明确
+        为 ``cross-site`` 时拒绝; same-origin/same-site/none 及缺省 (老 WebKit、
+        本机脚本、测试) 一律保持原有放行语义 —— 不做白名单拒绝, 避免误伤.
+        """
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
         if host and host not in ("127.0.0.1", "localhost", "::1", "[::1]"):
             self.send_error(403)
@@ -1480,24 +1832,43 @@ class _Handler(BaseHTTPRequestHandler):
             if (o.hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
                 self.send_error(403)
                 return True
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            self.send_error(403)
+            return True
         return False
+
+    def _run_api(self, path: str, query: dict[str, list[str]]) -> None:
+        """执行 API 路由并统一收尾: 用户输入错误 400, 内部错误 500 且不回显细节."""
+        try:
+            _handle_api(self, path, query)
+        except ValueError as exc:
+            _json_response(self, {"ok": False, "error": str(exc)}, 400)
+        except Exception as exc:  # noqa: BLE001 未预期异常: 详情只进日志
+            _log_error("api", exc)
+            _json_response(self, {"ok": False, "error": "服务器内部错误"}, 500)
 
     def do_GET(self) -> None:  # noqa: N802
         if self._reject_non_local():
             return
-        parsed = urlparse(self.path)
-        path = parsed.path
-        query = parse_qs(parsed.query)
-        if path.startswith("/api/"):
-            try:
-                _handle_api(self, path, query)
-            except Exception as exc:  # noqa: BLE001
-                _json_response(self, {"ok": False, "error": str(exc)}, 500)
+        try:
+            parsed = urlparse(self.path)
+        except ValueError:
+            self.send_error(400)
             return
-        if path == "/" or path == "":
-            _static_response(self, "index.html")
-        else:
-            _static_response(self, path)
+        path = parsed.path
+        if path.startswith("/api/"):
+            if not _authorized(self):
+                return
+            self._run_api(path, parse_qs(parsed.query))
+            return
+        try:
+            _static_response(self, "index.html" if path in ("", "/") else path)
+        except Exception as exc:  # noqa: BLE001 静态分派兜底: 不得留下空响应/traceback
+            _log_error("static", exc)
+            try:
+                self.send_error(500)
+            except OSError:
+                pass
 
     def do_POST(self) -> None:  # noqa: N802
         self._handle_api_request()
@@ -1508,22 +1879,38 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_api_request(self) -> None:
         if self._reject_non_local():
             return
-        parsed = urlparse(self.path)
+        try:
+            parsed = urlparse(self.path)
+        except ValueError:
+            self.send_error(400)
+            return
         path = parsed.path
-        query = parse_qs(parsed.query)
         if path.startswith("/api/"):
-            try:
-                _handle_api(self, path, query)
-            except Exception as exc:  # noqa: BLE001
-                _json_response(self, {"ok": False, "error": str(exc)}, 500)
+            if not _authorized(self):
+                return
+            self._run_api(path, parse_qs(parsed.query))
             return
         self.send_error(404)
+
+
+class _ThreadingHTTPServer(ThreadingHTTPServer):
+    """静默 socketserver 的 handle_error.
+
+    断连 (前端 15s 超时/关窗) 与畸形请求会让 socketserver 打印完整 traceback,
+    GUI 日志噪音且掩盖真实错误. 注意这是**server 级**回调: 重写 _Handler 上
+    同名方法不生效 (请求处理器异常由 server.handle_error 兜底).
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        pass
 
 
 def start_server(host: str = "127.0.0.1", port: int = 0) -> tuple[str, int]:
     """启动 HTTP 服务, 返回 (host, port)."""
     global _server
-    _server = ThreadingHTTPServer((host, port), _Handler)
+    _server = _ThreadingHTTPServer((host, port), _Handler)
     thread = threading.Thread(target=_server.serve_forever, daemon=True, name="gousage-http")
     thread.start()
     return _server.server_address[0], _server.server_address[1]

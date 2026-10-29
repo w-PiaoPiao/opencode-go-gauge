@@ -384,3 +384,203 @@ def test_dashboard_split_gated_by_setting(tmp_db):
 
     _with_server(run)
     assert db.get_settings()["ds_peak_split"] is False
+
+
+# ---------------------------------------------------------------------------
+# 起始门按模型区分 (I9/P2-1): deepseek-v4-flash 自北京 2026-08-17 00:00 起两档计价
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("beijing_time", "model", "expect"),
+    [
+        ("2026-08-16 10:00:00", "deepseek-v4-flash", ""),      # 北京 08-16: 单一价
+        ("2026-08-16 23:59:59", "deepseek-v4-flash", ""),
+        ("2026-08-17 00:00:00", "deepseek-v4-flash", "off"),   # 门后非峰窗
+        ("2026-08-17 10:00:00", "deepseek-v4-flash", "peak"),
+        ("2026-09-09 10:00:00", "deepseek-v4-flash", "peak"),  # v4.1 门之前但 v4 已计价
+        ("2026-09-09 10:00:00", "deepseek-v4.1-flash", ""),    # v4.1 门之前仍整条
+        ("2026-09-10 10:00:00", "deepseek-v4.1-flash", "peak"),
+    ],
+)
+def test_per_model_pricing_gates(tmp_db, beijing_time, model, expect):
+    day, clock = beijing_time.split()
+    assert _tier_of(_utc(day, clock), model) == expect
+
+
+# ---------------------------------------------------------------------------
+# 与 scripts/peak_split.py 的 parity (T4 脚本 + db SQL 必须同一套规则)
+# ---------------------------------------------------------------------------
+
+
+def _load_peak_script():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "peak_split.py"
+    spec = importlib.util.spec_from_file_location("_peak_split_script_for_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+@pytest.fixture(scope="module")
+def peak_script():
+    return _load_peak_script()
+
+
+def test_script_constants_match_db(peak_script):
+    """脚本使用 db 的同一套常量 (峰窗/节假日/白名单/起始门)."""
+    assert peak_script.PRICING_GATES == db._PRICING_GATES
+    assert set(peak_script.FLASH_MODELS) == set(db._DS_FLASH_MODELS)
+    assert peak_script.CN_HOLIDAYS == db._CN_HOLIDAYS
+
+
+def test_script_tier_for_matches_db_sql_on_grid(tmp_db, peak_script):
+    """55 天 × 小时网格 × 6 种模型名: 脚本 tier_for 与 db SQL tier 完全一致."""
+    from datetime import datetime, timedelta
+
+    start = datetime(2026, 8, 14)
+    models = [
+        "deepseek-v4.1-flash",
+        "deepseek-v4-flash",
+        "deepseek/deepseek-v4.1-flash",
+        "DeepSeek/DeepSeek-V4-Flash",
+        "deepseek-v4.1-flash-free",
+        "glm-5.3",
+    ]
+    # 覆盖峰窗边界整点与相邻秒: UTC 01:00/02:00/03:59/04:00/06:00/09:59/10:00/09:00
+    times = []
+    for d in range(55):
+        day = start + timedelta(days=d)
+        for hh, mm, ss in (
+            (0, 0, 0), (1, 0, 0), (2, 30, 0), (3, 59, 59), (4, 0, 0),
+            (5, 0, 0), (6, 0, 0), (8, 0, 0), (9, 59, 59), (10, 0, 0),
+            (12, 0, 0), (15, 0, 0), (16, 0, 0), (23, 0, 0),
+        ):
+            times.append(day.replace(hour=hh, minute=mm, second=ss))
+    grid = [(t.strftime("%Y-%m-%dT%H:%M:%SZ"), model) for t in times for model in models]
+    expr, params = db._peak_tier_sql("created_at")
+    values_sql = ", ".join(["(?, ?)"] * len(grid))
+    rows = db.get_db().execute(
+        f"WITH grid(created_at, model) AS (VALUES {values_sql})"
+        f" SELECT created_at, model, {expr} AS tier FROM grid",
+        [*[v for pair in grid for v in pair], *params],
+    ).fetchall()
+    assert len(rows) == len(grid)
+    mismatches = [
+        (r["created_at"], r["model"], r["tier"], peak_script.tier_for(r["model"], r["created_at"]))
+        for r in rows
+        if r["tier"] != peak_script.tier_for(r["model"], r["created_at"])
+    ]
+    assert not mismatches, f"{len(mismatches)} 处不一致, 例: {mismatches[:5]}"
+
+
+# ---------------------------------------------------------------------------
+# 两段式查询行级等价 (P2-1): 基准分支(排除分档模型) + 分档分支 == 逐行 tier 分组
+# ---------------------------------------------------------------------------
+
+
+def _seed_mixed_history() -> None:
+    from datetime import datetime, timedelta, timezone as _tz
+
+    base = datetime(2026, 9, 1, tzinfo=_tz.utc)
+    records = []
+    for i in range(40):
+        created = (base + timedelta(hours=7 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for model, cost in (
+            ("deepseek-v4.1-flash", 0.5),
+            ("deepseek-v4-flash", 0.25),
+            ("deepseek/deepseek-v4.1-flash", 0.125),
+            ("glm-5.3", 0.1),
+            ("glm-5.3-flash", 0.2),
+        ):
+            records.append(_rec(f"mix-{i}-{model.replace('/', '_')}", model, created, inp=100 + i, out=10, cost=cost))
+    # 起始门之前的历史 (v4.1 门 09-09 16:00Z; v4 门 08-16 16:00Z)
+    for i, (model, created) in enumerate([
+        ("deepseek-v4.1-flash", "2026-09-01T02:00:00Z"),
+        ("deepseek-v4-flash", "2026-08-10T02:00:00Z"),
+        ("deepseek-v4-flash", "2026-08-20T02:00:00Z"),
+    ]):
+        records.append(_rec(f"pre-{i}", model, created, inp=999, out=99, cost=9.0))
+    db.insert_usage_records(records)
+
+
+def _expected_model_groups(period: str, peak_script) -> dict[tuple[str, str], dict]:
+    """独立参考: 按 db 周期窗口取原始行, 用脚本 tier_for 逐行分类后聚合."""
+    where, params = db._period_where(period)
+    where, params = db._account_filter(where, params, db.get_active_account_id())
+    rows = db.get_db().execute(
+        f"SELECT model, created_at, input_tokens, cache_read_tokens,"
+        f" cache_write_5m_tokens, cache_write_1h_tokens, output_tokens, cost_usd"
+        f" FROM usage_records {where}",
+        params,
+    ).fetchall()
+    out: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        tier = peak_script.tier_for(r["model"], r["created_at"])
+        key = (r["model"], tier)
+        agg = out.setdefault(key, {"requests": 0, "input": 0, "output": 0, "cost": 0.0})
+        agg["requests"] += 1
+        agg["input"] += (
+            r["input_tokens"] + r["cache_read_tokens"]
+            + r["cache_write_5m_tokens"] + r["cache_write_1h_tokens"]
+        )
+        agg["output"] += r["output_tokens"]
+        agg["cost"] += r["cost_usd"]
+    return out
+
+
+def test_two_phase_model_stats_is_row_level_equivalent(tmp_db, peak_script):
+    _seed_mixed_history()
+    expected = _expected_model_groups("all", peak_script)
+    got = db.model_stats("all", peak_split=True)
+    assert len(got) == len(expected)
+    by_key = {}
+    for row in got:
+        suffix = "peak" if row["model"].endswith(" 峰") else ("off" if row["model"].endswith(" 谷") else "")
+        by_key[(row["base_model"], suffix)] = row
+    assert set(by_key) == set(expected)
+    for key, want in expected.items():
+        row = by_key[key]
+        assert row["request_count"] == want["requests"]
+        assert row["total_input_tokens"] == want["input"]
+        assert row["total_output_tokens"] == want["output"]
+        assert row["total_cost_usd"] == pytest.approx(round(want["cost"], 6))
+    # 未分档时行集合 = 聚合后的完整模型 (守恒)
+    whole = {r["base_model"]: r for r in db.model_stats("all", peak_split=False)}
+    for model, row in whole.items():
+        split_rows = [r for r in got if r["base_model"] == model]
+        assert sum(r["request_count"] for r in split_rows) == row["request_count"]
+        assert sum(r["total_input_tokens"] for r in split_rows) == row["total_input_tokens"]
+
+
+def test_two_phase_model_daily_is_row_level_equivalent(tmp_db, peak_script):
+    _seed_mixed_history()
+    out = db.model_daily_stats(days=365, peak_split=True)
+    # 独立参考: 逐日 × 模型 × 档位
+    where, params = db._account_filter("", [], db.get_active_account_id())
+    rows = db.get_db().execute(
+        f"SELECT local_date, model, created_at, input_tokens, cache_read_tokens,"
+        f" cache_write_5m_tokens, cache_write_1h_tokens, output_tokens, cost_usd"
+        f" FROM usage_records {where}",
+        params,
+    ).fetchall()
+    days = out["days"]
+    idx = {d: i for i, d in enumerate(days)}
+    expected: dict[str, list[float]] = {}
+    for r in rows:
+        i = idx.get(r["local_date"])
+        if i is None:
+            continue
+        tier = peak_script.tier_for(r["model"], r["created_at"])
+        label = r["model"] + (" 峰" if tier == "peak" else (" 谷" if tier == "off" else ""))
+        acc = expected.setdefault(label, [0] * len(days))
+        acc[i] += (
+            r["input_tokens"] + r["cache_read_tokens"]
+            + r["cache_write_5m_tokens"] + r["cache_write_1h_tokens"]
+        )
+    got = {s["model"]: s["input"] for s in out["series"]}
+    assert set(got) == set(expected)
+    for label, want in expected.items():
+        assert got[label] == want, label

@@ -59,9 +59,15 @@ class UpdateApi(
         /** GitHub releases/atom 文本响应上限 (2 MiB; 正常响应为几十 KB). */
         private const val MAX_BODY_BYTES = 2 * 1024 * 1024
         private const val ATOM_NS = "http://www.w3.org/2005/Atom"
-        // 版本号支持三段数字 + 可选字母预发布后缀 (2.1.0b > 2.1.0) 及 -/+ 起尾缀
-        // (2.1.0-macos / 2.1.0b-android, 尾缀不参与比较) — desktop updater.py parity
-        private val TAG_RE = Regex("""^v?(\d+)\.(\d+)\.(\d+)([a-z])?(?:[-+].*)?$""")
+        // 版本号支持三段数字 + 可选字母预发布后缀 (2.1.0b > 2.1.0) 及**已知平台后缀**
+        // (2.1.0-android / 2.1.0-macos, 尾缀不参与比较) — desktop updater.py parity。
+        // 其它尾缀 (v2.2.3-rc1 / +build.7) 严格拒绝: 预发布版不能推给稳定版用户
+        // (desktop P3-4: _parse_version 只认稳定串, 另由 prerelease 标记兜住)。
+        private val TAG_RE = Regex(
+            """^v?(\d+)\.(\d+)\.(\d+)([a-z])?(?:-(?:windows|macos|android|harmony))?$"""
+        )
+        /** 预发布标记 (Atom 兜底只有 tag, 没有 GitHub 的 prerelease 布尔字段)。 */
+        private val PRERELEASE_MARKERS = listOf("-rc", "-beta", "-alpha", "-pre", "-dev")
         private val HTML_TAG_RE = Regex("<[^>]*>")
         private val WS_RE = Regex("\\s+")
 
@@ -86,6 +92,13 @@ class UpdateApi(
         internal fun isPlatformTag(tag: String): Boolean {
             val t = tag.trim().lowercase()
             return t.endsWith(PLATFORM_SUFFIX) && parseVersion(t) != null
+        }
+
+        /** tag 是否为预发布 (含 -rc/-beta/... 或 +构建元数据) — desktop _is_prerelease_tag parity. */
+        internal fun isPrereleaseTag(tag: String): Boolean {
+            val t = tag.trim().lowercase()
+            if ("+" in t) return true
+            return PRERELEASE_MARKERS.any { it in t }
         }
 
         /** 统一发布 tag (如 v2.2.1d): 版本前缀合法且不带任何已知平台后缀. */
@@ -133,6 +146,10 @@ class UpdateApi(
         @SerialName("html_url") val htmlUrl: String = RELEASE_PAGE_URL,
         @SerialName("body") val body: String? = null,
         @SerialName("assets") val assets: List<AssetResponse> = emptyList(),
+        // 预发布/草稿不推给稳定版用户 (desktop updater P3-4 parity):
+        // tag 语义无法覆盖的情况 (例如 v2.2.3 被标 prerelease) 靠这两个标记兜住
+        @SerialName("prerelease") val prerelease: Boolean = false,
+        @SerialName("draft") val draft: Boolean = false,
     )
 
     /** 从资产列表挑本平台 APK (统一/旧式命名都兼容). */
@@ -247,6 +264,9 @@ class UpdateApi(
             )
             var bestVer: List<Int>? = null
             for (rel in data) {
+                // 预发布/草稿一律跳过 (desktop updater.py 列表路径同款过滤)
+                if (rel.prerelease || rel.draft) continue
+                if (isPrereleaseTag(rel.tagName)) continue
                 val ver = parseVersion(rel.tagName) ?: continue
                 if (!releaseApplies(rel.tagName, rel.assets.map { it.name })) continue
                 val seen = bestVer

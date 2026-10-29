@@ -61,10 +61,21 @@ def window_forecast(
     """
     if not window_len or window_len <= 0:
         return None
-    u = float(used or 0)
+    try:
+        u = float(used or 0)
+        reset_raw = float(reset_in_sec or 0)
+        window_len = float(window_len)
+    except (TypeError, ValueError):
+        # 字符串/None 之外的脏值: 不预测比 500 好
+        return None
+    # NaN/Inf 防护: 上游 JSON 允许 NaN 字面量; math.floor(nan + 0.5) 会抛
+    # ValueError → /api/dashboard 500 (F17). 非有限值一律当作"无法预测".
+    # 注意要在 max(0.0, reset) 之前判: max 对 NaN 的返回值是实现相关的.
+    if not (math.isfinite(u) and math.isfinite(reset_raw) and math.isfinite(window_len)):
+        return None
+    reset = max(0.0, reset_raw)
     if u >= 100.0:  # 已打满, 无预测可言
         return None
-    reset = max(0.0, float(reset_in_sec or 0))
     elapsed = window_len - reset
     if elapsed < window_len * MIN_SAMPLE_RATIO:  # 样本不足 (含 reset 越过窗口长度的脏数据)
         return None

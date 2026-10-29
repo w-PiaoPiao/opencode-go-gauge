@@ -19,6 +19,7 @@ import base64
 import calendar
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -27,6 +28,10 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+# 模块日志: 凭证降级/数据目录回退/迁移备份与恢复等"用户看不见但要可诊断"的事件
+# 走这里. 注意任何日志都不得包含 token 明文.
+_log = logging.getLogger(__name__)
 
 # 每线程独立连接 (thread-local), 避免多线程共享同一 sqlite3.Connection:
 # Python sqlite3 连接内部有语句缓存, 多线程并发执行相同 SQL 会复用同一
@@ -47,11 +52,24 @@ _payload_lock = threading.RLock()
 _payload_cache: Optional[dict[str, Any]] = None
 _payload_cache_path: Optional[str] = None
 _data_dir_override: Optional[str] = None
+# 数据目录解析结果进程内缓存: macOS 分支每次都 os.makedirs、Windows frozen 分支
+# 还要"创建+写入+删除"探针文件 (实测 ~154µs/次, 一次 dashboard 请求可触发十余次).
+# 以 env 覆盖值作缓存键: 测试用 GOUSAGE_DATA 切目录时自动失效; set_data_dir 显式清空.
+_data_dir_cache: Optional[str] = None
+_data_dir_cache_env: Optional[str] = None
+# 上次探针成功的路径: 探针瞬时失败 (磁盘满/杀软锁文件/权限变化) 时沿用它,
+# 不再静默换到另一个空库 (旧行为 = split-brain + 界面像"数据全丢").
+_last_good_data_dir: Optional[str] = None
 # 凭证缓存: 避免账户总览在每个请求线程上重复派生 keychain/DPAPI 解密.
 # 仅登录/登出/删除/改 provider 等写路径失效, 见 _invalidate_cred_cache.
 _cred_lock = threading.Lock()
 _cred_cache: dict[int, tuple[float, tuple[str, str, str]]] = {}
 _CRED_CACHE_TTL = 60.0
+# 凭证实际回退明文的进程内计数: token_storage_mode() 报的是"本进程预期的保护
+# 方式"(能力), 而不是"库内每条凭证实际形态". 两者不一致只会在加密失败时发生,
+# 此时有 WARNING 日志 + 本计数可查; 供诊断/接口展示用, 不改变存储行为.
+_token_storage_lock = threading.Lock()
+_token_storage_fallbacks = 0
 
 
 def _invalidate_cred_cache(account_id: Optional[int] = None) -> None:
@@ -70,42 +88,79 @@ def _invalidate_payload_cache() -> None:
     _payload_cache_path = None
 
 
-def set_data_dir(path: str) -> None:
+def set_data_dir(path: Optional[str]) -> None:
+    """切换数据目录; ``None`` = 恢复默认解析规则.
+
+    切库必须把"指向旧库"的进程内状态一并清掉, 否则本线程继续读写旧连接、
+    新线程连到新库 (split-brain), 或新库跳过建表/迁移:
+    - thread-local 连接 (close_db 只关当前线程; 其他线程重连时会用新路径);
+    - ``_schema_init_path`` (新库需要重新建表/迁移);
+    - payload/凭证/数据目录缓存.
+    """
+    global _data_dir_override, _data_dir_cache, _data_dir_cache_env, _schema_init_path
+    close_db()
     _invalidate_payload_cache()
-    global _data_dir_override
-    _data_dir_override = path
     # 数据目录已切换: 凭证缓存键虽是账号 id, 内容却指向旧库, 必须整体失效
     _invalidate_cred_cache()
+    _schema_init_path = None
+    _data_dir_override = path
+    _data_dir_cache = None
+    _data_dir_cache_env = None
+
+
+def _probe_writable(dir_path: str) -> bool:
+    """探测目录可写 (Windows frozen 版用来决定 exe 同目录还是 LOCALAPPDATA)."""
+    os.makedirs(dir_path, exist_ok=True)
+    probe = os.path.join(dir_path, ".write-test")
+    with open(probe, "w", encoding="utf-8") as fh:
+        fh.write("ok")
+    os.remove(probe)
+    return True
 
 
 def _default_data_dir() -> str:
+    global _data_dir_cache, _data_dir_cache_env, _last_good_data_dir
     if _data_dir_override:
         return os.path.abspath(_data_dir_override)
-    if os.environ.get("GOUSAGE_DATA"):
-        return os.path.abspath(os.environ["GOUSAGE_DATA"])
+    env = os.environ.get("GOUSAGE_DATA")
+    if _data_dir_cache is not None and _data_dir_cache_env == env:
+        # 命中缓存: 探针/目录创建只在首次解析时跑, 不做重复系统调用
+        return _data_dir_cache
+    resolved: Optional[str] = None
+    if env:
+        resolved = os.path.abspath(env)
     # macOS: 优先用户 Application Support (打包 .app 后 exe 位于 .app 内部, 不可写,
     # 也符合平台规范). 源码运行同样使用该目录, 保证行为一致.
-    if sys.platform == "darwin":
+    elif sys.platform == "darwin":
         home = os.path.expanduser("~")
         base = os.path.join(home, "Library", "Application Support", "GoGauge")
         os.makedirs(base, exist_ok=True)
-        return os.path.join(base, "data")
+        resolved = os.path.join(base, "data")
     # 单文件 exe (Windows): 优先 exe 同目录 data/, 不可写则回退到 LOCALAPPDATA
-    if getattr(sys, "frozen", False):
+    elif getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         candidate = os.path.join(exe_dir, "data")
         try:
-            os.makedirs(candidate, exist_ok=True)
-            probe = os.path.join(candidate, ".write-test")
-            with open(probe, "w", encoding="utf-8") as fh:
-                fh.write("ok")
-            os.remove(probe)
-            return candidate
-        except OSError:
-            pass
-        local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(local, "GoGauge", "data")
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+            _probe_writable(candidate)
+            resolved = candidate
+            _last_good_data_dir = candidate
+        except OSError as exc:
+            # 探针失败 (磁盘满/杀软瞬锁/权限): 沿用上次成功路径, 绝不静默换库 ——
+            # 旧行为会切到 LOCALAPPDATA 的空库, 界面表现为账号/设置/历史全丢.
+            if _last_good_data_dir:
+                _log.warning(
+                    "数据目录探针失败 (%s), 沿用上次可用路径 %s", exc, _last_good_data_dir
+                )
+                resolved = _last_good_data_dir
+            else:
+                local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+                resolved = os.path.join(local, "GoGauge", "data")
+                _log.warning("数据目录探针失败 (%s), 回退到 %s", exc, resolved)
+    else:
+        resolved = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+    _data_dir_cache = resolved
+    _data_dir_cache_env = env
+    return resolved
 
 
 def data_dir() -> str:
@@ -193,17 +248,49 @@ def _dpapi_unprotect(data: bytes) -> Optional[bytes]:
     return _dpapi_crypt(data, protect=False)
 
 
+def _security_quote(value: str) -> str:
+    """把值包成 security -i 的单条命令参数 (双引号 + 反斜杠/引号转义).
+
+    -i 交互模式按 shell 风格解析一行一条命令; 双引号包裹后空格与
+    ``+ / = &`` 等字符原样保留. token 本身不含双引号/反斜杠, 转义只是防御.
+    """
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _keychain_set(aid: int, secret: str) -> bool:
-    """macOS 登录钥匙串写入/更新 (add-generic-password -U)."""
+    """macOS 登录钥匙串写入/更新 (``security -i`` 交互模式, secret 走 stdin).
+
+    旧实现 ``security add-generic-password ... -w <secret>`` 把 token 放在进程
+    argv 里, 同机其他用户可在窗口期 (10ms–10s) 经 ``ps`` 读到 —— 这是钥匙串本该
+    防住的威胁模型. 改用 ``security -i`` 后 argv 里只有 ``security -i``.
+    ``-U`` 保留"存在即更新"语义; 写入后**回读校验**: ``-i`` 解析异常时返回码
+    可能仍是 0, 只有读回值与 secret 完全一致才算成功 (否则回退明文存储).
+    通道失败/校验失败都写日志 (不含 token), 便于排查"为什么库里是明文".
+    """
     try:
         import subprocess
 
-        rc = subprocess.run(
-            ["/usr/bin/security", "add-generic-password", "-U",
-             "-s", _KC_SERVICE, "-a", str(aid), "-w", secret],
-            capture_output=True, timeout=10)
-        return rc.returncode == 0
+        command = (
+            "add-generic-password -U -s " + _security_quote(_KC_SERVICE)
+            + " -a " + _security_quote(str(aid))
+            + " -w " + _security_quote(secret) + "\n"
+        )
+        proc = subprocess.run(
+            ["/usr/bin/security", "-i"],
+            input=command.encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            _log.warning("钥匙串写入失败 (rc=%s), 回退明文存储", proc.returncode)
+            return False
+        # 回读校验: 防止 -i 解析异常但返回码为 0 时静默存错/存空
+        if _keychain_get(aid) == secret:
+            return True
+        _log.warning("钥匙串写入后回读不一致, 回退明文存储")
+        return False
     except Exception:  # noqa: BLE001
+        _log.warning("钥匙串写入异常, 回退明文存储", exc_info=True)
         return False
 
 
@@ -235,7 +322,11 @@ def _keychain_delete(aid: int) -> None:
 
 
 def _storage_encode(aid: int, token: str) -> str:
-    """明文 token -> 库内存储值; 加密失败时静默回退明文 (保登录可用)."""
+    """明文 token -> 库内存储值; 加密不可用时回退明文 (保登录可用) 并写日志.
+
+    回退不能静默: 用户以为在钥匙串/DPAPI 里, 实际明文入库, 出问题无从排查.
+    日志只说明降级事实, 绝不打印 token 本身.
+    """
     token = token.strip()
     if not token:
         return ""
@@ -243,10 +334,49 @@ def _storage_encode(aid: int, token: str) -> str:
         blob = _dpapi_protect(token.encode("utf-8"))
         if blob is not None:
             return _ENC_PREFIX + base64.b64encode(blob).decode("ascii")
+        _note_token_storage_fallback()
+        _log.warning("DPAPI 加密失败, 凭证以明文写入本地库 (仅本机用户可读)")
     elif _frozen() and sys.platform == "darwin":
         if _keychain_set(aid, token):
             return _KC_PREFIX
+        _note_token_storage_fallback()
+        _log.warning("钥匙串写入失败, 凭证以明文写入本地库 (仅本机用户可读)")
     return token
+
+
+def _note_token_storage_fallback() -> None:
+    global _token_storage_fallbacks
+    with _token_storage_lock:
+        _token_storage_fallbacks += 1
+
+
+def token_storage_fallback_count() -> int:
+    """本进程内凭证加密失败、回退明文的次数 (诊断用; 不改变存储行为).
+
+    与 ``token_storage_mode()`` 配合使用: mode 是预期保护方式, 该计数 >0 说明
+    实际写入时发生过降级 (每次降级另有不含 token 的 WARNING 日志).
+    """
+    with _token_storage_lock:
+        return _token_storage_fallbacks
+
+
+def token_storage_mode() -> str:
+    """本进程**预期**的凭证静态保护方式: ``keychain`` / ``dpapi`` / ``plain``.
+
+    ⚠️ 语义是"能力/预期", **不是**"库内每条凭证当前的实际形态":
+    - frozen macOS → ``keychain``, frozen Windows → ``dpapi``, 其余 → ``plain``;
+    - 密钥链/DPAPI 写入失败时会**回退明文存储**以保证登录可用, 此时本函数仍
+      返回预期方式 (展示意图不变), 实际降级由 WARNING 日志与
+      ``token_storage_fallback_count()`` 体现.
+
+    ``/api/state`` 的 ``token_storage`` 字段即此语义 (预期保护方式); 不要据此
+    判断某条凭证一定不是明文.
+    """
+    if _frozen() and sys.platform == "darwin":
+        return "keychain"
+    if _frozen() and sys.platform == "win32":
+        return "dpapi"
+    return "plain"
 
 
 def _storage_decode(aid: int, stored: str) -> str:
@@ -321,11 +451,24 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def _is_default_data_dir() -> bool:
+    """当前数据目录是否由本程序默认规则解析 (没有 set_data_dir override / 环境变量).
+
+    只有默认目录才由我们"创建并拥有", 可以收窄权限; 显式 override / GOUSAGE_DATA
+    指向的是用户自己选的既有目录 (共享盘/外置盘/同步目录), 不能擅自 chmod.
+    """
+    return _data_dir_override is None and not os.environ.get("GOUSAGE_DATA")
+
+
 def _harden_db_perms(path: str) -> None:
-    """库文件与 WAL/SHM 收窄到 0600 (仅属主可读写).
+    """库文件与 WAL/SHM 收窄到 0600; 数据目录仅默认解析目录收窄到 0700.
 
     非冻结版 / Linux 下凭证可能是明文 (DPAPI 与钥匙串只在对应平台的打包版可用),
-    而 sqlite3 按进程 umask 创建文件 (通常 0644), 同机其他用户可读走 session token.
+    而 sqlite3 按进程 umask 创建文件 (通常 0644), 同机其他用户可读走 session token,
+    所以 **DB 文件始终** 0600.
+    目录 0700 只对默认目录做: 用户通过 ``set_data_dir`` / ``GOUSAGE_DATA`` 显式
+    指定的既有目录 (共享目录/外置盘/带 ACL 的同步目录) 权限归用户自己管, 程序改
+    它的权限可能破坏共享/备份策略 (N2b).
     失败不致命 (Windows 无 POSIX 权限位; 某些文件系统不支持).
     """
     if os.name == "nt":
@@ -335,6 +478,12 @@ def _harden_db_perms(path: str) -> None:
             os.chmod(path + suffix, 0o600)
         except OSError:
             pass  # 文件可能尚未创建 (WAL/SHM 首次写入才出现)
+    if not _is_default_data_dir():
+        return  # 显式指定的目录不动权限
+    try:
+        os.chmod(os.path.dirname(path) or ".", 0o700)
+    except OSError:
+        pass
 
 
 def close_db() -> None:
@@ -371,6 +520,377 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def _table_columns(conn: sqlite3.Connection, name: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({name})").fetchall()}
+
+
+def _sqlite_table_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+
+
+# ``PRAGMA user_version``: 只作**记录/调试**用途 (记录最后一次完整初始化所对应的
+# schema 版本), 不拿它当"是否已迁移"的唯一判据 —— 库可能被中间版本/异常路径写过
+# 任意值 (实测真实库曾被在途代码写成 8), 阈值判断会误跳过必要的回填/清理.
+#
+# 结构迁移 (1/2/3/5/6/8) 一律保留结构探测 + 幂等执行; 真正的**一次性动作**
+# (迁移 4/7 的旧前缀凭证清理) 用具名 marker 门控 (settings payload 的
+# ``legacy_token_cleanup_done``): 没跑过就跑一次, 跑过就跳过. 对"未知的更大
+# user_version"安全 —— 宁可多跑一次幂等清理, 也不漏.
+# 数值与迁移 8 的主键重建对齐 (历史编号), 只向上记录, 不覆盖更大的值.
+_DB_SCHEMA_VERSION = 8
+_MIGRATION_BACKUP_SUFFIX = ".bak-"
+_ONE_TIME_CLEANUP_MARKER = "legacy_token_cleanup_done"
+
+
+def _db_user_version(conn: sqlite3.Connection) -> int:
+    row = conn.execute("PRAGMA user_version").fetchone()
+    try:
+        return int(row[0])
+    except (TypeError, IndexError, ValueError):
+        return 0
+
+
+def _set_db_user_version(conn: sqlite3.Connection, version: int) -> None:
+    """只向上记录 schema 版本; 库内已有更大的值 (未来版本) 时保持原样.
+
+    PRAGMA 不支持参数绑定; version 是模块内整数常量, 不来自外部输入.
+    """
+    if _db_user_version(conn) >= int(version):
+        return
+    conn.execute(f"PRAGMA user_version = {int(version)}")
+
+
+def _one_time_migration_pending(conn: sqlite3.Connection) -> bool:
+    """是否还有未执行的一次性迁移 (具名 marker 缺失).
+
+    读原始 payload 而不走 _raw_payload: 本函数在 _init_schema 早期被调用, 且
+    "是否需要备份"的判断不能依赖可能陈旧/未初始化的读缓存.
+    """
+    try:
+        row = conn.execute("SELECT payload FROM settings WHERE id = 1").fetchone()
+        data = json.loads(row["payload"]) if row is not None else {}
+    except (sqlite3.Error, TypeError, ValueError):
+        return True  # 表还没建/内容损坏: 保守当作有, 备份多跑一次无害
+    return not (isinstance(data, dict) and data.get(_ONE_TIME_CLEANUP_MARKER))
+
+
+def _run_atomic_sql(
+    conn: sqlite3.Connection, label: str, statements: list[str]
+) -> None:
+    """把若干条语句包进一个显式事务; 任何一步失败都整体回滚后重抛.
+
+    ``conn.executescript`` 只做一次隐式 COMMIT 后逐句执行, 本身**不**原子
+    (这是迁移 3/8 丢数据的根因); 需要原子的 DDL+DML 只能显式 BEGIN/COMMIT.
+    回滚后重抛 = 应用启动失败并留下日志, 但库内容保持迁移前的完整状态.
+    """
+    try:
+        conn.execute("BEGIN")
+        for sql in statements:
+            conn.execute(sql)
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        _log.error("数据库迁移失败, 已整体回滚: %s", label, exc_info=True)
+        raise
+
+
+def _run_script_atomic(conn: sqlite3.Connection, label: str, script: str) -> None:
+    """执行内含 ``BEGIN;...COMMIT;`` 的迁移脚本; 失败时 rollback 后重抛.
+
+    脚本文本**必须**自带事务控制 —— executescript 不会替你包事务.
+    """
+    try:
+        conn.executescript(script)
+    except Exception:  # noqa: BLE001
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        _log.error("数据库迁移失败, 已整体回滚: %s", label, exc_info=True)
+        raise
+
+
+def _backup_before_migration(conn: sqlite3.Connection) -> Optional[str]:
+    """迁移前把库文件备份一份 (``gousage.db.bak-<时间戳>``), 返回备份路径.
+
+    只在"有表且版本落后 / 存在 legacy 孤儿表"时执行: 全新库无内容可备份,
+    已迁移完成的库每次启动都复制会持续堆积. 备份走 sqlite3 backup API
+    (包含 WAL 中已提交内容, 比直接 copy 文件安全); 备份失败只告警不阻塞启动
+    —— 迁移本身是原子的, 备份是额外保险.
+    """
+    try:
+        path = db_path()
+        if not os.path.exists(path):
+            return None
+        tables = _sqlite_table_names(conn)
+        if not tables:
+            return None
+        has_legacy = bool(
+            tables & {"usage_records_legacy", "usage_sync_state_legacy"}
+        )
+        if not has_legacy and not _one_time_migration_pending(conn):
+            return None
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = f"{path}{_MIGRATION_BACKUP_SUFFIX}{stamp}"
+        suffix = 1
+        while os.path.exists(target):
+            target = f"{path}{_MIGRATION_BACKUP_SUFFIX}{stamp}-{suffix}"
+            suffix += 1
+        dst = sqlite3.connect(target)
+        try:
+            conn.backup(dst)
+            dst.commit()
+        finally:
+            dst.close()
+        if os.name != "nt":
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                pass  # 备份已写成, 权限收窄失败不致命
+        _log.info("迁移前已自动备份数据库: %s", target)
+        return target
+    except Exception:  # noqa: BLE001
+        _log.warning("迁移前自动备份失败 (不影响迁移)", exc_info=True)
+        return None
+
+
+# 恢复 legacy 孤儿表时允许缺失列的兜底表达式 (旧形状里 NOT NULL 列实际都存在)
+_LEGACY_DEFAULT_EXPR = {
+    "account_id": "1",
+    "reasoning_tokens": "0",
+    "cache_read_tokens": "0",
+    "cache_write_5m_tokens": "0",
+    "cache_write_1h_tokens": "0",
+    "provider": "NULL",
+    "local_date": "NULL",
+    "total_records": "0",
+    "last_inserted_count": "0",
+    "deepest_page_fetched": "-1",
+}
+
+
+def _recover_legacy_tables(conn: sqlite3.Connection) -> None:
+    """回灌上次迁移中断留下的 ``*_legacy`` 孤儿表, 成功后 DROP (写日志).
+
+    迁移 8/3 的中间态 (旧表已 RENAME、新表已建、数据还没搬完) 在旧实现下会被
+    静默留在孤儿表里: 应用正常启动, 历史统计全 0, 没有任何报错. 启动时先做
+    ``INSERT OR IGNORE`` 回灌 (幂等: 已搬过的行按唯一键忽略) 再删旧表.
+    整体包一个事务: 回灌失败则回滚并抛错 (宁可启动失败可见, 不能静默空库).
+    """
+    tables = _sqlite_table_names(conn)
+    if "usage_sync_state_legacy" in tables:
+        legacy_cols = _table_columns(conn, "usage_sync_state_legacy")
+        target_cols = ("account_id", "last_sync_at", "last_sync_status",
+                       "last_sync_error", "last_inserted_count", "deepest_page_fetched",
+                       "total_records", "oldest_record_at", "newest_record_at")
+        actual_target = _table_columns(conn, "usage_sync_state")
+        copy = [c for c in target_cols if c in actual_target]
+        src = ["id" if (c == "account_id" and "id" in legacy_cols) else c for c in copy]
+        value_exprs = [
+            s if s in legacy_cols else _LEGACY_DEFAULT_EXPR.get(c, "NULL")
+            for c, s in zip(copy, src)
+        ]
+        insert = (
+            f"INSERT OR IGNORE INTO usage_sync_state ({', '.join(copy)})"
+            f" SELECT {', '.join(value_exprs)} FROM usage_sync_state_legacy"
+        )
+        _run_atomic_sql(
+            conn, "回灌 usage_sync_state_legacy",
+            [insert, "DROP TABLE usage_sync_state_legacy"],
+        )
+        _log.warning("检测到中断的 usage_sync_state 迁移, 已从 legacy 表回灌并清理")
+    if "usage_records_legacy" in tables:
+        legacy_cols = _table_columns(conn, "usage_records_legacy")
+        target_cols = (
+            "usg_id", "created_at", "model", "provider", "input_tokens",
+            "output_tokens", "reasoning_tokens", "cache_read_tokens",
+            "cache_write_5m_tokens", "cache_write_1h_tokens", "cost_raw", "cost_usd",
+            "key_id", "session_id", "plan", "synced_at", "account_id", "local_date",
+        )
+        actual_target = _table_columns(conn, "usage_records")
+        copy = [c for c in target_cols if c in actual_target]
+        value_exprs = [
+            c if c in legacy_cols else _LEGACY_DEFAULT_EXPR.get(c, "NULL")
+            for c in copy
+        ]
+        insert = (
+            f"INSERT OR IGNORE INTO usage_records ({', '.join(copy)})"
+            f" SELECT {', '.join(value_exprs)} FROM usage_records_legacy"
+        )
+        _run_atomic_sql(
+            conn, "回灌 usage_records_legacy",
+            [insert, "DROP TABLE usage_records_legacy"],
+        )
+        _log.warning("检测到中断的 usage_records 迁移, 已从 legacy 表回灌并清理")
+
+
+# ---------------------------------------------------------------------------
+# local_date 时区一致性
+#
+# local_date 是写入时用 SQLite 'localtime' 物化的派生列 (走索引的前提). 系统
+# 时区变更/跨时区使用后, 旧行停在旧时区日期, 而窗口边界用新时区的
+# date('now','localtime') —— "今日"会统计到昨天的记录、prune 边界偏一天.
+# payload 里记录派生时区标识 (UTC 偏移), 启动发现变化时后台分批重算.
+# ---------------------------------------------------------------------------
+
+
+def _local_date_tz_id() -> str:
+    """当前本地时区的 UTC 偏移标识 (``+0800`` / ``-0400``), 用于变更检测.
+
+    用偏移而不是时区名: 名字变化但偏移相同的切换 (如 Asia/Shanghai -> UTC+8
+    固定偏移) 派生出的 local_date 完全一致, 无需重算.
+    """
+    offset = datetime.now().astimezone().utcoffset()
+    seconds = int(offset.total_seconds()) if offset is not None else 0
+    sign = "+" if seconds >= 0 else "-"
+    seconds = abs(seconds)
+    return f"{sign}{seconds // 3600:02d}{(seconds % 3600) // 60:02d}"
+
+
+def _count_local_date_mismatch(conn: sqlite3.Connection) -> int:
+    """统计两表中 ``local_date`` 与"按当前本地时区应有的值"不一致的行数.
+
+    只 COUNT 不写: 用于两处轻量判定 ——
+    1) marker 缺失时 (首次运行/老库升级) 判断是否真的需要重算;
+    2) 重算完成后校验是否全部收敛 (N1/N3: 未收敛不能更新 marker).
+    """
+    total = 0
+    for table, col in (("usage_records", "created_at"), ("usage_charts", "time_bucket")):
+        row = conn.execute(
+            f"SELECT COUNT(*) AS c FROM {table}"
+            f" WHERE local_date IS NOT date(substr({col}, 1, 19), 'localtime')"
+        ).fetchone()
+        total += int(row["c"] or 0) if row is not None else 0
+    return total
+
+
+def _mark_local_date_tz(conn: sqlite3.Connection, tz: str) -> None:
+    """记录"最后一次成功完成 local_date 重算的时区标识".
+
+    必须在全表重算**收敛之后**才调用 (N1/N3): 若在重算开始前就写, 中途进程被杀
+    会让下次启动误以为"已按当前时区重算过"而不再重试, 旧行永久错一天.
+    """
+    with _payload_lock:
+        data = _raw_payload(conn)
+        if data.get("local_date_tz") == tz:
+            return
+        data["local_date_tz"] = tz
+        _write_payload(conn, data)
+
+
+def _recompute_local_dates(conn: sqlite3.Connection, batch_size: int = 2000) -> int:
+    """按当前本地时区重算明细/charts 两表的 local_date (分批, 幂等).
+
+    分批 (按 rowid 区间) 是为了不长时间持有写锁; 中断后重跑无副作用.
+    UPDATE 带 ``local_date IS NOT <应有值>`` 守卫 (N2): 时区切换后大多数行其实
+    不需要改 (例如只有少数跨日行受影响), 无守卫时每次启动都全表重写 + 等量 WAL
+    (实测 21,752 行无变化时 ~80ms 全写); 加守卫后 0 写.
+    """
+    total = 0
+    for table, col in (("usage_records", "created_at"), ("usage_charts", "time_bucket")):
+        expected = f"date(substr({col}, 1, 19), 'localtime')"
+        row = conn.execute(f"SELECT MAX(rowid) AS m FROM {table}").fetchone()
+        max_rowid = int(row["m"] or 0) if row is not None else 0
+        start = 0
+        while start < max_rowid:
+            cur = conn.execute(
+                f"UPDATE {table} SET local_date = {expected}"
+                f" WHERE rowid > ? AND rowid <= ?"
+                f" AND local_date IS NOT {expected}",
+                (start, start + batch_size),
+            )
+            total += max(0, cur.rowcount)
+            conn.commit()
+            start += batch_size
+    return total
+
+
+def _recompute_and_mark(conn: sqlite3.Connection) -> bool:
+    """重算 local_date, **仅在全部收敛后**更新 marker; 未收敛返回 False 保留旧 marker.
+
+    保留旧 marker 的效果: 本次进程被杀/中断后, 下次启动仍会看到 marker != 当前
+    时区 (或 marker 缺失), 从而自动重试, 不会出现"以为重算过、其实只改了一半".
+    """
+    current = _local_date_tz_id()
+    updated = _recompute_local_dates(conn)
+    remaining = _count_local_date_mismatch(conn)
+    if remaining:
+        _log.warning(
+            "local_date 重算未完全收敛 (剩余 %s 行不一致), 保留旧 marker 待下次启动重试",
+            remaining,
+        )
+        return False
+    _mark_local_date_tz(conn, current)
+    _log.info("local_date 时区重算完成 marker=%s (更新 %s 行)", current, updated)
+    return True
+
+
+def _recompute_local_dates_worker() -> None:
+    """后台线程入口: 用独立连接重算 + 收敛后写 marker (调用方不复用主线程连接)."""
+    path = db_path()
+    conn = None
+    try:
+        conn = sqlite3.connect(path, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        _recompute_and_mark(conn)
+    except Exception:  # noqa: BLE001
+        _log.warning("后台 local_date 时区重算失败", exc_info=True)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _check_local_date_tz(
+    conn: sqlite3.Connection, *, background: bool = True
+) -> bool:
+    """检查 local_date 派生时区并按需重算; 返回是否**启动**了重算.
+
+    marker (settings payload ``local_date_tz``) 语义 = **最后一次成功完成重算的
+    时区偏移**, 不是"上次启动时的时区":
+    - marker == 当前偏移: 上次重算已覆盖当前时区, 无需动作 (启动快路径);
+    - marker 缺失 (首次运行 / 从没有该字段的老库升级): 先做一次轻量 COUNT ——
+      0 则说明 local_date 本就按当前时区派生, 直接补 marker; >0 才重算;
+    - marker != 当前偏移: 系统时区变了, 重算; **重算全部收敛后才更新 marker**.
+      中途进程被杀 → marker 仍是旧值 → 下次启动自动重试并最终收敛 (N1/N3).
+
+    ``background=False`` 供测试同步执行 (返回时重算与 marker 更新均已完成).
+    """
+    current = _local_date_tz_id()
+    with _payload_lock:
+        stored = _raw_payload(conn).get("local_date_tz")
+    if stored == current:
+        return False
+    if stored is None:
+        mismatched = _count_local_date_mismatch(conn)
+        if mismatched == 0:
+            # 老库升级/增量库: local_date 已与当前时区一致, 只补 marker, 不重写数据
+            _mark_local_date_tz(conn, current)
+            return False
+        _log.info(
+            "首次检测 local_date 时区: %s 行与当前时区 (%s) 不一致, 启动重算",
+            mismatched, current,
+        )
+    else:
+        _log.info("检测到本地时区变更 (%s -> %s), 重算 local_date", stored, current)
+    if background:
+        threading.Thread(
+            target=_recompute_local_dates_worker,
+            name="local-date-tz-recompute",
+            daemon=True,
+        ).start()
+    else:
+        _recompute_and_mark(conn)
+    return True
+
+
 _SS_TAIL = """
           last_sync_at TEXT,
           last_sync_status TEXT,
@@ -386,6 +906,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # 多线程首次并发建表/种子行时串行化 (DDL 与单例行插入不能竞争; macOS 移植保留)
     # v2.0.0 多用户新形状 schema 与迁移 1/2/3 取自上游
     with _schema_lock:
+        # 迁移前自动备份 (只在版本落后/存在 legacy 孤儿表时): 给"迁移本身出错"再加
+        # 一层兜底. 必须在建表/搬动任何数据之前执行; 全新库没有用户表 → 跳过.
+        _backup_before_migration(conn)
         # 新形状建表: usage_records 自带 account_id; accounts 多行; 同步状态按账号主键
         conn.executescript(
             """
@@ -467,29 +990,35 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             );
             """
         )
+        # 上次进程在迁移中途被强杀留下的 *_legacy 孤儿表: 先回灌再 DROP.
+        # 旧实现没有这步 —— 应用正常启动、统计全 0、无任何报错 (P1-2).
+        _recover_legacy_tables(conn)
         # 确保 settings 行存在
         if conn.execute("SELECT id FROM settings WHERE id = 1").fetchone() is None:
             conn.execute("INSERT INTO settings (id, payload, updated_at) VALUES (1, '{}', ?)", (_now_iso(),))
             conn.commit()
 
         # 迁移 1: 旧单行 account 表 -> accounts 多行表 (仅当目标为空时拷贝, 保证幂等)
+        # INSERT 与 DROP 必须同一事务: 旧实现分开提交, 中途崩溃会留下"已拷贝 + 未删"
+        # 或"已删 + 未拷贝"的中间态 (后者由 user_version 备份兜底).
         if _table_exists(conn, "account"):
             empty = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"] == 0
+            statements: list[str] = []
             if empty:
                 # 旧表没有 provider 列时以 opencode 回填; 若已有则原样搬运
-                acc_cols = {row["name"] for row in conn.execute("PRAGMA table_info(account)").fetchall()}
+                acc_cols = _table_columns(conn, "account")
                 if "provider" in acc_cols:
-                    conn.execute(
+                    statements.append(
                         """INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)
                            SELECT id, name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at FROM account"""
                     )
                 else:
-                    conn.execute(
+                    statements.append(
                         """INSERT INTO accounts (id, name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)
                            SELECT id, name, workspace_id, resolved_workspace_id, token, 'opencode', created_at, updated_at FROM account"""
                     )
-            conn.execute("DROP TABLE account")
-            conn.commit()
+            statements.append("DROP TABLE account")
+            _run_atomic_sql(conn, "迁移 1: account -> accounts", statements)
 
         # 全新库: 种子默认空账号 (未登录态, 与历史行为一致)
         if conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"] == 0:
@@ -544,11 +1073,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
 
-        # 迁移 3: 单行 usage_sync_state(id 主键) 重建为按账号多行 (数据无损搬运)
+        # 迁移 3: 单行 usage_sync_state(id 主键) 重建为按账号多行 (数据无损搬运).
+        # 脚本文本自带 BEGIN/COMMIT: executescript 本身不包事务, 中途崩溃会留下
+        # 半完成的重建 (旧表还在 legacy、新表空) —— 启动时的 _recover_legacy_tables
+        # 是第二道兜底, 但第一道原子性必须在这里.
         ss_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage_sync_state)").fetchall()}
         if ss_cols and "id" in ss_cols and "account_id" not in ss_cols:
-            conn.executescript(
+            _run_script_atomic(
+                conn,
+                "迁移 3: usage_sync_state 多账号化",
                 f"""
+                BEGIN;
                 ALTER TABLE usage_sync_state RENAME TO usage_sync_state_legacy;
                 CREATE TABLE usage_sync_state (
                   account_id INTEGER PRIMARY KEY,{_SS_TAIL}
@@ -560,7 +1095,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                        last_inserted_count, deepest_page_fetched, total_records,
                        oldest_record_at, newest_record_at FROM usage_sync_state_legacy;
                 DROP TABLE usage_sync_state_legacy;
-                """
+                COMMIT;
+                """,
             )
         conn.commit()
 
@@ -581,16 +1117,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         # date(): created_at 是 isoformat 产物 ("...T..Z", 6 位微秒), 末尾的 Z 只有
         # SQLite ≥3.38 认; 旧版会整串解析失败返回 NULL, 该行便静默地不被任何周期
         # 过滤命中 (local_date 全为 NULL 时「本周期」筛出 0 条). Android 侧同款做法.
-        conn.execute(
-            "UPDATE usage_records SET local_date = date(substr(created_at, 1, 19), 'localtime')"
-            " WHERE local_date IS NULL AND LENGTH(created_at) >= 19"
-        )
-        conn.execute(
-            "UPDATE usage_charts SET local_date = date(substr(time_bucket, 1, 19), 'localtime')"
-            " WHERE local_date IS NULL AND LENGTH(time_bucket) >= 19"
-        )
-        conn.executescript(
+        # 回填条件放宽: 不再要求长度 ≥19 —— "2026-01-02" 这类 10 字符短格式本可被
+        # date() 解析, 旧条件却永久跳过, 留给它 local_date=NULL 的僵尸行 (P2-3/F5).
+        # 回填 + 建索引合成一个事务: 半完成的回填/缺索引不应跨启动残留.
+        _run_script_atomic(
+            conn,
+            "迁移 6: local_date 回填与索引",
             """
+            BEGIN;
+            UPDATE usage_records SET local_date = date(substr(created_at, 1, 19), 'localtime')
+              WHERE local_date IS NULL AND date(substr(created_at, 1, 19)) IS NOT NULL;
+            UPDATE usage_charts SET local_date = date(substr(time_bucket, 1, 19), 'localtime')
+              WHERE local_date IS NULL AND date(substr(time_bucket, 1, 19)) IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_usage_account_localdate
               ON usage_records(account_id, local_date);
             CREATE INDEX IF NOT EXISTS idx_usage_account_model
@@ -615,7 +1153,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             -- 带上 requests 使其成为覆盖索引 (仅扫索引不回表).
             CREATE INDEX IF NOT EXISTS idx_charts_account_synced
               ON usage_charts(account_id, synced_at, requests);
-            """
+            COMMIT;
+            """,
         )
         conn.commit()
 
@@ -637,8 +1176,15 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if row["pk"]
         ]
         if pk_names == ["usg_id"]:
-            conn.executescript(
+            # 重建必须整体原子: 旧实现 executescript 不包事务, 在 RENAME 之后、
+            # INSERT 之前被强杀就会把整份历史留在 usage_records_legacy, 下次启动
+            # 建出空的新表 (主键已是新形状 → 走 else 分支, 永远不再碰 legacy).
+            # 脚本文本自带 BEGIN/COMMIT; 失败时 rollback (见 _run_script_atomic).
+            _run_script_atomic(
+                conn,
+                "迁移 8: usage_records 主键重建",
                 """
+                BEGIN;
                 ALTER TABLE usage_records RENAME TO usage_records_legacy;
                 -- RENAME 会把旧表上的索引一并带走并沿用原名, 所以下面不带
                 -- IF NOT EXISTS 的 CREATE UNIQUE INDEX 一旦撞上同名索引就会
@@ -700,7 +1246,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                   input_tokens, output_tokens, reasoning_tokens,
                   cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                   cost_usd, session_id);
-                """
+                COMMIT;
+                """,
             )
         else:
             # 已是新形状 (新建库 / 上一轮已迁移): 补建唯一索引兜底.
@@ -712,22 +1259,57 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             )
         conn.commit()
 
-    # 迁移 4: opencode.ai 2026-09 改版后旧会话 Cookie (auth=…) 已失效,
-    # 置空凭证让应用回到欢迎页引导重新登录 (新格式 __Host-console_session=… 不受影响);
-    # 仅清凭证不删历史记录, 幂等
-    conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'auth=%'")
-    # 迁移 7: 旧版 DPAPI 封装有 bug (DATA_BLOB.pbData 误用 c_char_p), 存入的
-    # enc:v1: 凭证是截断+混入对象内存的垃圾, 永远解不出来 (读回为空) 且解密
-    # 链路本身还会野指针 free. 全部置空引导重新登录, 幂等.
-    # 修复版凭证改用 enc:v2: 前缀, 与垃圾分界 —— 本语句每次启动都会执行,
-    # 修复版若仍写 v1 会在这里被一并清掉 (曾致重启即两账号同时掉登录).
-    conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'enc:v1:%'")
-    conn.commit()
+        # 迁移 4: opencode.ai 2026-09 改版后旧会话 Cookie (auth=…) 已失效,
+        # 置空凭证让应用回到欢迎页引导重新登录 (新格式 __Host-console_session=… 不受影响);
+        # 仅清凭证不删历史记录. **一次性**: 若每次启动都跑, auth.py legacy 捕获路径
+        # 下次登录写回的 `auth=` 新凭证会在重启时被清空 —— "重登成功、重启又掉登录".
+        #
+        # 迁移 7: 旧版 DPAPI 封装有 bug (DATA_BLOB.pbData 误用 c_char_p), 存入的
+        # enc:v1: 凭证是截断+混入对象内存的垃圾, 永远解不出来 (读回为空) 且解密
+        # 链路本身还会野指针 free. 一次性置空引导重新登录; 修复版凭证用 enc:v2:
+        # 前缀与垃圾分界 (曾因每次启动都清 v1 而误伤 v2, 重启即两账号同时掉登录).
+        #
+        # 门控用具名 marker (settings payload 的 legacy_token_cleanup_done) 而不是
+        # user_version 阈值: 库可能被中间版本/异常路径写成任意版本号 (实测真实库被
+        # 在途代码写成 8), 阈值判断会误跳过清理. marker 缺失就多跑一次幂等清理,
+        # 且清理 SQL 只命中 auth=/enc:v1: 前缀 —— enc:v2:/kc:/新明文一律不受影响.
+        if _one_time_migration_pending(conn):
+            conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'auth=%'")
+            conn.execute("UPDATE accounts SET token = '' WHERE token LIKE 'enc:v1:%'")
+            conn.commit()
+            with _payload_lock:
+                data = _raw_payload(conn)
+                data[_ONE_TIME_CLEANUP_MARKER] = True
+                _write_payload(conn, data)
+            _log.info("完成一次性旧凭证清理 (marker=%s)", _ONE_TIME_CLEANUP_MARKER)
+        # user_version 只作记录/调试 (向上记录, 不覆盖更大的未来版本值)
+        _set_db_user_version(conn, _DB_SCHEMA_VERSION)
+        conn.commit()
+
+    # 时区变更检测: local_date 是写入时按当时本地时区物化的派生列, 系统时区
+    # 变化后旧行仍停在旧时区日期 ("今日"/裁剪边界会偏一天). 记录派生时区标识,
+    # 启动发现变化时后台分批重算 (见 _check_local_date_tz).
+    try:
+        _check_local_date_tz(conn)
+    except Exception:  # noqa: BLE001 时区重算是锦上添花, 失败不阻塞启动
+        _log.warning("local_date 时区检查/重算失败", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
 # settings payload 底层读写 (key_names 与 active_account_id 等共用一个 JSON)
 # ---------------------------------------------------------------------------
+
+
+def _read_payload_row(conn: sqlite3.Connection) -> dict[str, Any]:
+    """从 settings 表读一整包 payload (调用方负责锁与缓存)."""
+    row = conn.execute("SELECT payload FROM settings WHERE id = 1").fetchone()
+    if row is None:
+        return {}
+    try:
+        parsed = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _raw_payload(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -737,31 +1319,37 @@ def _raw_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     if cached is not None and _payload_cache_path == path:
         # 返回浅拷贝: 调用方惯例是取整包后改顶层键再写回, 浅拷贝已隔离缓存本体
         return dict(cached)
-    row = conn.execute("SELECT payload FROM settings WHERE id = 1").fetchone()
-    if not row:
-        data: dict[str, Any] = {}
-    else:
-        try:
-            parsed = json.loads(row["payload"])
-            data = parsed if isinstance(parsed, dict) else {}
-        except (TypeError, ValueError):
-            data = {}
-    _payload_cache = data
-    _payload_cache_path = path
+    # 缓存回写也必须持锁: 读完到写缓存之间若有写线程提交了新 payload 并更新
+    # 缓存, 读线程会把**旧值**写回全局缓存, payload 陈旧 (active_account_id/
+    # 周期键/设置回退) 直到下一次写才自愈. 双检避免等锁期间重复查询.
+    with _payload_lock:
+        cached = _payload_cache
+        if cached is not None and _payload_cache_path == path:
+            return dict(cached)
+        data = _read_payload_row(conn)
+        _payload_cache = data
+        _payload_cache_path = path
     return dict(data)
 
 
-def _write_payload(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+def _write_payload(
+    conn: sqlite3.Connection, data: dict[str, Any], commit: bool = True
+) -> None:
     global _payload_cache, _payload_cache_path
     conn.execute(
         "UPDATE settings SET payload = ?, updated_at = ? WHERE id = 1",
         (json.dumps(data, ensure_ascii=False), _now_iso()),
     )
+    if not commit:
+        # 事务由调用方 (备份导入单事务) 统一提交; 提交前不能动缓存 ——
+        # 回滚后"缓存命中 ⇒ 库里已有该值"的前提会被打破.
+        return
     # 提交成功后才更新缓存: 保证"缓存命中 ⇒ 库里已有该值". 历史调用方都在
     # 写后紧跟 conn.commit(), 提交收拢到这里不改变任何调用点的语义.
     conn.commit()
-    _payload_cache = data
-    _payload_cache_path = db_path()
+    with _payload_lock:  # RLock: 写路径已持锁时嵌套获取安全
+        _payload_cache = data
+        _payload_cache_path = db_path()
 
 
 # ---------------------------------------------------------------------------
@@ -769,12 +1357,15 @@ def _write_payload(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _persist_active(conn: sqlite3.Connection, account_id: int) -> None:
+def _persist_active(
+    conn: sqlite3.Connection, account_id: int, commit: bool = True
+) -> None:
     with _payload_lock:
         data = _raw_payload(conn)
         data["active_account_id"] = int(account_id)
-        _write_payload(conn, data)
-        conn.commit()
+        _write_payload(conn, data, commit=commit)
+        if commit:
+            conn.commit()
 
 
 def get_active_account_id() -> int:
@@ -902,26 +1493,41 @@ def _ensure_state_row(conn: sqlite3.Connection, account_id: int) -> None:
 
 
 def save_token(
-    token: str, workspace_id: str = "Default", provider: str = PROVIDER_OPENCODE
-) -> None:
-    """重新登录语义: 更新活跃账号的凭证并重置其增量游标.
+    token: str,
+    workspace_id: str = "Default",
+    provider: str = PROVIDER_OPENCODE,
+    account_id: Optional[int] = None,
+) -> bool:
+    """重新登录语义: 写入目标账号的凭证并重置其增量游标; 返回是否写入成功.
+
+    ``account_id=None`` 保持历史行为 (更新活跃账号; 无任何账号时兜底新增并返回
+    True). ``account_id`` 给定 (重新登录**发起时**固化的目标账号, P1-1): 只更新
+    该行 —— OAuth 期间用户切换活跃账号也不会把 A 的新凭证写进 B、销毁 B 的原
+    凭证; 目标账号已被删返回 False, 调用方走错误提示/回退 add_account, 不能
+    静默丢弃本次登录.
 
     provider 变化时同步更新 (重新登录时用户可能切换了来源类型);
     workspace 仅对 opencode 有意义, commandcode 恒为 "Default".
     """
+    token = (token or "").strip()
     conn = get_db()
-    aid = get_active_account_id()
-    if not aid:
-        # 删光账号后无活跃行 (运行期不会重建种子行): 兜底转为新增账号,
-        # 避免 relogin 流程走完全程后凭证被静默丢弃
-        add_account(token, workspace_id, switch=True, provider=provider)
-        return
+    if account_id is None:
+        aid = get_active_account_id()
+        if not aid:
+            # 删光账号后无活跃行 (运行期不会重建种子行): 兜底转为新增账号,
+            # 避免 relogin 流程走完全程后凭证被静默丢弃
+            add_account(token, workspace_id, switch=True, provider=provider)
+            return True
+    else:
+        aid = int(account_id)
+        if conn.execute("SELECT id FROM accounts WHERE id = ?", (aid,)).fetchone() is None:
+            return False  # 目标账号已不存在: 明确失败, 由调用方决定回退新增
     if provider not in ALL_PROVIDERS:
         provider = PROVIDER_OPENCODE
     conn.execute(
         """UPDATE accounts SET token = ?, token_fp = ?, workspace_id = ?, resolved_workspace_id = NULL,
            provider = ?, updated_at = ? WHERE id = ?""",
-        (_storage_encode(aid, token.strip()), _token_fp(token),
+        (_storage_encode(aid, token), _token_fp(token),
          workspace_id.strip() or "Default", provider, _now_iso(), aid),
     )
     _ensure_state_row(conn, aid)
@@ -934,6 +1540,7 @@ def save_token(
     # GOAT 的 period_start, 「本周期」窗口口径错账号 (下轮配额成功会重新写入新键)
     _drop_account_period_keys(aid)
     _invalidate_cred_cache(aid)
+    return True
 
 
 def save_resolved_workspace(workspace_id: str, account_id: Optional[int] = None) -> None:
@@ -1013,10 +1620,21 @@ def add_account(
     workspace_hint: str = "",
     switch: bool = True,
     provider: str = PROVIDER_OPENCODE,
+    name: Optional[str] = None,
+    commit: bool = True,
 ) -> int:
-    """添加新账号; 若已存在同一 provider 的相同 token 则视为同一用户, 更新工作区提示后返回其 id.
+    """添加新账号; 已存在同一凭证/同一占位身份时复用其 id 并返回.
 
     去重按 token_fp (SHA-256 指纹) 比较: token 库内可能为加密形态, 无法直接等值比较.
+    **空 token 占位行** (备份导入重建的"待重新登录"账号) 按
+    ``(provider, workspace_id, name)`` 去重 (P2-2/I12): 同一备份导入两次不会
+    再建一批 UI 不可见、也无法删除的占位账号, 并把同一份用量重复写两遍.
+    ``name`` 未给时 opencode 用 workspace 提示派生 (与旧命名规则一致),
+    commandcode 无法稳定派生则不去重.
+
+    ``commit=False`` 供调用方把"账号创建 + 记录写入"包进同一个外层事务
+    (备份导入的原子性): 内部所有 commit 都不执行, 凭证缓存也不在提交前失效
+    (缓存失效由调用方在提交后负责); 异常照常抛, 由调用方 rollback.
     """
     conn = get_db()
     token = token.strip()
@@ -1044,24 +1662,46 @@ def add_account(
                 (hint, _now_iso(), aid),
             )
         if switch:
-            _persist_active(conn, aid)
-        else:
+            _persist_active(conn, aid, commit=commit)
+        elif commit:
             conn.commit()
-        _invalidate_cred_cache(aid)
+        if commit:
+            _invalidate_cred_cache(aid)
         return aid
+    if not token:
+        # 空 token 占位行去重: 身份 = (provider, workspace_id, name). 备份导入
+        # 重复执行时命中已有占位行, 保持账号数/记录数不变 (幂等).
+        placeholder = (name or "").strip()[:50]
+        if not placeholder and provider == PROVIDER_OPENCODE and hint:
+            placeholder = hint[:50]
+        if placeholder:
+            dup = conn.execute(
+                "SELECT id FROM accounts WHERE provider = ? AND workspace_id = ?"
+                " AND name = ? AND TRIM(token) = '' ORDER BY id LIMIT 1",
+                (provider, hint or "Default", placeholder),
+            ).fetchone()
+            if dup is not None:
+                aid = int(dup["id"])
+                if switch:
+                    _persist_active(conn, aid, commit=commit)
+                elif commit:
+                    conn.commit()
+                return aid
     nxt = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 AS n FROM accounts").fetchone()["n"]
-    if hint and provider == PROVIDER_OPENCODE:
-        name = hint[:50]
+    if name and name.strip():
+        account_name = name.strip()[:50]
+    elif hint and provider == PROVIDER_OPENCODE:
+        account_name = hint[:50]
     elif provider == PROVIDER_COMMANDCODE:
-        name = f"GOAT {nxt}"
+        account_name = f"GOAT {nxt}"
     else:
-        name = f"User {nxt}"
+        account_name = f"User {nxt}"
     now = _now_iso()
     # 两步写入: 先插行拿自增 id, 再按 id 写入加密凭证 (mac 钥匙串需要 id 作 account)
     cur = conn.execute(
         """INSERT INTO accounts (name, workspace_id, resolved_workspace_id, token, provider, created_at, updated_at)
            VALUES (?, ?, NULL, '', ?, ?, ?)""",
-        (name, hint or "Default", provider, now, now),
+        (account_name, hint or "Default", provider, now, now),
     )
     aid = int(cur.lastrowid or nxt)
     conn.execute(
@@ -1070,14 +1710,16 @@ def add_account(
     )
     _ensure_state_row(conn, aid)
     if switch:
-        _persist_active(conn, aid)
-    else:
+        _persist_active(conn, aid, commit=commit)
+    elif commit:
         conn.commit()
-    _invalidate_cred_cache(aid)
+    if commit:
+        _invalidate_cred_cache(aid)
     return aid
 
 
-def rename_account(account_id: int, name: str) -> bool:
+def rename_account(account_id: int, name: str, commit: bool = True) -> bool:
+    """重命名账号; ``commit=False`` 供备份导入的外层事务统一提交."""
     name = (name or "").strip()[:50]
     if not name:
         return False
@@ -1086,7 +1728,8 @@ def rename_account(account_id: int, name: str) -> bool:
         "UPDATE accounts SET name = ?, updated_at = ? WHERE id = ?",
         (name, _now_iso(), int(account_id)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
@@ -1150,9 +1793,12 @@ def clear_account() -> None:
     )
     _ensure_state_row(conn, aid)
     conn.execute(
-        "UPDATE usage_sync_state SET last_sync_status = NULL, last_sync_error = NULL,"
-        " last_inserted_count = 0, deepest_page_fetched = -1, total_records = 0,"
-        " oldest_record_at = NULL, newest_record_at = NULL WHERE account_id = ?",
+        # last_sync_at 一并清空: 登出后"上次同步"仍是过去时间会让 UI 误以为
+        # 该账号还在正常同步 (P3-11)
+        "UPDATE usage_sync_state SET last_sync_at = NULL, last_sync_status = NULL,"
+        " last_sync_error = NULL, last_inserted_count = 0, deepest_page_fetched = -1,"
+        " total_records = 0, oldest_record_at = NULL, newest_record_at = NULL"
+        " WHERE account_id = ?",
         (aid,),
     )
     conn.commit()
@@ -1167,13 +1813,100 @@ def clear_account() -> None:
 # ---------------------------------------------------------------------------
 
 
-def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int] = None) -> int:
+def _normalize_created_at(value: Any) -> Optional[str]:
+    """把入库时间戳收口到 UTC; 无法解析返回 None (调用方丢弃该行).
+
+    历史 bug (P2-3/F4/F5): commandcode 侧原样保留 tz-aware ISO 串, 而
+    ``local_date`` 与峰谷档位都按"前 19 字符是 UTC"派生 —— 带 ``+08:00`` 的串会
+    再 +8h, 跨零点时 local_date 错一天、峰/谷误判; 不可解析的串则产生
+    ``local_date=NULL`` 的僵尸行 (所有周期窗口不可见、prune 永不清理).
+    入口统一: 能解析就归一化, 不能解析整行丢弃并计数 (debug 日志).
+
+    已经是 UTC 形态 (``Z`` / ``+00:00`` / 无时区) 的时间串**保持原文**不变:
+    既避免给存量格式/keyset 排序引入无谓变化, 也让既有测试夹具的字节保持稳定.
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.isoformat() + "Z"  # naive 按 UTC 处理, 标记成既定口径
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    text = str(value or "").strip()
+    if not text:
+        return None
+    dt: Optional[datetime]
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        dt = None
+    if dt is None:
+        # 兼容旧客户端/手改备份里的常见非 ISO 格式 (斜杠分隔/只有日期)
+        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d",
+                    "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            return None
+        return dt.isoformat() + "Z"  # 旧格式无时区信息: 按既定 UTC 口径标记
+    if dt.tzinfo is None:
+        return text  # 无时区 = 既定 UTC 口径, 保持原文
+    offset = dt.utcoffset()
+    if offset is None or offset == timedelta(0):
+        return text  # 已是 UTC (Z / +00:00 / +0000), 保持原文
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_time_bucket(value: Any) -> Optional[str]:
+    """charts 时间桶收口到 UTC naive ``"YYYY-MM-DD HH:MM:SS"`` (非法返回 None).
+
+    charts 的 local_date/峰谷判定同样假定桶是 UTC; 防御性归一化偏移串, 并统一
+    到整秒形态 (与 usage_charts 主键/文档约定一致).
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None or dt.utcoffset() == timedelta(0):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _warn_skipped_created_at(skipped: int, samples: list[str], inserted: int) -> None:
+    """汇总一条 WARNING: 本批有 created_at 无法解析的行被丢弃.
+
+    旧实现只写 debug 日志且逐行不显眼: 同步链路"接口 ok 但 0 新增"时没有任何
+    线索. 汇总成一条 (不逐行刷屏), 样例最多 3 个且截断到 40 字符 —— created_at
+    只是时间串, 不涉及 token 等敏感数据. inserted==0 时额外提示上游格式可能变化.
+    """
+    hint = ""
+    if inserted == 0:
+        hint = "; 本批 0 新增 —— 上游时间戳格式可能已变化, 请检查 created_at 字段"
+    _log.warning(
+        "insert_usage_records: 丢弃 %s 条 created_at 无法解析的记录%s (样例: %s)",
+        skipped,
+        hint,
+        ", ".join(samples) if samples else "-",
+    )
+
+
+def insert_usage_records(
+    records: list[dict[str, Any]],
+    account_id: Optional[int] = None,
+    commit: bool = True,
+) -> int:
     """批量写入 (归属指定/活跃账号), 按 usg_id 去重; 返回新增条数.
 
     若记录 dict 带 ``provider`` 字段则一并写入 (usage_records.provider 为
     来源快照, 查询不受影响); 不带时回填账号当前 provider.
     记录带 ``account_id`` 字段时逐行归属 (备份导入按行 remap), 未带时整批
     归属 account_id 参数指定/活跃的账号.
+
+    ``commit=False``: 不发 BEGIN/COMMIT/rollback, 直接并入调用方已有的外层
+    事务 (备份导入要"账号创建 + 记录写入"整体原子). 异常照常抛给调用方回滚.
     """
     if not records:
         return 0
@@ -1229,18 +1962,29 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
     )
     inserted = 0
     try:
-        conn.execute("BEGIN")
+        if commit:
+            conn.execute("BEGIN")
         # 行级 account_id 优先 (备份导入逐行 remap); 未带时整批归属 aid.
         # 判重与计数都以每行**自己的**归属为准 —— 唯一键是 (account_id, usg_id),
         # 用批级 aid 统一判重会把别的账号下已存在的同号 id 漏判成新增.
         row_account: list[int] = []
         rows: list[tuple] = []
+        skipped = 0
+        skipped_samples: list[str] = []
         for rec in records:
+            created_at = _normalize_created_at(rec.get("created_at"))
+            if created_at is None:
+                # 不可解析的时间戳 = 永远不可见的僵尸行 (且 prune 永不清理),
+                # 入口直接丢弃并计数; 返回值只算真正新增, 不把丢弃行混进去.
+                skipped += 1
+                if len(skipped_samples) < 3:
+                    skipped_samples.append(str(rec.get("created_at"))[:40])
+                continue
             owner = rec.get("account_id") or aid
             row_account.append(owner)
             rows.append(
                 (
-                    rec["usg_id"], rec["created_at"], rec["model"],
+                    rec["usg_id"], created_at, rec["model"],
                     rec.get("provider") or acct_provider or PROVIDER_OPENCODE,
                     rec["input_tokens"], rec["output_tokens"], rec["reasoning_tokens"],
                     rec["cache_read_tokens"], rec["cache_write_5m_tokens"],
@@ -1248,10 +1992,16 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
                     rec.get("key_id"), rec.get("session_id"), rec.get("plan"),
                     synced_at,
                     owner,
-                    # local_date 由 SQLite 按本地时区从 created_at 派生 (末位绑定)
-                    rec["created_at"],
+                    # local_date 由 SQLite 按本地时区从 (已归一化的) created_at 派生
+                    created_at,
                 )
             )
+        if not rows:
+            if skipped:
+                _warn_skipped_created_at(skipped, skipped_samples, 0)
+            if commit:
+                conn.commit()
+            return 0
         # 新增数 = 批内去重后不在库中的 (account_id, usg_id) 对数
         # (批内重复的同一 id 只有首次计入).
         pairs = {(row_account[i], r[0]) for i, r in enumerate(rows)}
@@ -1273,10 +2023,15 @@ def insert_usage_records(records: list[dict[str, Any]], account_id: Optional[int
                     )
                 )
         conn.executemany(stmt, rows)
-        conn.commit()
+        if commit:
+            conn.commit()
         inserted = len(pairs - existing)
+        if skipped:
+            _warn_skipped_created_at(skipped, skipped_samples, inserted)
     except Exception:
-        conn.rollback()
+        # commit=False 时事务归调用方: 这里不能替它 rollback (会破坏外层原子性)
+        if commit:
+            conn.rollback()
         raise
     return inserted
 
@@ -1285,7 +2040,8 @@ def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = 
     """写入 charts 聚合行 (commandcode 全计费周期), 按 (账号, 模型, 时间桶) UPSERT.
 
     与明细表独立: usage_charts 是 GOAT 全周期口径的聚合快照, 每次同步整体覆盖
-    同键行 (服务端聚合值随计费单调, UPSERT 取最新).
+    同键行 (服务端聚合值随计费单调, UPSERT 取最新). 时间桶先收口到 UTC
+    (偏移串归一化, 非法桶丢弃), local_date/峰谷判定才能与明细同源.
     """
     if not rows:
         return 0
@@ -1330,30 +2086,38 @@ def insert_usage_charts(rows: list[dict[str, Any]], account_id: Optional[int] = 
         " OR cache_creation_tokens IS NOT excluded.cache_creation_tokens"
         " OR local_date IS NOT excluded.local_date"
     )
+    values: list[tuple] = []
+    skipped = 0
+    for r in rows:
+        bucket = _normalize_time_bucket(r.get("time_bucket"))
+        if bucket is None:
+            skipped += 1
+            continue
+        values.append(
+            (
+                aid, r["model"], r.get("provider") or "", bucket,
+                r.get("requests") or 0, r.get("input_cost") or 0,
+                r.get("output_cost") or 0, r.get("cache_cost") or 0,
+                r.get("total_cost") or 0, r.get("credits_total") or 0,
+                r.get("tokens_in") or 0, r.get("tokens_out") or 0,
+                r.get("tokens_total") or 0, r.get("cache_read_tokens") or 0,
+                r.get("cache_creation_tokens") or 0, synced_at,
+                # local_date 由 SQLite 从 (已归一化的) time_bucket 按本地时区派生
+                bucket,
+            )
+        )
+    if skipped:
+        _log.debug("insert_usage_charts: 丢弃 %d 条 time_bucket 非法的记录", skipped)
+    if not values:
+        return 0
     try:
         conn.execute("BEGIN")
-        conn.executemany(
-            stmt,
-            [
-                (
-                    aid, r["model"], r.get("provider") or "", r["time_bucket"],
-                    r.get("requests") or 0, r.get("input_cost") or 0,
-                    r.get("output_cost") or 0, r.get("cache_cost") or 0,
-                    r.get("total_cost") or 0, r.get("credits_total") or 0,
-                    r.get("tokens_in") or 0, r.get("tokens_out") or 0,
-                    r.get("tokens_total") or 0, r.get("cache_read_tokens") or 0,
-                    r.get("cache_creation_tokens") or 0, synced_at,
-                    # local_date 由 SQLite 从 time_bucket 按本地时区派生 (末位绑定)
-                    r["time_bucket"],
-                )
-                for r in rows
-            ],
-        )
+        conn.executemany(stmt, values)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return len(rows)
+    return len(values)
 
 
 def get_sync_state(account_id: Optional[int] = None) -> dict[str, Any]:
@@ -1415,11 +2179,14 @@ def update_sync_state(
     conn = get_db()
     _ensure_state_row(conn, aid)
     conn.execute(
+        # last_inserted_count 按列名语义记"本次更新写入条数" (旧实现累加,
+        # 真实库跑出 32428 vs total_records 8611 的失真值; 全仓无消费方,
+        # 但保留字段时数值必须自洽) (P3-11)
         """UPDATE usage_sync_state
            SET last_sync_at = ?, last_sync_status = ?, last_sync_error = ?,
-               last_inserted_count = last_inserted_count + ?
+               last_inserted_count = ?
            WHERE account_id = ?""",
-        (_now_iso(), status, error, inserted, aid),
+        (_now_iso(), status, error, int(inserted or 0), aid),
     )
     _refresh_sync_totals(conn, aid)
     conn.commit()
@@ -1454,10 +2221,18 @@ _DEFAULT_SETTINGS = {
 
 
 def _prune_window(window_days: int | None) -> Optional[int]:
-    """同步范围 → 裁剪天数; None (「所有」) = 不裁剪."""
+    """同步范围 → 裁剪天数; None (「所有」) = 不裁剪.
+
+    设置值可能来自手改库/旧版本脏数据 (字符串等): ``int()`` 抛异常会让
+    prune 接口 500, 这里统一兜底成「不清理」—— 删除类操作宁可什么都不删.
+    """
     if window_days is None:
         return None
-    return max(1, min(int(window_days), 3650))
+    try:
+        days = int(window_days)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(days, 3650))
 
 
 def prune_cutoff(window_days: int | None) -> Optional[str]:
@@ -1472,50 +2247,72 @@ def prune_cutoff(window_days: int | None) -> Optional[str]:
 
 
 def prune_preview(window_days: int | None) -> dict[str, Any]:
-    """「按同步范围清理」的预演: 边界 + 待删条数 (跨账号, 不写库).
+    """「按同步范围清理」的预演: 边界 + 两表待删条数 (跨账号, 不写库).
 
     同步范围只是取数范围, 本地数据默认永不自动删除; 这个预演给按钮的
     二次确认弹窗用, 让用户先看到「要删多少条、边界是哪天」。
+    ``charts_count`` 是 usage_charts 的待删行数: GOAT 账号统计主口径来自
+    charts, 只报明细条数会让"已清理 N 条"与实际清理范围不一致 (P2-7/I3).
     """
     cutoff = prune_cutoff(window_days)
     if cutoff is None:
-        return {"window_days": None, "cutoff": None, "count": 0}
-    row = get_db().execute(
+        return {"window_days": None, "cutoff": None, "count": 0, "charts_count": 0}
+    conn = get_db()
+    row = conn.execute(
         "SELECT COUNT(*) AS c FROM usage_records"
+        " WHERE local_date IS NOT NULL AND local_date < ?",
+        (cutoff,),
+    ).fetchone()
+    chart_row = conn.execute(
+        "SELECT COUNT(*) AS c FROM usage_charts"
         " WHERE local_date IS NOT NULL AND local_date < ?",
         (cutoff,),
     ).fetchone()
     return {
         "window_days": _prune_window(window_days),
         "cutoff": cutoff,
-        "count": row["c"] if row else 0,
+        "count": int(row["c"]) if row else 0,
+        "charts_count": int(chart_row["c"]) if chart_row else 0,
     }
 
 
-def prune_expired(window_days: int | None) -> int:
-    """按同步范围清理**所有账号**的过期记录, 返回删除条数.
+def prune_expired(window_days: int | None) -> dict[str, int]:
+    """按同步范围清理**所有账号**的过期数据, 返回 {"records": N, "charts": M}.
 
     只应由设置页的「按同步范围清理」按钮触发 (删除不可恢复, 调用方负责
     二次确认). 同步流程不再调用本函数 —— 同步只按范围取数, 不动本地存量.
+    两表同一事务删除: GOAT 账号的统计主口径是 usage_charts, 只删明细会让
+    "清理后 totals('all') 仍含历史" (P2-7); charts 跨计费周期无限累积也靠这里清.
     """
     cutoff = prune_cutoff(window_days)
     if cutoff is None:
-        return 0
+        return {"records": 0, "charts": 0}
     conn = get_db()
-    # local_date 走 idx_usage_account_localdate; 日历日口径最多多保留边界当天
-    # 一天的记录, 只多不少.
-    cur = conn.execute(
-        "DELETE FROM usage_records"
-        " WHERE local_date IS NOT NULL AND local_date < ?",
-        (cutoff,),
-    )
-    deleted = cur.rowcount
-    if deleted:
-        # 同步状态里的总数/最老最新记录要跟着回填, 否则设置页还显示删前的数
-        for acc in conn.execute("SELECT id FROM accounts").fetchall():
-            _refresh_sync_totals(conn, int(acc["id"]))
-    conn.commit()
-    return deleted
+    try:
+        conn.execute("BEGIN")
+        # local_date 走 idx_usage_account_localdate / idx_charts_account_localdate;
+        # 日历日口径最多多保留边界当天一天的记录, 只多不少.
+        rec_cur = conn.execute(
+            "DELETE FROM usage_records"
+            " WHERE local_date IS NOT NULL AND local_date < ?",
+            (cutoff,),
+        )
+        chart_cur = conn.execute(
+            "DELETE FROM usage_charts"
+            " WHERE local_date IS NOT NULL AND local_date < ?",
+            (cutoff,),
+        )
+        records = max(0, int(rec_cur.rowcount or 0))
+        charts = max(0, int(chart_cur.rowcount or 0))
+        if records:
+            # 同步状态里的总数/最老最新记录要跟着回填, 否则设置页还显示删前的数
+            for acc in conn.execute("SELECT id FROM accounts").fetchall():
+                _refresh_sync_totals(conn, int(acc["id"]))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"records": records, "charts": charts}
 
 
 def _account_filter(where: str, params: list[Any], aid: int) -> tuple[str, list[Any]]:
@@ -1541,21 +2338,29 @@ def usage_records_page(
         where.append("model = ?")
         params.append(model)
     if days:
-        # 日历日口径 + local_date 索引 (原先 datetime(created_at) 全表扫)
+        # 日历日口径 + local_date 索引 (原先 datetime(created_at) 全表扫).
+        # "N 日" = 恰好 N 个日历日 (今天-N+1 … 今天), 与 daily_stats 的 N 个点同源.
+        days_n = max(1, int(days))
         where.append("local_date >= date('now', 'localtime', ?)")
-        params.append(f"-{days} days")
+        params.append(f"-{days_n - 1} days")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     where_sql, params = _account_filter(where_sql, params, _resolve_account_id(account_id))
     conn = get_db()
     total = int(
         conn.execute(f"SELECT COUNT(*) AS c FROM usage_records {where_sql}", params).fetchone()["c"]
     )
+    # usg_id 追加为次序键: created_at 不唯一 (毫秒精度 + 批量同步一次插多条),
+    # 并列行的次序在两次查询间不保证稳定, 页边界可能重复/跳过 (session_stats_page
+    # 同款修复); (created_at, usg_id) 在单账号内是全序.
+    # days 过滤时把 local_date 放到排序首位: 窗口条件走 idx_usage_account_localdate,
+    # 排序跟同一索引才能免掉 TEMP B-TREE (20 万行 94.9ms → 5.9ms); local_date 与
+    # created_at 单调一致, 逐页内容不变 (P3-7).
+    order_by = (
+        "ORDER BY local_date DESC, created_at DESC, usg_id DESC"
+        if days else "ORDER BY created_at DESC, usg_id DESC"
+    )
     rows = conn.execute(
-        f"SELECT * FROM usage_records {where_sql}"
-        # usg_id 追加为次序键: created_at 不唯一 (毫秒精度 + 批量同步一次插多条),
-        # 并列行的次序在两次查询间不保证稳定, 页边界可能重复/跳过 (session_stats_page
-        # 同款修复); (created_at, usg_id) 在单账号内是全序。
-        f" ORDER BY created_at DESC, usg_id DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM usage_records {where_sql} {order_by} LIMIT ? OFFSET ?",
         params + [page_size, (page - 1) * page_size],
     ).fetchall()
     records = []
@@ -1614,9 +2419,11 @@ def session_stats_page(
     where: list[str] = []
     params: list[Any] = []
     if days:
-        # 日历日口径 + local_date 索引 (原先 datetime(created_at) 全表扫)
+        # 日历日口径 + local_date 索引 (原先 datetime(created_at) 全表扫);
+        # "N 日" = 恰好 N 个日历日, 与 daily_stats/totals("Nd") 同源 (I10)
+        days_n = max(1, int(days))
         where.append("local_date >= date('now', 'localtime', ?)")
-        params.append(f"-{days} days")
+        params.append(f"-{days_n - 1} days")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     where_sql, params = _account_filter(where_sql, params, _resolve_account_id(account_id))
     session_key = (
@@ -1675,10 +2482,65 @@ def session_stats_page(
     return records, total
 
 
+_TRUE_STRINGS = {"true", "1", "yes", "on"}
+_FALSE_STRINGS = {"false", "0", "no", "off", ""}
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """宽松解析布尔值 (设置写入/读取规整): 字符串 ``"false"`` 不能变成 True.
+
+    ``bool("false") == True`` 是旧直转的坑 (P3-9); 前端正常发 JSON bool,
+    这里兼容手改库/旧版本写入的字符串与数字, 无法识别时回落默认.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_STRINGS:
+            return True
+        if text in _FALSE_STRINGS:
+            return False
+    return default
+
+
+def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
+    """把设置值规整到 ``_DEFAULT_SETTINGS`` 的类型/范围 (读侧, 幂等).
+
+    库内可能存着旧版本/手改的脏值 (字符串 ``sync_interval_sec`` 会让同步循环
+    ``TypeError`` 静默失效, 字符串布尔会反向). 出口统一校验: 合法值钳制到范围,
+    非法值回落默认, 对外行为与合法值完全一致 (I15/P3-9).
+    """
+    out: dict[str, Any] = {}
+    for key, default in _DEFAULT_SETTINGS.items():
+        if key not in raw:
+            out[key] = default
+            continue
+        value = raw[key]
+        if key == "sync_interval_sec":
+            try:
+                out[key] = max(30, min(int(value), 3600))
+            except (TypeError, ValueError):
+                out[key] = default
+        elif key == "window_days":
+            if value is None or value == "" or str(value).strip().lower() in ("all", "所有"):
+                out[key] = None
+            else:
+                try:
+                    out[key] = max(1, min(int(value), 3650))
+                except (TypeError, ValueError):
+                    out[key] = default
+        elif isinstance(default, bool):
+            out[key] = _coerce_bool(value, default)
+        else:
+            out[key] = value
+    return out
+
+
 def get_settings() -> dict[str, Any]:
-    merged = dict(_DEFAULT_SETTINGS)
-    merged.update({k: v for k, v in _raw_payload(get_db()).items() if k in _DEFAULT_SETTINGS})
-    return merged
+    raw = {k: v for k, v in _raw_payload(get_db()).items() if k in _DEFAULT_SETTINGS}
+    return _coerce_settings(raw)
 
 
 def get_key_names() -> dict[str, str]:
@@ -1701,8 +2563,7 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
     conn = get_db()
     with _payload_lock:
         raw = _raw_payload(conn)
-        current = dict(_DEFAULT_SETTINGS)
-        current.update({k: v for k, v in raw.items() if k in _DEFAULT_SETTINGS})
+        current = _coerce_settings({k: v for k, v in raw.items() if k in _DEFAULT_SETTINGS})
         for key in _DEFAULT_SETTINGS:
             # window_days 的 None 是合法值 ("所有"), 不能被 "None=未提供" 守卫拦下
             if key in payload and (payload[key] is not None or key == "window_days"):
@@ -1720,12 +2581,13 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                             current[key] = max(1, min(int(val), 3650))
                         except (TypeError, ValueError):
                             pass
-                elif key in ("auto_sync", "autostart", "show_accounts_panel", "chart_animation",
-                             "ds_peak_split"):
-                    current[key] = bool(payload[key])
+                elif isinstance(_DEFAULT_SETTINGS[key], bool):
+                    # 显式解析而不是 bool(): bool("false") == True 会把"关"变成"开"
+                    current[key] = _coerce_bool(payload[key], bool(_DEFAULT_SETTINGS[key]))
                 else:
                     current[key] = payload[key]
-        # 写回时保留非白名单键 (key_names / active_account_id 等), 避免被整体覆盖丢失
+        # 写回时保留非白名单键 (key_names / active_account_id / local_date_tz 等),
+        # 避免被整体覆盖丢失
         out = dict(raw)
         out.update(current)
         _write_payload(conn, out)
@@ -1897,7 +2759,10 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
             # (record_period_bounds), 走到这里的只有手改库等异常数据 —— 回退 None 让
             # 调用方走 30 天滚动口径, 避免把上个周期拉进「本月」窗口
             return None
-    # 无真实周期: 老规则, 由重置时间回推 (opencode)
+    # 无真实周期: 老规则, 由重置时间回推 (opencode).
+    # 存储的「下次重置」可能已经过去 (App 关闭 >1 个周期后重开、配额刷新前):
+    # 旧实现直接把它当本周期起点 (实测 60 天前的 reset → 「本周期」横跨两个周期,
+    # 数量偏大); 这里与 period_bounds 路径对齐, 顺延到覆盖 now 的那个周期 (P3-10).
     monthly = raw.get(f"monthly_reset:{aid}")
     if not monthly:
         return None
@@ -1905,14 +2770,17 @@ def monthly_cycle_start(account_id: Optional[int] = None) -> Optional[str]:
         reset = datetime.strptime(str(monthly), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
-    if reset > now:
-        reset -= timedelta(days=_MONTHLY_PERIOD_DAYS)
-        # 回推 30 天仍在未来: 真实周期比 30 天长 (Go 月度实测按自然月, 10-08 →
-        # 11-08 共 31 天), 该假设推不出过去的起点, 只能回退 None 走滚动 30 天 ——
-        # 返回未来起点会让「本周期」窗口恒为空 (实测筛出 0 条).
-        if reset > now:
-            return None
-    return reset.strftime("%Y-%m-%d %H:%M:%S")
+    steps = 0
+    while reset <= now and steps < 1200:  # 上限兜底防异常数据死循环
+        reset += timedelta(days=_MONTHLY_PERIOD_DAYS)
+        steps += 1
+    start = reset - timedelta(days=_MONTHLY_PERIOD_DAYS)
+    # 回推 30 天仍在未来: 真实周期比 30 天长 (Go 月度实测按自然月, 10-08 →
+    # 11-08 共 31 天), 该假设推不出过去的起点, 只能回退 None 走滚动 30 天 ——
+    # 返回未来起点会让「本周期」窗口恒为空 (实测筛出 0 条).
+    if start > now:
+        return None
+    return start.strftime("%Y-%m-%d %H:%M:%S")
 
 
 _PERIOD_CLAUSES = {
@@ -1967,17 +2835,35 @@ _CN_HOLIDAYS: dict[int, set[str]] = {
 
 _PEAK_SUFFIX = {"peak": " 峰", "off": " 谷"}
 
-# 计价起始 (UTC): 北京时间 2026-09-10 00:00
-_PRICING_START_UTC_DATE = "2026-09-09"
-_PRICING_START_UTC_HHMM = "16:00"
+# 计价起始门 (UTC 日 + UTC 时刻): 北京时间 00:00 = 前一 UTC 日 16:00.
+# 两条 flash 主线的两档计价起始日不同 —— 用统一门会把 2026-08-17 起就已按峰谷
+# 计费的 deepseek-v4-flash 记录错当成单一价 (P2-1/I9; 真实账单逐条反证).
+_PRICING_GATES: dict[str, tuple[str, str]] = {
+    "deepseek-v4.1-flash": ("2026-09-09", "16:00"),  # 北京 2026-09-10 00:00
+    "deepseek-v4-flash": ("2026-08-16", "16:00"),    # 北京 2026-08-17 00:00
+}
 
 # 参与分档的模型: 两档计价只适用于 flash 主线, 按精确名称 (可带 provider/ 前缀)
 # 匹配. 不用「名字里含 deepseek + flash」的宽匹配 —— 那会把计费规则未经验证的
-# 实验变体 (如 deepseek-v4-flash-vision-exp) 也拆开. 新增变体需显式加进列表.
-_DS_FLASH_MODELS = ("deepseek-v4.1-flash", "deepseek-v4-flash")
-_DS_FLASH_SQL = "(" + " OR ".join(
-    f"lower(model) = '{m}' OR lower(model) LIKE '%/{m}'" for m in _DS_FLASH_MODELS
-) + ")"
+# 实验变体 (如 deepseek-v4-flash-vision-exp) 也拆开. 新增变体需显式加进列表
+# (起始门同时加进 _PRICING_GATES).
+_DS_FLASH_MODELS = tuple(_PRICING_GATES)
+
+
+def _model_match_sql(col: str, model: str) -> str:
+    """模型名匹配 SQL: 精确名或 ``provider/`` 前缀名 (与 scripts/peak_split.py 同规则).
+
+    用 ``COLLATE NOCASE`` / 默认大小写不敏感的 LIKE, 避免每行多次 ``lower()`` 调用
+    (20 万行实测: 排除分档模型的基准分支 83ms → 51ms, 是两段式查询的主要收益来源).
+    """
+    return f"({col} COLLATE NOCASE = '{model}' OR {col} LIKE '%/{model}')"
+
+
+_DS_FLASH_SQL = (
+    "(" + " OR ".join(_model_match_sql("model", m) for m in _DS_FLASH_MODELS) + ")"
+)
+# 两段式查询的"基准"分支: 排除分档模型, 完全不做 tier 表达式 (性能, 见 P2-1)
+_DS_FLASH_BASE_SQL = f"NOT {_DS_FLASH_SQL}"
 
 
 def peak_split_enabled() -> bool:
@@ -1990,30 +2876,43 @@ def _peak_tier_sql(col: str) -> tuple[str, list[str]]:
 
     峰窗按 UTC 硬编码 (北京 09:00-12:00 / 14:00-18:00 = UTC 01:00-03:59 /
     06:00-09:59); 窗口内 UTC 日期与北京日期相同, 星期/节假日直接用 UTC 日期.
-    计价起始门之前的记录返回 '' (不拆).
+    起始门**按模型区分** (见 _PRICING_GATES): 各自门之前的记录返回 '' (不拆).
 
     参数是法定节假日日期列表, 必须按 SQL 文本出现的顺序绑定 —— 表达式放在
     SELECT 列表时, 这些参数要排在 WHERE 的参数之前.
+
+    性能: 本表达式只应在"仅含分档模型"的子集上求值 (两段式查询的第二段);
+    全量行上调用它会让聚合慢 2.6–12× (P2-1 实测). 基准统计用 _DS_FLASH_BASE_SQL
+    把分档模型排除掉单跑, 二者结果合并后与逐行表达式完全等价.
     """
     holidays = sorted({d for days in _CN_HOLIDAYS.values() for d in days})
     placeholders = ", ".join("?" * len(holidays))
     date = f"substr({col}, 1, 10)"
     hhmm = f"substr({col}, 12, 5)"
-    since_start = (
-        f"({date} > '{_PRICING_START_UTC_DATE}'"
-        f" OR ({date} = '{_PRICING_START_UTC_DATE}' AND {hhmm} >= '{_PRICING_START_UTC_HHMM}'))"
-    )
-    in_window = (
-        f"({hhmm} BETWEEN '01:00' AND '03:59'"
-        f" OR {hhmm} BETWEEN '06:00' AND '09:59')"
-    )
-    expr = (
-        f"CASE WHEN {_DS_FLASH_SQL} AND {since_start} THEN"
-        f" (CASE WHEN {in_window}"
+    # 峰窗按 UTC 整点对齐 (01:00-03:59 / 06:00-09:59): 对 HH:MM 串来说等价于
+    # 小时 IN (...), 少一次区间比较 (F9 实测 -15%).
+    in_window = f"substr({col}, 12, 2) IN ('01', '02', '03', '06', '07', '08', '09')"
+    peak_case = (
+        f"(CASE WHEN {in_window}"
         f" AND strftime('%w', {col}) BETWEEN '1' AND '5'"
         f" AND {date} NOT IN ({placeholders})"
-        f" THEN 'peak' ELSE 'off' END) ELSE '' END"
+        f" THEN 'peak' ELSE 'off' END)"
     )
+    # 每个模型一个起始门; 门判定用 CASE 归约成 0/1, 外层只写一份 peak_case ——
+    # 否则节假日的占位符会随写法重复出现, 调用方绑定参数个数对不上.
+    gate_branches: list[str] = []
+    for model in _DS_FLASH_MODELS:
+        gate_date, gate_hhmm = _PRICING_GATES[model]
+        since_start = (
+            f"({date} > '{gate_date}'"
+            f" OR ({date} = '{gate_date}' AND {hhmm} >= '{gate_hhmm}'))"
+        )
+        # 模型匹配固定作用于 model 列 (col 是时间列); 门判定归约成 0/1
+        gate_branches.append(
+            f"WHEN {_model_match_sql('model', model)} THEN {since_start}"
+        )
+    gate_sql = "CASE " + " ".join(gate_branches) + " ELSE 0 END"
+    expr = f"CASE WHEN ({gate_sql}) THEN {peak_case} ELSE '' END"
     return expr, holidays
 
 
@@ -2066,9 +2965,10 @@ def _period_where(
             clauses.append("datetime(created_at) >= datetime(?)")
             params.append(start)
         else:
-            # 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 日历口径一致)
+            # 该账号尚未成功拉取过配额: 回退为滚动 30 天 (与 "30d" 日历口径一致:
+            # 恰好 30 个日历日 = 今天-29 … 今天, 见 I10)
             clauses.append("local_date >= date('now', 'localtime', ?)")
-            params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
+            params.append(f"-{_MONTHLY_PERIOD_DAYS - 1} days")
     elif period != "all":
         # "7d"/"30d" 等: 日历日口径 (与 daily_stats/today_trend 一致), 走索引;
         # 原先 datetime(created_at) >= datetime('now','-N days') 无法用索引,
@@ -2077,8 +2977,9 @@ def _period_where(
         match = _NUM_DAYS_RE.match(period or "")
         if match:
             days = max(1, int(match.group(1)))
+        # 恰好 days 个日历日 (今天-days+1 … 今天), 与 daily_stats 的 days 个点同源
         clauses.append("local_date >= date('now', 'localtime', ?)")
-        params.append(f"-{days} days")
+        params.append(f"-{days - 1} days")
     ex_sql, ex_params = _exclude_clause(exclude_models)
     if ex_sql:
         clauses.append(ex_sql)
@@ -2139,15 +3040,17 @@ def _charts_period_where(
             clauses.append("datetime(time_bucket) >= datetime(?)")
             params.append(start)
         else:
+            # 与明细 _period_where 的同名回退完全同源 (恰好 30 个日历日)
             clauses.append("local_date >= date('now', 'localtime', ?)")
-            params.append(f"-{_MONTHLY_PERIOD_DAYS} days")
+            params.append(f"-{_MONTHLY_PERIOD_DAYS - 1} days")
     elif period != "all":
         days = 30
         match = _NUM_DAYS_RE.match(period or "")
         if match:
             days = max(1, int(match.group(1)))
+        # 恰好 days 个日历日 (今天-days+1 … 今天), 与 daily_stats 的 days 个点同源
         clauses.append("local_date >= date('now', 'localtime', ?)")
-        params.append(f"-{days} days")
+        params.append(f"-{days - 1} days")
     ex_sql, ex_params = _exclude_clause(exclude_models)
     if ex_sql:
         clauses.append(ex_sql)
@@ -2161,6 +3064,7 @@ def _charts_stats_select(
     group_by_model: bool = False,
     exclude_models: Optional[list[str]] = None,
     peak_split: bool = False,
+    branch: str = "all",
 ):
     """charts 聚合查询, 输出列与明细统计查询同形.
 
@@ -2168,13 +3072,26 @@ def _charts_stats_select(
     cacheReadInputTokens 为其中一部分), 因此 total_input = SUM(tokens_in) 而
     非叠加 cache_read, 否则重复计数.
 
-    peak_split 为真时按 15 分钟桶的起始时刻判 DeepSeek 峰谷并拆成两组
-    (桶边界与整点/半点对齐, 09:00/14:00 这类切换点不会跨桶).
+    peak_split 为真时按时间桶起始时刻判 DeepSeek 峰谷并拆成两组 (桶边界与整点/
+    半点对齐, 09:00/14:00 这类切换点不会跨桶).
+
+    ``branch`` 是两段式峰谷查询的分支 (P2-1, 避免对全量行求值 tier 表达式):
+    - ``"all"``: 原行为 (不分档, 或调用方自担逐行 tier);
+    - ``"base"``: 排除分档模型, tier 恒为 '' (基准聚合);
+    - ``"split"``: 只保留分档模型, 按档位分组 (仅对这部分行求值 tier 表达式).
     """
     where, params = _charts_period_where(period, account_id, exclude_models)
-    tier_expr, holidays = _peak_tier_sql("time_bucket") if (group_by_model and peak_split) else ("", [])
+    if branch == "base":
+        where += f" AND {_DS_FLASH_BASE_SQL}"
+    elif branch == "split":
+        where += f" AND {_DS_FLASH_SQL}"
+    tier_expr, holidays = (
+        _peak_tier_sql("time_bucket")
+        if (group_by_model and peak_split and branch != "base")
+        else ("", [])
+    )
     if group_by_model:
-        tier_col = f"{tier_expr} AS tier," if tier_expr else ""
+        tier_col = f"{tier_expr} AS tier," if tier_expr else "'' AS tier,"
         group_by = "GROUP BY model, tier" if tier_expr else "GROUP BY model"
         sql = f"""
             SELECT model,
@@ -2218,6 +3135,45 @@ def _use_charts_stats(aid: Optional[int]) -> bool:
     )
 
 
+def _model_stats_rows_to_result(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """把 model_stats 的两条数据源 (明细/charts) 的行转成统一输出结构."""
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        hit = int(r["cache_hit_tokens"] or 0)
+        miss = int(r["uncached_input_tokens"] or 0)
+        hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
+        result.append(
+            {
+                "model": _split_model_label(r["model"], r["tier"]),
+                "base_model": r["model"],
+                "request_count": int(r["request_count"] or 0),
+                "session_count": int(r["session_count"] or 0),
+                "total_input_tokens": int(r["total_input_tokens"] or 0),
+                "uncached_input_tokens": miss,
+                "total_reasoning_tokens": int(r["total_reasoning_tokens"] or 0),
+                "cache_hit_tokens": hit,
+                "cache_write_tokens": int(r["cache_write_tokens"] or 0),
+                "total_output_tokens": int(r["total_output_tokens"] or 0),
+                "total_cost_usd": round(float(r["total_cost_usd"] or 0), 6),
+                "hit_rate": round(hit_rate, 2),
+            }
+        )
+    return result
+
+
+# 明细路径 model_stats 的聚合列 (基准分支与分档分支共用, 保证输出同形)
+_DETAIL_MODEL_AGGS = """
+               COUNT(*) AS request_count,
+               COUNT(DISTINCT CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id END) AS session_count,
+               SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
+               SUM(input_tokens) AS uncached_input_tokens,
+               SUM(reasoning_tokens) AS total_reasoning_tokens,
+               SUM(cache_read_tokens) AS cache_hit_tokens,
+               SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS cache_write_tokens,
+               SUM(output_tokens) AS total_output_tokens,
+               SUM(cost_usd) AS total_cost_usd"""
+
+
 def model_stats(
     period: str = "30d",
     account_id: Optional[int] = None,
@@ -2235,83 +3191,80 @@ def model_stats(
 
     拆分行 (峰/谷) 的 session_count 是**各档内**的去重会话数: 会话跨档会在两行
     各计一次, 不能相加; 全量会话数看 totals().
+
+    性能 (P2-1): 分档时走两段式查询 —— 基准分支排除分档模型、完全不算 tier
+    表达式; 分档分支只对白名单模型求值 tier 表达式并按 (model, tier) 分组.
+    两段结果行级等价于"对全量行逐行求值后再分组", 但 20 万行实测聚合耗时从
+    195/313/180ms 降到接近未分档水平 (tier 表达式只作用于 ~1/5 的行).
     """
     aid = _resolve_account_id(account_id)
     split = peak_split_enabled() if peak_split is None else bool(peak_split)
+    conn = get_db()
     if _use_charts_stats(aid):
-        rows = get_db().execute(
-            *_charts_stats_select(period, aid, group_by_model=True, peak_split=split)
-        ).fetchall()
-        result: list[dict[str, Any]] = []
-        for r in rows:
-            hit = int(r["cache_hit_tokens"] or 0)
-            miss = int(r["uncached_input_tokens"] or 0)
-            hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
-            result.append(
-                {
-                    "model": _split_model_label(r["model"], r["tier"] if split else ""),
-                    "base_model": r["model"],
-                    "request_count": int(r["request_count"] or 0),
-                    "session_count": 0,
-                    "total_input_tokens": int(r["total_input_tokens"] or 0),
-                    "uncached_input_tokens": miss,
-                    "total_reasoning_tokens": 0,
-                    "cache_hit_tokens": hit,
-                    "cache_write_tokens": int(r["cache_write_tokens"] or 0),
-                    "total_output_tokens": int(r["total_output_tokens"] or 0),
-                    "total_cost_usd": round(float(r["total_cost_usd"] or 0), 6),
-                    "hit_rate": round(hit_rate, 2),
-                }
-            )
-        return result
+        if split:
+            base_rows = conn.execute(
+                *_charts_stats_select(
+                    period, aid, group_by_model=True, peak_split=True, branch="base"
+                )
+            ).fetchall()
+            tiered_rows = conn.execute(
+                *_charts_stats_select(
+                    period, aid, group_by_model=True, peak_split=True, branch="split"
+                )
+            ).fetchall()
+            rows = [*base_rows, *tiered_rows]
+        else:
+            rows = conn.execute(
+                *_charts_stats_select(period, aid, group_by_model=True)
+            ).fetchall()
+        return _model_stats_rows_to_result(rows)
     where, params = _period_where(period, aid)
     where, params = _account_filter(where, params, aid)
-    tier_expr, holidays = _peak_tier_sql("created_at") if split else ("", [])
-    tier_col = f"{tier_expr} AS tier," if tier_expr else ""
-    group_by = "GROUP BY model, tier" if tier_expr else "GROUP BY model"
-    rows = get_db().execute(
+    if not split:
+        rows = conn.execute(
+            f"""
+            SELECT model,
+                   '' AS tier,
+                   {_DETAIL_MODEL_AGGS}
+            FROM usage_records
+            {where}
+            GROUP BY model
+            ORDER BY (SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens)
+                      + SUM(output_tokens)) DESC
+            """,
+            params,
+        ).fetchall()
+        return _model_stats_rows_to_result(rows)
+    # 两段式: 1) 非分档模型基准聚合; 2) 仅分档模型求值 tier 表达式
+    tier_expr, holidays = _peak_tier_sql("created_at")
+    base_rows = conn.execute(
         f"""
         SELECT model,
-               {tier_col}
-               COUNT(*) AS request_count,
-               COUNT(DISTINCT CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id END) AS session_count,
-               SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS total_input_tokens,
-               SUM(input_tokens) AS uncached_input_tokens,
-               SUM(reasoning_tokens) AS total_reasoning_tokens,
-               SUM(cache_read_tokens) AS cache_hit_tokens,
-               SUM(cache_write_5m_tokens + cache_write_1h_tokens) AS cache_write_tokens,
-               SUM(output_tokens) AS total_output_tokens,
-               SUM(cost_usd) AS total_cost_usd
+               '' AS tier,
+               {_DETAIL_MODEL_AGGS}
         FROM usage_records
-        {where}
-        {group_by}
-        ORDER BY (SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens)
-                  + SUM(output_tokens)) DESC
+        {where} AND {_DS_FLASH_BASE_SQL}
+        GROUP BY model
+        """,
+        params,
+    ).fetchall()
+    tiered_rows = conn.execute(
+        f"""
+        SELECT model,
+               {tier_expr} AS tier,
+               {_DETAIL_MODEL_AGGS}
+        FROM usage_records
+        {where} AND {_DS_FLASH_SQL}
+        GROUP BY model, tier
         """,
         # tier 表达式在 SELECT 列表, 其占位符 (法定节假日) 要先于 WHERE 参数绑定
         [*holidays, *params],
     ).fetchall()
-    result: list[dict[str, Any]] = []
-    for r in rows:
-        hit = int(r["cache_hit_tokens"] or 0)
-        miss = int(r["uncached_input_tokens"] or 0)
-        hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
-        result.append(
-            {
-                "model": _split_model_label(r["model"], r["tier"] if split else ""),
-                "base_model": r["model"],
-                "request_count": int(r["request_count"]),
-                "session_count": int(r["session_count"] or 0),
-                "total_input_tokens": int(r["total_input_tokens"] or 0),
-                "uncached_input_tokens": miss,
-                "total_reasoning_tokens": int(r["total_reasoning_tokens"] or 0),
-                "cache_hit_tokens": hit,
-                "cache_write_tokens": int(r["cache_write_tokens"] or 0),
-                "total_output_tokens": int(r["total_output_tokens"] or 0),
-                "total_cost_usd": round(float(r["total_cost_usd"] or 0), 6),
-                "hit_rate": round(hit_rate, 2),
-            }
-        )
+    result = _model_stats_rows_to_result([*base_rows, *tiered_rows])
+    # 与旧 SQL 的 ORDER BY (含缓存输入 + 输出) DESC 同口径; 并列时保持稳定次序
+    result.sort(
+        key=lambda d: d["total_input_tokens"] + d["total_output_tokens"], reverse=True
+    )
     return result
 
 
@@ -2322,9 +3275,10 @@ def daily_stats(
 ) -> list[dict[str, Any]]:
     """每日聚合: 输入(含缓存) / 普通输入 / 推理 / 缓存命中 / 缓存写入 / 输出 / 成本 / 请求数.
 
-    返回从 (今天 - days 天) 到今天(含)的**连续日期**序列; 无记录的天补 0,
+    返回**恰好 days 个**连续日期点 (今天-days+1 … 今天); 无记录的天补 0,
     保证折线图 / 每日趋势每天都有数据点, 不会出现缺天跳线 (与 today_trend
-    逐小时补 0 的口径一致).
+    逐小时补 0 的口径一致). 旧实现含首尾两端共 days+1 个点, 与前端「N 日」
+    文案/totals("Nd") 的 N 个日历日不一致 (P3-16/I10).
     """
     days = max(1, min(days, 365))
     aid = _resolve_account_id(account_id)
@@ -2348,7 +3302,7 @@ def daily_stats(
             GROUP BY local_date
             ORDER BY date ASC
             """,
-            (aid, f"-{days} days", *ex_params),
+            (aid, f"-{days - 1} days", *ex_params),
         ).fetchall()
     else:
         rows = get_db().execute(
@@ -2368,12 +3322,12 @@ def daily_stats(
             GROUP BY local_date
             ORDER BY date ASC
             """,
-            (aid, f"-{days} days", *ex_params),
+            (aid, f"-{days - 1} days", *ex_params),
         ).fetchall()
     # 连续日期窗口 [今天-days, 今天], 与上面 SQL 过滤条件同源 (同一 SQLite 时区口径)
     bounds = get_db().execute(
         "SELECT date('now', 'localtime', ?) AS start_date, date('now', 'localtime') AS end_date",
-        (f"-{days} days",),
+        (f"-{days - 1} days",),
     ).fetchone()
     by_date = {r["date"]: r for r in rows}
     result: list[dict[str, Any]] = []
@@ -2428,57 +3382,84 @@ def model_daily_stats(
 ) -> dict[str, Any]:
     """近 N 天「日 × 模型」用量 (统计页模型堆叠趋势图数据源).
 
-    返回 {"days": [连续日期...], "series": [{"model", "input", "output", "cost"}]},
-    每个序列与 days 等长、缺日补 0 (与 daily_stats 同一连续日期口径);
+    返回 {"days": [恰好 days 个连续日期...], "series": [{"model", "input", "output", "cost"}]},
+    每个序列与 days 等长、缺日补 0 (与 daily_stats 同一连续日期口径, 见 I10);
     始终返回全量模型 —— top 截取与排序由调用侧按当前维度决定 (换维度顺序会变).
 
     ds_peak_split 打开且 peak_split 为真时与 model_stats 同口径: DeepSeek flash
     按天 × 档位拆成「峰 / 谷」两条序列, 保证两张图的模型名与配色能对上.
+    同样走两段式查询 (基准分支排除分档模型 + 仅分档模型求值 tier 表达式, P2-1).
     """
     days = max(1, min(days, 365))
     aid = _resolve_account_id(account_id)
     ex_sql, ex_params = _exclude_clause(exclude_models)
     ex_and = f" AND {ex_sql}" if ex_sql else ""
     split = peak_split_enabled() if peak_split is None else bool(peak_split)
+    conn = get_db()
     if _use_charts_stats(aid):
-        tier_expr, holidays = _peak_tier_sql("time_bucket") if split else ("", [])
-        tier_col = f"{tier_expr} AS tier," if tier_expr else ""
-        group_by = "GROUP BY local_date, model, tier" if tier_expr else "GROUP BY local_date, model"
-        rows = get_db().execute(
-            f"""
-            SELECT local_date AS date, model,
-                   {tier_col}
-                   SUM(tokens_in) AS input_tokens,
-                   SUM(tokens_out) AS output_tokens,
-                   SUM(total_cost) AS cost_usd
-            FROM usage_charts
-            WHERE account_id = ?
-              AND local_date >= date('now', 'localtime', ?){ex_and}
-            {group_by}
-            """,
-            (*holidays, aid, f"-{days} days", *ex_params),
-        ).fetchall()
+        input_expr = "SUM(tokens_in)"
+        output_expr = "SUM(tokens_out)"
+        cost_expr = "SUM(total_cost)"
+        table, time_col = "usage_charts", "time_bucket"
     else:
-        tier_expr, holidays = _peak_tier_sql("created_at") if split else ("", [])
-        tier_col = f"{tier_expr} AS tier," if tier_expr else ""
-        group_by = "GROUP BY local_date, model, tier" if tier_expr else "GROUP BY local_date, model"
-        rows = get_db().execute(
+        input_expr = (
+            "SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens"
+            " + cache_write_1h_tokens)"
+        )
+        output_expr = "SUM(output_tokens)"
+        cost_expr = "SUM(cost_usd)"
+        table, time_col = "usage_records", "created_at"
+    window_sql = (
+        "WHERE account_id = ?"
+        " AND local_date >= date('now', 'localtime', ?)" + ex_and
+    )
+    if split:
+        # 两段式 (同 model_stats, P2-1): 基准分支排除分档模型不算 tier 表达式,
+        # 分档分支只对白名单模型求值 —— 否则 GROUP BY local_date, model, tier
+        # 的逐行 tier 表达式是 model_daily_stats 最大开销 (12× 回退的根因).
+        base_rows = conn.execute(
+            f"""
+            SELECT local_date AS date, model, '' AS tier,
+                   {input_expr} AS input_tokens,
+                   {output_expr} AS output_tokens,
+                   {cost_expr} AS cost_usd
+            FROM {table}
+            {window_sql} AND {_DS_FLASH_BASE_SQL}
+            GROUP BY local_date, model
+            """,
+            (aid, f"-{days - 1} days", *ex_params),
+        ).fetchall()
+        tier_expr, holidays = _peak_tier_sql(time_col)
+        tiered_rows = conn.execute(
             f"""
             SELECT local_date AS date, model,
-                   {tier_col}
-                   SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens) AS input_tokens,
-                   SUM(output_tokens) AS output_tokens,
-                   SUM(cost_usd) AS cost_usd
-            FROM usage_records
-            WHERE account_id = ?
-              AND local_date >= date('now', 'localtime', ?){ex_and}
-            {group_by}
+                   {tier_expr} AS tier,
+                   {input_expr} AS input_tokens,
+                   {output_expr} AS output_tokens,
+                   {cost_expr} AS cost_usd
+            FROM {table}
+            {window_sql} AND {_DS_FLASH_SQL}
+            GROUP BY local_date, model, tier
             """,
-            (*holidays, aid, f"-{days} days", *ex_params),
+            (*holidays, aid, f"-{days - 1} days", *ex_params),
+        ).fetchall()
+        rows = [*base_rows, *tiered_rows]
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT local_date AS date, model, '' AS tier,
+                   {input_expr} AS input_tokens,
+                   {output_expr} AS output_tokens,
+                   {cost_expr} AS cost_usd
+            FROM {table}
+            {window_sql}
+            GROUP BY local_date, model
+            """,
+            (aid, f"-{days - 1} days", *ex_params),
         ).fetchall()
     bounds = get_db().execute(
         "SELECT date('now', 'localtime', ?) AS start_date, date('now', 'localtime') AS end_date",
-        (f"-{days} days",),
+        (f"-{days - 1} days",),
     ).fetchone()
     day_list: list[str] = []
     cur = datetime.strptime(bounds["start_date"], "%Y-%m-%d").date()
@@ -2493,7 +3474,7 @@ def model_daily_stats(
         if i is None:  # 边界外的行 (时区/手工改库): 不参与
             continue
         base = str(r["model"] or "unknown")
-        model = _split_model_label(base, r["tier"] if split else "")
+        model = _split_model_label(base, r["tier"])
         s = series.get(model)
         if s is None:
             s = series[model] = {
@@ -2577,27 +3558,34 @@ def totals(
     account_id: Optional[int] = None,
     exclude_models: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """总览指标, 口径与模型占比一致."""
+    """总览指标, 口径与模型占比一致.
+
+    charts 数据源下, 窗口内没有 charts 行时 SUM 返回 NULL —— 这里**直接视为 0
+    并返回**, 不落回明细表 (P1-5). 旧实现会回退明细, 而 model_stats/daily_stats/
+    today_trend 在 charts 缺失时都返回空: 同一 dashboard 内"今日请求 1 / 费用
+    $0.5"却配上全 0 的模型环形图与趋势图, 四路口径互相矛盾. 回退还会混用两套
+    token 口径 (charts 的 tokens_in 含缓存读, 明细不含).
+    """
     aid = _resolve_account_id(account_id)
     if _use_charts_stats(aid):
         sql, params = _charts_stats_select(period, aid, exclude_models=exclude_models)
         row = get_db().execute(sql, params).fetchone()
-        if row is not None and row["request_count"] is not None:
-            hit = int(row["cache_hit_tokens"] or 0)
-            miss = int(row["uncached_input_tokens"] or 0)
-            hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
-            return {
-                "request_count": int(row["request_count"] or 0),
-                "session_count": 0,
-                "total_input_tokens": int(row["total_input_tokens"] or 0),
-                "uncached_input_tokens": miss,
-                "total_reasoning_tokens": 0,
-                "cache_hit_tokens": hit,
-                "cache_write_tokens": int(row["cache_write_tokens"] or 0),
-                "total_output_tokens": int(row["total_output_tokens"] or 0),
-                "total_cost_usd": round(float(row["total_cost_usd"] or 0), 6),
-                "hit_rate": round(hit_rate, 2),
-            }
+        # NULL 是"该窗口没有 charts 行"的正常结果, 与其它三个 charts 聚合同口径
+        hit = int((row["cache_hit_tokens"] if row else 0) or 0)
+        miss = int((row["uncached_input_tokens"] if row else 0) or 0)
+        hit_rate = (hit / (hit + miss) * 100) if (hit + miss) > 0 else 0.0
+        return {
+            "request_count": int((row["request_count"] if row else 0) or 0),
+            "session_count": 0,
+            "total_input_tokens": int((row["total_input_tokens"] if row else 0) or 0),
+            "uncached_input_tokens": miss,
+            "total_reasoning_tokens": 0,
+            "cache_hit_tokens": hit,
+            "cache_write_tokens": int((row["cache_write_tokens"] if row else 0) or 0),
+            "total_output_tokens": int((row["total_output_tokens"] if row else 0) or 0),
+            "total_cost_usd": round(float((row["total_cost_usd"] if row else 0) or 0), 6),
+            "hit_rate": round(hit_rate, 2),
+        }
     where, params = _period_where(period, aid, exclude_models)
     where, params = _account_filter(where, params, aid)
     row = get_db().execute(

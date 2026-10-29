@@ -4,39 +4,23 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================
-echo  GoGauge 打包脚本 (PyInstaller 单文件 exe)
+echo  GoGauge Windows 打包 (PyInstaller 单文件 exe)
 echo ============================================
 echo.
 
-echo [1/3] 安装依赖...
-rem 注意: 必须带 -r requirements.txt, 保证 pywebview>=6.0 (旧版 get_cookies 捕获不到会话 Cookie)
-pip install -q -r requirements.txt pytest pyinstaller || goto :err
+echo [1/2] 安装锁定依赖...
+rem 必须用全量 lock: 裸装 requirements.txt 会随上游漂移 (pythonnet/.NET 桥事故的教训)
+python -m pip install -q -r requirements-windows.lock.txt || goto :err
 
-echo [2/3] 打包单文件 exe (无控制台窗口, logo 图标)...
-echo       裁剪误收集依赖 (numpy/cryptography/PIL._avif), 体积约减半
-pyinstaller --noconfirm --clean --onefile --noconsole --name GoGauge ^
-  --add-data "app\web;app\web" ^
-  --add-data "assets;assets" ^
-  --icon assets\GoGauge.ico ^
-  --collect-submodules webview ^
-  --hidden-import clr ^
-  --hidden-import pythonnet ^
-  --hidden-import pystray ^
-  --exclude-module numpy ^
-  --exclude-module cryptography ^
-  --exclude-module PIL._avif ^
-  entry.py || goto :err
+echo [2/2] 构建 dist\GoGauge.exe ...
+rem 所有 PyInstaller 参数与 _build_info.py 生成统一在 scripts/build.py
+python scripts\build.py --platform windows %* || goto :err
 
-echo [3/3] 完成!
 echo.
-echo 输出: dist\GoGauge.exe
-echo 数据目录: 首次运行会在 exe 同目录创建 data\ 文件夹
-echo.
-pause
+echo 完成! 输出: dist\GoGauge.exe
 exit /b 0
 
 :err
 echo.
 echo 打包失败, 请检查上方错误信息
-pause
 exit /b 1
