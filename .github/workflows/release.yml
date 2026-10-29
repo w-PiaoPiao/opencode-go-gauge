@@ -110,7 +110,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # arm64 = Apple Silicon. macos-14 已被 GitHub 标记 deprecated, 容量极少
+          # (v2.2.2b 实测排队 16 分钟仍未分配到 runner 并被系统取消);
+          # macos-15 才是当前可用的 arm64 镜像 (macos-15-intel 为 x86_64).
+          - os: macos-15
             arch: arm64
           - os: macos-15-intel
             arch: x86_64

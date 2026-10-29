@@ -56,7 +56,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14
+          # arm64 = Apple Silicon: macos-14 已 deprecated (排队拿不到 runner),
+          # 改用 macos-15; macos-15-intel 仍为 x86_64.
+          - os: macos-15
             arch: arm64
           - os: macos-15-intel
             arch: x86_64

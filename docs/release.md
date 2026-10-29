@@ -34,7 +34,7 @@
    | 平台 | runner | release asset |
    |---|---|---|
    | Windows | `windows-latest` | `GoGauge-v2.2.1d-windows.exe` |
-   | macOS arm64 | `macos-14` | `GoGauge-v2.2.1d-macos-arm64.zip` |
+   | macOS arm64 | `macos-15` | `GoGauge-v2.2.1d-macos-arm64.zip` |
    | macOS x86_64 | `macos-15-intel` | `GoGauge-v2.2.1d-macos-x86_64.zip` |
    | Android（仅当已适配/版本==tag） | `ubuntu-latest` | `GoGauge-v2.2.1d-android.apk` |
 
