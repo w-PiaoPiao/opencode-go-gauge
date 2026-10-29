@@ -120,3 +120,27 @@ python scripts/check_versions.py --tag v2.2.2    # release preflight 用
 - Windows：`GoGauge-v<版本>-windows.exe`
 - macOS：`GoGauge-v<版本>-macos-arm64.zip` / `GoGauge-v<版本>-macos-x86_64.zip`
 - Android：`GoGauge-v<版本>-android.apk`
+
+## 发布链路的已知陷阱（2026-10-29 / v2.2.2b 实测）
+
+发布前先看这三条，都是"构建其实没问题、但整条链被判失败"的坑：
+
+1. **macOS arm64 用 `macos-15`，不要用 `macos-14`**。GitHub 已把 macOS 14 Arm64
+   标为 deprecated，容量极少：v2.2.2b 首次发布时该 job 排队 16 分钟仍未分配到
+   runner，最终被系统取消，`publish` 因 `needs` 未满足而跳过，整个 release 发不
+   出来。`macos-15` 才是当前可用的 arm64 镜像（`macos-15-intel` 是 x86_64）。
+
+2. **Windows 控制台不是 UTF-8**。`windows-latest` 的 stdout 编码是 cp1252（中文
+   系统 cp936），脚本里 `print` 中文会抛 `UnicodeEncodeError`：v2.2.2b 时
+   `GoGauge.exe` 已经构建成功（17.9 MiB），却在最后一行「完成」上 exit 1。
+   `scripts/build.py` 已在入口把 stdout/stderr reconfigure 成 `utf-8` +
+   `errors="replace"`；新脚本请照做。
+
+3. **性能类断言别写死 SQLite 的查询计划措辞**。同一条 `ORDER BY` 的部分排序在
+   macOS SQLite 3.53 报 `USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY`，在
+   ubuntu-latest 报 `USE TEMP B-TREE FOR RIGHT PART OF ORDER BY`；只拦裸的
+   `TEMP B-TREE FOR ORDER BY`（整窗口排序）即可。
+
+排障入口：`gh run view <run-id> -R w-PiaoPiao/opencode-go-gauge --log-failed`，
+job 级日志用 `gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs`（run 未结束
+时 `--log-failed` 不可用）。
