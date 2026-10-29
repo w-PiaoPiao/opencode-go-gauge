@@ -1005,9 +1005,18 @@ def test_records_page_days_order_matches_created_at_order(tmp_db):
     )
     assert "idx_usage_account_localdate" in plan, plan
     # 旧实现的 created_at 首键会让整个窗口 (8 万行) 进一个 TEMP B-TREE;
-    # 新排序把排序范围收敛到单个 local_date 分组内 ("LAST 2 TERMS"), 代价 O(每天行数).
+    # 新排序把排序范围收敛到单个 local_date 分组内, 代价 O(每天行数)。
+    #
+    # "部分排序"的措辞随 SQLite 版本/平台变化 (实测: macOS "FOR LAST 2 TERMS OF
+    # ORDER BY"、ubuntu-latest "FOR RIGHT PART OF ORDER BY"), 两者语义相同 —— 都只
+    # 对 local_date 分组内的次级键排序; 只有裸 "TEMP B-TREE FOR ORDER BY" 才代表
+    # 整个窗口进临时 B 树 (这一条才是真正要拦住的回归)。
     assert "TEMP B-TREE FOR ORDER BY" not in plan, plan
-    assert "TEMP B-TREE FOR LAST" in plan or "TEMP B-TREE" not in plan, plan
+    partial_sort = (
+        "FOR RIGHT PART OF ORDER BY" in plan
+        or ("FOR LAST" in plan and "TERMS OF ORDER BY" in plan)
+    )
+    assert partial_sort or "TEMP B-TREE" not in plan, plan
 
 
 # ---------------------------------------------------------------------------
