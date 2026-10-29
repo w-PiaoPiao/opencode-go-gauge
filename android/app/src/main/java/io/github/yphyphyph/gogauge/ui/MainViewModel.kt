@@ -401,16 +401,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * @param exclude 统计页排除的模型集; 首页调用方传空集 (首页恒全量口径).
-     *   数据按 (range, exclude) 双元组与目标比对, 任一不符才重载.
+     *   数据按 (range, exclude, peakSplit) 三元组与目标比对, 任一不符才重载.
+     * @param peakSplit 峰谷分档 (v2.2.2): 统计页 true / 首页 false; 缺省继承当前
+     *   已加载口径, 让同步/刷新/配额到账后的重载不会把统计页打回整模型口径.
      */
-    fun loadDashboard(range: String = homeRange, exclude: Set<String> = emptySet()) {
+    fun loadDashboard(
+        range: String = homeRange,
+        exclude: Set<String> = emptySet(),
+        peakSplit: Boolean = dashboard?.peakSplit ?: false,
+    ) {
         val seq = ++dashSeq
         scope.launch {
             try {
                 // Desktop parity: every dashboard load kicks a background quota refresh
                 // (30s cache + re-entry guard inside ensureQuota).
                 repo.ensureQuotaAsync(scope)
-                val data = repo.loadDashboard(range, exclude)
+                val data = repo.loadDashboard(range, exclude, peakSplit)
                 if (seq != dashSeq) return@launch // 丢弃过期响应, 防口径串写
                 dashboard = data
                 dashboardVersion++
@@ -492,28 +498,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 首页口径: 恒全量 (排除只作用于统计页 — desktop parity). */
-    fun ensureHomeDashboard() = ensureDashboard(homeRange, emptySet())
+    /** 首页口径: 恒全量 (排除只作用于统计页 — desktop parity)。 */
+    fun ensureHomeDashboard() = ensureDashboard(homeRange, emptySet(), peakSplit = false)
 
-    /** 统计页口径: 带当前排除集. */
-    fun ensureStatsDashboard() = ensureDashboard(statsRange, excludedModels)
+    /** 统计页口径: 带当前排除集 + 峰谷分档 (desktop 统计页请求带 peak_split=1)。 */
+    fun ensureStatsDashboard() = ensureDashboard(statsRange, excludedModels, settings.dsPeakSplit)
 
     /**
      * 仅在缓存数据与目标口径不一致时重载.
      *
-     * 首页与统计页共用同一个 dashboard 对象但各自的 range/排除集独立: 之前在
-     * 统计页切到 "30d" 后回到首页, 首页会直接用 30d 的数据渲染, 而高亮的却是
-     * "today". DashboardData 记录了数据对应的 (range, excluded), 以此为判据即可.
+     * 首页与统计页共用同一个 dashboard 对象但各自的 range/排除集/峰谷口径独立: 之前
+     * 在统计页切到 "30d" 后回到首页, 首页会直接用 30d 的数据渲染, 而高亮的却是
+     * "today". DashboardData 记录了数据对应的 (range, excluded, peakSplit), 以此为判据即可.
      */
-    private fun ensureDashboard(range: String, exclude: Set<String>) {
-        if (dashboard?.range != range || dashboard?.excluded != exclude) loadDashboard(range, exclude)
+    private fun ensureDashboard(range: String, exclude: Set<String>, peakSplit: Boolean) {
+        if (dashboard?.range != range || dashboard?.excluded != exclude ||
+            dashboard?.peakSplit != peakSplit
+        ) {
+            loadDashboard(range, exclude, peakSplit)
+        }
     }
 
     /** 图例点击: 切换模型排除并全局重聚合 (desktop onModelLegendClick parity).
      *  扇区/图例的即时反馈由 UI 直接用 [excludedModels] 渲染, 数值等本次重载落地. */
     fun toggleModelExclusion(model: String) {
         excludedModels = if (model in excludedModels) excludedModels - model else excludedModels + model
-        loadDashboard(statsRange, excludedModels)
+        loadDashboard(statsRange, excludedModels, settings.dsPeakSplit)
     }
 
     // ------------------------------------------------------------------
@@ -719,7 +729,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun changeStatsRange(r: String) {
         statsRange = r
-        loadDashboard(r, excludedModels)
+        loadDashboard(r, excludedModels, settings.dsPeakSplit)
     }
 
     fun changeModelDim(d: String) {
@@ -754,6 +764,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             restartAutoSync()
+            // 峰谷开关即时生效: 模型趋势图按新口径重算 (统计页 dashboard 由
+            // ensureStatsDashboard 的三元组比对触发重载)
+            loadModelTrend()
         }
     }
 

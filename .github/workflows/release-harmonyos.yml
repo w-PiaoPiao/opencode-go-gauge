@@ -1,5 +1,6 @@
 # HarmonyOS HAP 自动构建: 推送 v*-harmony tag 时触发 (镜像 release-android.yml)。
-# 注: 鸿蒙暂未纳入统一发布 (release.yml), 仍走本单平台流程。
+# 注: 鸿蒙暂未纳入统一发布 (release.yml), 仍走本单平台流程; 该 workflow 从未成功
+# 运行过（仓库里没有任何 v*-harmony tag, Actions 也没有运行记录）。
 #
 # ⚠️ 前提 (公共 runner 需要):
 #   1. 安装 HarmonyOS 命令行工具链 (hvigor/ohpm/node) 与 SDK (API 24) —
@@ -9,7 +10,16 @@
 #      HAP_STORE_FILE / HAP_STORE_PASSWORD / HAP_KEY_ALIAS / HAP_KEY_PASSWORD /
 #      HAP_PROFILE_P7B / HAP_SIGN_CER  (详见 harmonyos/docs/agc-release-checklist.md)
 #   3. 构建时在 build-profile.json5 注入 signingConfigs (本地调试可跳过, 产物为 unsigned)。
-
+#
+# 本文件相对历史版本的修复:
+# - 签名注入步骤原写作 step 级 `if: env.HAP_STORE_PASSWORD != ''` —— GitHub 的
+#   step 级 `if` 看不到**该 step 自己**的 env（if 在 step env 应用之前求值），
+#   条件恒为假: 即使配了 secrets 也永远 skip, 最终上传未签名 HAP 却按正式资产命名。
+#   现在把 secrets 提到 job 级 env, if 才能正确读到。
+# - 公共 ubuntu runner 没装 ohpm/hvigor/SDK 时, 原 workflow 会在 `ohpm install`
+#   处抛一个难以理解的数据; 现在先显式检查工具链与（tag 发布时）签名 secrets,
+#   给出可操作的 ::error:: 说明。
+# - 增加 timeout-minutes; 顶层权限只读, 只有 release job 需要 contents: write。
 name: release-harmonyos
 
 on:
@@ -18,39 +28,74 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest  # 或自托管 (已装 DevEco 命令行工具链)
+    # 默认公共 runner 未装工具链 -> 工具链检查步骤会给出明确错误; 自托管 runner
+    # 或自行安装 Command Line Tools 后可直接运行。workflow_dispatch 也可用于
+    # 在分支上验证构建（无 secrets 时构建 unsigned HAP, 但不发布）。
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # job 级 env: step 级 if 只能看到这一层（secrets 上下文不能直接在 if 里用）
+      HAP_STORE_FILE: ${{ secrets.HAP_STORE_FILE }}
+      HAP_STORE_PASSWORD: ${{ secrets.HAP_STORE_PASSWORD }}
+      HAP_KEY_ALIAS: ${{ secrets.HAP_KEY_ALIAS }}
+      HAP_KEY_PASSWORD: ${{ secrets.HAP_KEY_PASSWORD }}
+      HAP_PROFILE_P7B: ${{ secrets.HAP_PROFILE_P7B }}
+      HAP_SIGN_CER: ${{ secrets.HAP_SIGN_CER }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
-      - name: Setup HarmonyOS toolchain
+      - name: Check HarmonyOS toolchain
+        # 失败信息必须可操作: 不是 "ohpm: command not found" 这种天书
         run: |
-          # 占位: 公共 runner 需先安装 hvigor/ohpm/node 与 SDK(API 24)。
-          # 自托管 runner 可改用本机 DevEco 工具目录:
-          #   echo "DEVECO_SDK_HOME=$DEVECO_SDK_HOME" >> $GITHUB_ENV
-          echo "DEVECO_SDK_HOME=$(pwd)/harmonyos-sdk" >> $GITHUB_ENV
-          echo "NODE_HOME=$(which node)" >> $GITHUB_ENV
+          set -euo pipefail
+          missing=()
+          command -v ohpm  >/dev/null 2>&1 || missing+=("ohpm")
+          command -v node  >/dev/null 2>&1 || missing+=("node")
+          [ -n "${DEVECO_SDK_HOME:-}" ] || missing+=("DEVECO_SDK_HOME(env)")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::缺少 HarmonyOS 工具链: ${missing[*]}。公共 ubuntu runner 不预装 DevEco 工具链/HarmonyOS SDK(API 24); 请改用自托管 runner, 或先安装 HarmonyOS Command Line Tools 并导出 DEVECO_SDK_HOME/NODE_HOME（见 harmonyos/README.md 的「命令行构建」）。"
+            exit 1
+          fi
+          echo "HarmonyOS toolchain OK: ohpm=$(command -v ohpm) node=$(command -v node) sdk=$DEVECO_SDK_HOME"
+
+      - name: Require signing materials for release tags
+        # tag 发布必须带签名材料; workflow_dispatch 在分支上允许 unsigned 构建
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in HAP_STORE_FILE HAP_STORE_PASSWORD HAP_KEY_ALIAS HAP_KEY_PASSWORD HAP_PROFILE_P7B HAP_SIGN_CER; do
+            [ -n "${!v:-}" ] || missing+=("$v")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::发布 tag 需要签名材料, 缺少 secrets: ${missing[*]}（配置见 harmonyos/docs/agc-release-checklist.md）"
+            exit 1
+          fi
 
       - name: ohpm install
         working-directory: harmonyos
         run: ohpm install
 
-      - name: Inject signing config (if secrets present)
+      - name: Run hypium unit tests
+        # harmonyos/scripts/build.sh test -> hvigorw test（hypium 套件, 含
+        # QuotaParser/UsageParser/Fmt/SyncDao 等纯逻辑用例）
         working-directory: harmonyos
+        run: bash scripts/build.sh test
+
+      - name: Inject signing config (if secrets present)
         if: env.HAP_STORE_PASSWORD != ''
-        env:
-          HAP_STORE_FILE: ${{ secrets.HAP_STORE_FILE }}
-          HAP_STORE_PASSWORD: ${{ secrets.HAP_STORE_PASSWORD }}
-          HAP_KEY_ALIAS: ${{ secrets.HAP_KEY_ALIAS }}
-          HAP_KEY_PASSWORD: ${{ secrets.HAP_KEY_PASSWORD }}
+        working-directory: harmonyos
         run: bash scripts/inject-signing.sh
 
-      - name: Build signed HAP
+      - name: Build HAP
         working-directory: harmonyos
-        run: ./hvigorw --mode module -p product=default assembleHap --no-daemon
+        run: bash scripts/build.sh hap
 
       - uses: actions/upload-artifact@v4
         with:
@@ -59,9 +104,12 @@ jobs:
           if-no-files-found: error
 
   release:
+    permissions:
+      contents: write
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -73,9 +121,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          # v2.2.2-harmony -> 资产命名 GoGauge-v2.2.2-harmony.hap
           VER="${TAG#v}"; VER="${VER%-harmony}"
-          HAP=$(ls *.hap | head -1)
+          HAP=$(ls *.hap 2>/dev/null | head -1 || true)
+          if [ -z "$HAP" ]; then
+            echo "::error::没有找到 HAP 产物"
+            exit 1
+          fi
           mv "$HAP" "GoGauge-v${VER}-harmony.hap"
+          ls -l
           gh release upload "$TAG" "GoGauge-v${VER}-harmony.hap" --clobber || \
             gh release create "$TAG" "GoGauge-v${VER}-harmony.hap" \
               --title "GoGauge $TAG" --generate-notes

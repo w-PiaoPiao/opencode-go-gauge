@@ -22,6 +22,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from ._http_retry import (
+    ResponseTooLarge,
+    is_retryable_status,
+    read_body,
+    retry_delay,
+)
+
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
@@ -39,8 +46,8 @@ USER_AGENT = (
 )
 REQUEST_TIMEOUT = 30.0
 MAX_BODY_BYTES = 8 << 20  # 8 MiB
-FETCH_RETRIES = 3  # 网络抖动重试次数
-RETRY_BACKOFF = [0.5, 1.5, 3.0]
+FETCH_RETRIES = 3  # 网络抖动/5xx/429 重试次数; 确定性 4xx 不重试
+# RETRY_BACKOFF 由 app._http_retry 提供 (两个客户端共用同一份退避策略)
 
 LABEL_ROLLING = "5h Rolling"
 LABEL_WEEKLY = "Weekly"
@@ -74,10 +81,14 @@ class QuotaWindow:
     unit: str
     reset_at: str  # ISO; "" = 接口未给该窗口的重置时间 (窗口未开始 / 无周期边界)
     reset_in_sec: int
+    # 稳定协议标识 (rolling/weekly/monthly): 前后端/落库逻辑一律认它, label 只是
+    # 展示文案 (历史上 server 按 "Monthly" 字面量判断, 改名/本地化会静默破坏周期落库)
+    kind: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "label": self.label,
+            "kind": self.kind,
             "used": self.used,
             "remaining": self.remaining,
             "total": self.total,
@@ -89,10 +100,16 @@ class QuotaWindow:
 
 @dataclass
 class QuotaResult:
+    """单个账号的配额结果 (两个 provider 共用同一结构, 见 commandcode_api 的复用).
+
+    ``plan`` 只有 Command Code 会填 (GOAT 套餐标识); OpenCode Go 侧恒为 None.
+    """
+
     name: str
     workspace_id: str
     success: bool
     updated_at: str
+    plan: Optional[str] = None
     period_start: Optional[str] = None  # ISO, 订阅计费周期起点 (access.startsAt)
     period_end: Optional[str] = None    # ISO, 订阅计费周期终点 (access.endsAt)
     windows: list[QuotaWindow] = field(default_factory=list)
@@ -105,6 +122,8 @@ class QuotaResult:
             "success": self.success,
             "updated_at": self.updated_at,
         }
+        if self.plan:
+            payload["plan"] = self.plan
         if self.period_start:
             payload["period_start"] = self.period_start
         if self.period_end:
@@ -211,19 +230,18 @@ def _fetch(
     timeout: float = REQUEST_TIMEOUT,
     retries: int = FETCH_RETRIES,
 ) -> str:
-    """GET 请求, 自动重试; 401/403 抛 AuthError, 404 抛 OpenCodeAPIError."""
-    last_exc: Optional[Exception] = None
-    for attempt in range(retries):
+    """GET 请求, 自动重试; 401/403/404 映射为可读异常, 确定性 4xx 不重试.
+
+    可重试: 5xx / 408 / 425 / 429 / 连接错误; 等待优先取 ``Retry-After`` (封顶 10s),
+    否则用共用退避表。响应体超限抛 OpenCodeAPIError (chunked 响应也能识别)。
+    """
+    last_exc: Optional[BaseException] = None
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read(MAX_BODY_BYTES)
-                # 截断检测: Content-Length 声明超限时明确报错, 而非静默解析半包丢尾部数据
-                declared = resp.headers.get("Content-Length") or ""
-                if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-                    raise OpenCodeAPIError(
-                        f"响应过大 ({int(declared) // (1 << 20)} MiB, 上限 8 MiB)")
-                return body.decode("utf-8", errors="replace")
+                return read_body(resp, MAX_BODY_BYTES).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
                 raise AuthError("登录已过期，请重新登录") from exc
@@ -231,11 +249,17 @@ def _fetch(
                 raise OpenCodeAPIError("无访问权限 (HTTP 403)") from exc
             if exc.code == 404:
                 raise OpenCodeAPIError("工作区不存在或接口不可用 (HTTP 404)") from exc
+            if not is_retryable_status(exc.code):
+                # 400/410/422 等确定性失败: 重试只会白等, 直接把状态码交给上层
+                raise OpenCodeAPIError(f"请求返回 HTTP {exc.code}") from exc
             last_exc = exc
+        except ResponseTooLarge as exc:
+            raise OpenCodeAPIError(str(exc)) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_exc = exc
-        if attempt < retries - 1:
-            time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
+        if attempt < attempts - 1:
+            headers_of_exc = getattr(last_exc, "headers", None)
+            time.sleep(retry_delay(attempt, headers_of_exc))
     if isinstance(last_exc, urllib.error.HTTPError):
         raise OpenCodeAPIError(f"请求返回 HTTP {last_exc.code}") from last_exc
     if isinstance(last_exc, urllib.error.URLError):
@@ -424,10 +448,10 @@ def parse_go_status(payload: Any, now: Optional[datetime] = None) -> list[QuotaW
         return []
     period_end = _iso_from_text(access.get("endsAt"))
     windows: list[QuotaWindow] = []
-    for label, key in (
-        (LABEL_ROLLING, METER_ROLLING),
-        (LABEL_WEEKLY, METER_WEEKLY),
-        (LABEL_MONTHLY, METER_MONTHLY),
+    for label, kind, key in (
+        (LABEL_ROLLING, "rolling", METER_ROLLING),
+        (LABEL_WEEKLY, "weekly", METER_WEEKLY),
+        (LABEL_MONTHLY, "monthly", METER_MONTHLY),
     ):
         meter = meters.get(key)
         if not isinstance(meter, dict):
@@ -446,6 +470,7 @@ def parse_go_status(payload: Any, now: Optional[datetime] = None) -> list[QuotaW
         windows.append(
             QuotaWindow(
                 label=label,
+                kind=kind,
                 used=round(used, 2),
                 remaining=round(100.0 - used, 2),
                 total=100.0,

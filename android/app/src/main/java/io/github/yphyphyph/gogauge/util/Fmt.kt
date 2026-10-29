@@ -15,13 +15,16 @@ object Fmt {
 
     private val intFmt = DecimalFormat("#,##0", DecimalFormatSymbols(Locale.US))
 
-    /** 1.2B / 3.4M / 5.6k / 123 — port of fmtTokens. */
+    /** 1.2B / 3.4M / 5.6k / 123 — port of fmtTokens (含 desktop 999_999 -> 1.00M 的进位修正). */
     fun tokens(n: Number): String {
         val v = n.toDouble()
+        val a = Math.abs(v)
+        // 阈值取 999.95 而非 1000: 999_999 若仍走 k 分支会格式化成「1000.0k」,
+        // 与「上一档 1.00M」自相矛盾 (desktop P3-14 同修法)
         return when {
-            v >= 1e9 -> String.format(Locale.US, "%.2fB", v / 1e9)
-            v >= 1e6 -> String.format(Locale.US, "%.2fM", v / 1e6)
-            v >= 1e3 -> String.format(Locale.US, "%.1fk", v / 1e3)
+            a >= 999.95e6 -> String.format(Locale.US, "%.2fB", v / 1e9)
+            a >= 999.95e3 -> String.format(Locale.US, "%.2fM", v / 1e6)
+            a >= 1e3 -> String.format(Locale.US, "%.1fk", v / 1e3)
             else -> java.lang.Long.toString(Math.round(v))
         }
     }

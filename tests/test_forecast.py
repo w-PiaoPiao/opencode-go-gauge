@@ -86,3 +86,29 @@ class TestWindowForecast:
     def test_string_inputs_tolerated(self):
         fc = window_forecast(used="42", reset_in_sec="12000", window_len=FIVE_HOUR_SEC)
         assert fc == {"state": "fill", "sec": 8286}
+
+
+class TestNonFiniteInputs:
+    """NaN/Inf 输入防护 (F17): 上游 JSON 允许 NaN 字面量, math.floor(nan) 会抛异常."""
+
+    def test_nan_used_returns_none(self):
+        from app.forecast import window_forecast
+
+        assert window_forecast(used=float("nan"), reset_in_sec=12000, window_len=FIVE_HOUR_SEC) is None
+
+    def test_nan_reset_returns_none(self):
+        from app.forecast import window_forecast
+
+        assert window_forecast(used=42, reset_in_sec=float("nan"), window_len=FIVE_HOUR_SEC) is None
+
+    def test_inf_inputs_return_none(self):
+        from app.forecast import window_forecast
+
+        assert window_forecast(used=float("inf"), reset_in_sec=12000, window_len=FIVE_HOUR_SEC) is None
+        assert window_forecast(used=42, reset_in_sec=float("inf"), window_len=FIVE_HOUR_SEC) is None
+        assert window_forecast(used=42, reset_in_sec=12000, window_len=float("nan")) is None
+
+    def test_unparseable_strings_return_none(self):
+        from app.forecast import window_forecast
+
+        assert window_forecast(used="oops", reset_in_sec=12000, window_len=FIVE_HOUR_SEC) is None

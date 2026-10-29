@@ -1,18 +1,33 @@
-# Windows 打包依赖锁定 (release-windows.yml 使用本文件, 保证构建可复现).
-# 升级依赖时: pip freeze 后更新对应版本并重新构建验证.
+# Windows 打包依赖锁定 (release-windows.yml / scripts/build.py 使用本文件, 保证构建可复现).
+#
+# 必须是**全量**锁: 只列顶层包时, pyinstaller 的 Windows 传递依赖与 pywebview 的
+# 依赖会随上游漂移。**不升级**顶层包版本 (仍取原 lock 的 pyinstaller 6.22.3 /
+# pythonnet 3.1.0 / pillow 12.3.0 / pywebview 6.2.1); 只补缺失的传递依赖, 版本按
+# 依赖元数据里已被解析到的版本 (2026-10-27 从 PyPI metadata 核对)。
 #
 # 为什么必须钉: 2026-10-08 pythonnet 3.2.1 上传 PyPI 后 CI 静默升级 (工作流原先
 # 裸写包名), 导致 v2.2.0-windows 与 v2.2.0d-windows 之间 .NET 桥换版、且
 # pythonnet\runtime\ 下的 System.* 卫星程序集整批消失; 而产品日志里没有任何
 # "跑的是哪套栈"的记录, 事后只能靠解析 exe 归档才查出差异 (见 app/main.py
 # 的 _log_runtime_banner —— 现在启动横幅会把它写进主日志).
-# pythonnet 取 3.1.0: v2.2.0b / 本地验证包都用它, 是已知可用的 .NET 桥版本.
+# pythonnet 取 3.1.0: v2.2.0b / 本地验证包都用它, 是已知可用的 .NET 桥版本。
+# 更新方式: 在干净 Windows venv 里安装 -> 跑一次 scripts/build.py --platform windows
+#           验证 -> 用 pip freeze 全量结果替换本文件。
+altgraph==0.17.5
+bottle==0.13.4
+cffi==2.1.1
 clr-loader==0.3.1
+packaging==26.3
+pefile==2024.8.26
 pillow==12.3.0
+proxy-tools==0.1.0
+pycparser==3.12
 pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.7
 pystray==0.19.5
 pythonnet==3.1.0
 pywebview==6.2.1
-# pywebview 的传递依赖 (macOS 侧 lock 同样钉了 bottle)
-bottle==0.13.4
-proxy-tools==0.1.0
+pywin32-ctypes==0.2.3
+setuptools==84.0.0
+six==1.17.0
+typing_extensions==4.16.0

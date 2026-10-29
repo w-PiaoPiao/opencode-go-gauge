@@ -18,12 +18,26 @@ get_cookies 在 WebView2 上用 self.url 作 GetCookiesAsync 的入参, 窗口�
 from __future__ import annotations
 
 import json
+import threading
 import time
 from types import SimpleNamespace
 
 import pytest
 
 from app import auth
+
+
+@pytest.fixture(autouse=True)
+def _fresh_bounded_worker():
+    """每个用例前后重置 auth 的有界 worker (P2-10 单例 worker).
+
+    本文件有"原生调用挂死"的用例: 旧实现每次超时丢弃一个线程, 互不影响;
+    单例 worker 下挂死会阻塞后续调用, 因此用 _reset_bounded_worker 换一个新
+    worker (先 release 卡住的原生调用, 旧线程自行退出).
+    """
+    auth._reset_bounded_worker()
+    yield
+    auth._reset_bounded_worker()
 
 
 # ---------------------------------------------------------------------------
@@ -213,14 +227,20 @@ def test_win_purge_gives_up_when_clear_hangs(win_platform, monkeypatch):
     """clear_cookies 内部是 Control.Invoke: UI 线程被占住时超时放弃, 不挂住调用方."""
 
     monkeypatch.setattr(auth, "COOKIE_PURGE_TIMEOUT", 0.1)
+    release = threading.Event()
 
     class _StuckWin(_FakeWin):
         def clear_cookies(self) -> None:
-            time.sleep(30)
+            release.wait(30)  # 模拟 Control.Invoke 不返回
 
-    started = time.monotonic()
-    assert auth.clear_provider_cookies("opencode", _StuckWin()) == 0
-    assert time.monotonic() - started < 5.0, "超时没生效, 调用线程被挂住"
+    try:
+        started = time.monotonic()
+        assert auth.clear_provider_cookies("opencode", _StuckWin()) == 0
+        assert time.monotonic() - started < 5.0, "超时没生效, 调用线程被挂住"
+    finally:
+        release.set()  # 放掉有界 worker 里的原生等待 (单例 worker, P2-10)
+
+
 def test_win_purge_skips_when_no_window_and_none_alive(win_platform):
     """窗口已销毁且无其它存活窗口时安全返回 0 (由指纹比对兜底)."""
     assert auth.clear_provider_cookies("opencode", None) == 0
@@ -264,14 +284,18 @@ def test_win_read_baseline_none_when_store_empty(win_platform):
 def test_win_read_baseline_none_when_read_hangs(win_platform, monkeypatch):
     """窗口未就绪 (pywebview 的 get_cookies 挂住) 时返回 None, 让库内旧凭证指纹兜底."""
     monkeypatch.setattr(auth, "COOKIE_READ_TIMEOUT", 0.1)
+    release = threading.Event()
 
     class _StuckWin(_FakeWin):
         def get_cookies(self):
-            time.sleep(30)
+            release.wait(30)  # 模拟无超时信号量
 
-    started = time.monotonic()
-    assert auth.read_provider_cookie(_StuckWin(), "opencode") is None
-    assert time.monotonic() - started < 5.0, "超时没生效, 基线采集把登录卡住"
+    try:
+        started = time.monotonic()
+        assert auth.read_provider_cookie(_StuckWin(), "opencode") is None
+        assert time.monotonic() - started < 5.0, "超时没生效, 基线采集把登录卡住"
+    finally:
+        release.set()  # 放掉有界 worker 里的原生等待 (单例 worker, P2-10)
 
 
 def test_win_baseline_feeds_stale_detection(win_platform, monkeypatch):
@@ -335,6 +359,10 @@ def test_win_watcher_survives_hanging_cookie_read(win_platform, monkeypatch):
     pywebview 的 get_cookies 在 WebView2 上内部用无超时信号量 (导航竞态下
     GetCookiesAsync 收到 null URL 后信号量不再释放): 监听线程一挂, 单飞守卫
     就再也不释放, 用户再点登录被静默吞掉. 读取必须带超时.
+
+    单例 worker 语义 (P2-10): 挂住期间后续读取快速返回 None (不再新建线程),
+    但监听线程本身必须继续按轮询节奏推进 (单飞守卫不会卡死); 原生调用恢复后
+    下一轮读到新凭证, 登录仍能完成.
     """
     monkeypatch.setattr(auth, "COOKIE_POLL_SEC", 0.02)
     monkeypatch.setattr(auth, "COOKIE_READ_TIMEOUT", 0.05)
@@ -342,11 +370,12 @@ def test_win_watcher_survives_hanging_cookie_read(win_platform, monkeypatch):
     win_platform.setattr(auth.webview, "windows", [win])
 
     calls = {"n": 0}
+    release = threading.Event()
 
     def flaky_get_cookies():
         calls["n"] += 1
         if calls["n"] == 1:
-            time.sleep(30)  # 第一次调用挂住
+            release.wait(30)  # 第一次调用挂住, 直到测试显式放行
         return [{"name": auth.CC_AUTH_COOKIE_NAME, "value": "FRESHSESSION"}]
 
     win.get_cookies = flaky_get_cookies
@@ -354,9 +383,21 @@ def test_win_watcher_survives_hanging_cookie_read(win_platform, monkeypatch):
     watcher = auth.LoginWatcher(win, "commandcode", lambda *a: seen.append(a))
     watcher.start()
     try:
-        assert _wait_until(lambda: bool(seen), timeout=6.0), "挂死一次后监听线程必须继续轮询"
+        # 挂住期间监听线程仍在推进 (tick 持续更新), 不会变成僵尸
+        first_tick = watcher._last_tick
+        assert _wait_until(lambda: watcher._last_tick != first_tick, timeout=2.0), (
+            "原生调用挂住后监听线程停止推进 (僵尸化)"
+        )
+        assert calls["n"] == 1, "单例 worker 忙碌时不应再发起新的原生调用"
+        assert watcher.seconds_since_tick() < 5.0, "监听线程 tick 停滞"
+
+        release.set()  # 模拟 UI 线程恢复: 挂住的原生调用返回
+        assert _wait_until(lambda: bool(seen), timeout=6.0), (
+            "原生调用恢复后监听线程必须继续轮询并捕获凭证"
+        )
     finally:
         watcher.stop()
+        release.set()
 
 
 # ---------------------------------------------------------------------------

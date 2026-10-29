@@ -20,10 +20,13 @@ from app.db import PROVIDER_COMMANDCODE
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
-    db._DB = None
+    # 真实复位 (db 没有 _DB 属性)
+    db._schema_init_path = None
+    db._invalidate_payload_cache()
     db._invalidate_cred_cache()  # 进程级凭证缓存跨测试共享, 换库必须清
     yield tmp_path
     db.close_db()
+    db._schema_init_path = None
 
 
 def _fmt(dt: datetime) -> str:
@@ -153,8 +156,9 @@ class TestChartsRangeParity:
 
     def _seed_boundary_day(self, aid: int) -> int:
         """在窗口最早的本地日塞入"半天"数据, 返回该日两条桶的请求数之和."""
+        # "30d" = 恰好 30 个日历日 (今天-29 … 今天, I10), 最早一天取 -29
         earliest = db.get_db().execute(
-            "SELECT date('now', 'localtime', '-30 days') AS d"
+            "SELECT date('now', 'localtime', '-29 days') AS d"
         ).fetchone()["d"]
         db.insert_usage_charts(
             [
@@ -236,3 +240,73 @@ class TestLocalDateDerivation:
             "SELECT local_date FROM usage_records WHERE usg_id = 'legacy'"
         ).fetchone()
         assert row["local_date"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 4. charts / 明细四路一致 (P1-5): 空窗口也要同口径, 不能 totals 单独回退明细
+# ---------------------------------------------------------------------------
+
+
+class TestChartsEmptyWindowConsistency:
+    """charts 空窗口口径统一 (P1-5).
+
+    回归: 窗口内 usage_charts 没有行时 totals() 的 SUM 返回 NULL, 旧实现继续
+    回退明细表, 而 model_stats/daily_stats/today_trend 走 charts 直接返回空 ——
+    同一 dashboard 内"今日请求 1 / 费用 $0.5"配上全 0 的模型图/趋势图.
+    """
+
+    def test_empty_charts_window_returns_zeros_everywhere(self, tmp_db):
+        aid = _use_commandcode()
+        # charts 只有昨天一行; 明细表另有一条今天的记录 (旧实现会用它回退)
+        yesterday = db.get_db().execute(
+            "SELECT date('now', 'localtime', '-1 day') AS d"
+        ).fetchone()["d"]
+        db.insert_usage_charts(
+            [_chart(_local_to_utc(f"{yesterday} 12:00:00"), requests=5)], aid
+        )
+        db.insert_usage_records(
+            [_rec("detail-today", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))],
+            aid,
+        )
+        assert db._use_charts_stats(aid)
+
+        totals = db.totals("today", aid)
+        assert totals["request_count"] == 0
+        assert totals["total_cost_usd"] == 0.0
+        assert totals["total_input_tokens"] == 0
+        # 三路 charts 聚合同样为 0 (与 totals 同口径)
+        assert sum(m["request_count"] for m in db.model_stats("today", aid)) == 0
+        assert sum(d["request_count"] for d in db.daily_stats(1, aid)) == 0
+        assert sum(
+            t["input"] + t["cache_read"] + t["cache_write"] + t["output"] + t["reasoning"]
+            for t in db.today_trend(aid)
+        ) == 0
+
+    @pytest.mark.parametrize("period", ["today", "7d", "30d", "month", "all"])
+    def test_four_way_parity_nonempty(self, tmp_db, period):
+        """非空窗口: totals == Σ model_stats == Σ daily_stats (Nd) / today_trend (today)."""
+        aid = _use_commandcode()
+        now = datetime.now(timezone.utc)
+        rows = []
+        for days_ago, hours in ((0, 2), (1, 5), (10, 3), (40, 4)):
+            bucket = (now - timedelta(days=days_ago, hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+            rows.append(_chart(bucket, requests=days_ago + 1))
+        db.insert_usage_charts(rows, aid)
+        assert db._use_charts_stats(aid)
+
+        totals = db.totals(period, aid)
+        model_sum = sum(m["request_count"] for m in db.model_stats(period, aid))
+        assert model_sum == totals["request_count"]
+        if period == "today":
+            trend_sum = sum(
+                t["input"] + t["cache_read"] + t["cache_write"] + t["output"] + t["reasoning"]
+                for t in db.today_trend(aid)
+            )
+            assert trend_sum == (
+                totals["total_input_tokens"] + totals["total_output_tokens"]
+                + totals["total_reasoning_tokens"]
+            )
+        if period.endswith("d"):
+            assert sum(d["request_count"] for d in db.daily_stats(int(period[:-1]), aid)) == totals[
+                "request_count"
+            ]

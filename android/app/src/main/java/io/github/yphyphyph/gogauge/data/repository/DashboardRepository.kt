@@ -1,5 +1,6 @@
 package io.github.yphyphyph.gogauge.data.repository
 
+import androidx.room.withTransaction
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
 import io.github.yphyphyph.gogauge.data.model.PROVIDER_COMMANDCODE
 import io.github.yphyphyph.gogauge.data.model.PROVIDER_OPENCODE
@@ -47,8 +48,22 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.time.format.DateTimeFormatter
 
-/** 「按同步范围清理」预演结果 (desktop db.prune_preview 返回体 parity)。 */
-data class PrunePreview(val windowDays: Int, val cutoff: String, val count: Int)
+/**
+ * 「按同步范围清理」预演结果 (desktop db.prune_preview 返回体 parity)。
+ *
+ * @param count 明细记录 (usage_records) 待删条数
+ * @param chartsCount GOAT 聚合桶 (usage_charts) 待删条数 — desktop P2-7: charts 是
+ *   统计主口径, 只删明细会出现「清理完成但 totals 仍含历史」
+ */
+data class PrunePreview(
+    val windowDays: Int,
+    val cutoff: String,
+    val count: Int,
+    val chartsCount: Int = 0,
+) {
+    /** 合计待删条数 (UI 文案用)。 */
+    val total: Int get() = count + chartsCount
+}
 
 /** Sync outcome — mirrors server.py sync_usage return dict. */
 data class SyncResult(
@@ -423,8 +438,14 @@ class DashboardRepository(
     /**
      * @param excludeModels 排除的模型 (统计页图例交互): totals/daily/trend 按排除后重聚合,
      *   models 恒为全量 (环形图需保留被排除模型以便图例点击加回 — desktop v2.2.0 parity).
+     * @param peakSplit 峰谷分档 (desktop v2.2.2): 只有**统计页**传 true —— 首页模型构成
+     *   保持整条 (desktop server.py: 首页请求不带 peak_split, 统计页带 peak_split=1).
      */
-    suspend fun loadDashboard(range: String, excludeModels: Set<String> = emptySet()): DashboardData {
+    suspend fun loadDashboard(
+        range: String,
+        excludeModels: Set<String> = emptySet(),
+        peakSplit: Boolean = false,
+    ): DashboardData {
         val aid = activeAccountId()
         val token = syncDao.getTokenFor(aid)
         val quota = if (token.isNotEmpty()) _quota.value else null
@@ -457,7 +478,10 @@ class DashboardRepository(
             val dailyDeferred = async { if (chartsFirst) chartDao.dailyStats(7, aid, excluded) else usageDao.dailyStats(7, aid, excluded) }
             val trendDeferred = async { if (chartsFirst) chartDao.dailyStats(30, aid, excluded) else usageDao.dailyStats(30, aid, excluded) }
             val todayTrendDeferred = async { if (chartsFirst) chartDao.todayTrend(aid) else usageDao.todayTrend(aid) }
-            val modelsDeferred = async { if (chartsFirst) chartDao.modelStats(range, aid, cycleStart) else usageDao.modelStats(range, aid, cycleStart) }
+            val modelsDeferred = async {
+                if (chartsFirst) chartDao.modelStats(range, aid, cycleStart, peakSplit)
+                else usageDao.modelStats(range, aid, cycleStart, peakSplit)
+            }
             val syncDeferred = async {
                 // GOAT 账号附全周期聚合请求数 (明细接口仅 24h/100 条, desktop parity)
                 val st = syncDao.getSyncStateFor(aid)
@@ -479,6 +503,7 @@ class DashboardRepository(
                 usdCny = usdCnyDeferred.await(),
                 serverTime = now,
                 excluded = excluded,
+                peakSplit = peakSplit,
             )
         }
     }
@@ -551,13 +576,17 @@ class DashboardRepository(
         val aid = activeAccountId()
         if (aid == 0) return ModelTrendData(emptyList(), emptyList())
         val clamped = days.coerceIn(1, 365)
+        // 峰谷分档恒按设置 (desktop /api/model_trend: peak_split = db.peak_split_enabled());
+        // 该图只在统计页出现, 首页模型构成走 loadDashboard 的 models (不受开关影响)
+        val peakSplit = db.settingsDao().getSettings().dsPeakSplit
         val rows = if (syncDao.getAccountProvider(aid) == PROVIDER_COMMANDCODE && chartDao.chartsReady(aid) != null) {
-            chartDao.modelDailyStatsRows(clamped, aid)
+            chartDao.modelDailyStatsRows(clamped, aid, peakSplit)
         } else {
-            usageDao.modelDailyStatsRows(clamped, aid)
+            usageDao.modelDailyStatsRows(clamped, aid, peakSplit)
         }
         val today = java.time.LocalDate.now()
-        val dayList = (clamped downTo 0).map { today.minusDays(it.toLong()).toString() }
+        // 恰好 clamped 个连续日期 (今天-clamped+1 … 今天), 与「N 日」文案同源 (I10)
+        val dayList = ((clamped - 1) downTo 0).map { today.minusDays(it.toLong()).toString() }
         val idx = dayList.withIndex().associate { (i, d) -> d to i }
         val series = LinkedHashMap<String, Triple<LongArray, LongArray, DoubleArray>>()
         rows.forEach { r ->
@@ -1098,17 +1127,30 @@ class DashboardRepository(
     suspend fun prunePreview(): PrunePreview? {
         val wd = db.settingsDao().getSettings().windowDays ?: return null
         val cutoff = usageDao.pruneCutoff("-${wd} days")
-        return PrunePreview(windowDays = wd, cutoff = cutoff, count = usageDao.prunePreviewCount(cutoff))
+        return PrunePreview(
+            windowDays = wd,
+            cutoff = cutoff,
+            count = usageDao.prunePreviewCount(cutoff),
+            // charts 与明细同一 local_date 边界 (desktop prune_preview 双表统计 parity)
+            chartsCount = chartDao.prunePreviewCount(cutoff),
+        )
     }
 
     /**
      * 按同步范围清理**所有账号**的过期记录 (desktop db.prune_expired parity)。
      * 删除不可恢复, 调用方负责二次确认; 删除后回填同步状态的总数/最老最新。
+     *
+     * 明细与聚合表**同一事务**删除 (P2-7): GOAT 账号的统计主口径在 usage_charts,
+     * 只删明细会让「已清理 N 条」之后 totals("all") 仍含历史, 且 charts 跨周期累积。
+     *
+     * @return 实际删除条数 (明细 + 聚合桶)
      */
     suspend fun pruneExpired(): Int {
         val wd = db.settingsDao().getSettings().windowDays ?: return 0
         val cutoff = usageDao.pruneCutoff("-${wd} days")
-        val deleted = usageDao.pruneExpiredAll(cutoff)
+        val deleted = db.withTransaction {
+            usageDao.pruneExpiredAll(cutoff) + chartDao.pruneExpiredAll(cutoff)
+        }
         if (deleted > 0) {
             for (acc in syncDao.listAccounts()) {
                 syncDao.refreshSyncTotals(acc.id)

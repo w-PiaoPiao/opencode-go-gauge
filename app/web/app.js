@@ -70,10 +70,10 @@ const I18N = {
     dUnit: "天", hUnit: "小时", mUnit: "分钟",
     confirm: "确认", cancel: "取消", ok: "确定",
     fullSyncConfirm: "将重新拉取历史记录（按同步范围），确定开始？", startSync: "开始同步",
-    pruneConfirm: "将删除本地 %1 天前（早于 %2）的 %3 条记录，删除后不可恢复，确定继续？",
+    pruneConfirm: "将删除本地 %1 天前（早于 %2）的 %3 条用量记录、%4 条聚合图表，删除后不可恢复，确定继续？",
     pruneNone: "同步范围为「所有」，本地数据不受限制，无需清理",
     pruneEmpty: "同步范围内没有需要清理的记录",
-    pruneDone: "已清理 %1 条本地记录", pruneFailed: "清理失败，请重试",
+    pruneDone: "已清理 %1 条用量记录、%2 条聚合图表", pruneFailed: "清理失败，请重试",
               quotaFail: "配额获取失败", retryTip: "点击右上角刷新重试",
     syncIntervalSet: "同步间隔已设为", syncRangeUpdated: "同步范围已更新（只影响取数，不删本地数据）",
     trendHint: "30 天",     setUsers: "用户管理", addUser: "添加 OpenCode 账号", addGoatUser: "添加 GOAT 账号",     provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
@@ -109,7 +109,14 @@ const I18N = {
     exportBackup: "导出 JSON 备份", exportBackupDesc: "账号（不含凭证）与全部用量记录打包 (.json.gz)，与移动端互通",
     importBackup: "导入备份", importBackupDesc: "从 JSON 备份合并数据；凭证不可迁移，恢复后需重新登录",
     exportDone: "已导出", exportFailed: "导出失败", importDone: "导入完成，新增 %1 条记录",
-    needDesktopApp: "需要在桌面客户端中使用",   },
+    needDesktopApp: "需要在桌面客户端中使用",
+    /* v2.2.3 审查修复新增: 侧边栏/窗口按钮 title、记录表「缓存写」列、
+       同步状态文案、设置保存失败提示 (P3-14/P3-15/P3-16) */
+    navHome: "首页", navStats: "用量统计", navRecords: "使用记录", navOverview: "账户总览", navSettings: "设置", navAbout: "关于",
+    themeTip: "切换主题", winMinimize: "最小化", winClose: "关闭",
+    colCacheWrite: "缓存写", cacheWriteDesc: "新写入缓存",
+    syncOk: "同步成功", syncError: "同步失败", syncPartial: "部分成功",
+    saveFailed: "保存失败，请重试", syncFailed: "同步失败",   },
   en: {
     syncing: "Syncing", themeDark: "Dark", themeLight: "Light", refresh: "Refresh",
     homeTitle: "Usage Overview", today: "Today", d7: "7 Days", d30: "30 Days", month: "This Cycle", all: "All",
@@ -177,10 +184,10 @@ const I18N = {
     dUnit: "d", hUnit: "h", mUnit: "m",
     confirm: "Confirm", cancel: "Cancel", ok: "OK",
     fullSyncConfirm: "This will re-fetch all history records (per sync range). Continue?", startSync: "Start Sync",
-    pruneConfirm: "Delete %3 local records older than %1 days (before %2)? This cannot be undone.",
+    pruneConfirm: "Delete %3 local usage records and %4 aggregated chart rows older than %1 days (before %2)? This cannot be undone.",
     pruneNone: "Sync range is \"All\" — local data is unlimited, nothing to purge",
     pruneEmpty: "Nothing to purge within the current sync range",
-    pruneDone: "Purged %1 local records", pruneFailed: "Purge failed, please retry",
+    pruneDone: "Purged %1 usage records and %2 chart rows", pruneFailed: "Purge failed, please retry",
               quotaFail: "Quota fetch failed", retryTip: "Click refresh in top bar to retry",
     syncIntervalSet: "Sync interval set to", syncRangeUpdated: "Sync range updated (fetch depth only, local data untouched)",
     trendHint: "30 days",     setUsers: "User Management", addUser: "Add OpenCode account", addGoatUser: "Add GOAT account",     provOpencode: "OpenCode", provGoat: "Command Code GOAT", provTagOpencode: "GO", provTagGoat: "GOAT",
@@ -216,7 +223,12 @@ const I18N = {
     exportBackup: "Export JSON Backup", exportBackupDesc: "Pack accounts (no tokens) and all usage records (.json.gz), interchangeable with mobile",
     importBackup: "Import Backup", importBackupDesc: "Merge data from a JSON backup; tokens can't migrate — re-login after restore",
     exportDone: "Exported", exportFailed: "Export failed", importDone: "Imported, %1 new records",
-    needDesktopApp: "Available in the desktop client only",   },
+    needDesktopApp: "Available in the desktop client only",
+    navHome: "Home", navStats: "Stats", navRecords: "Records", navOverview: "Accounts Overview", navSettings: "Settings", navAbout: "About",
+    themeTip: "Toggle theme", winMinimize: "Minimize", winClose: "Close",
+    colCacheWrite: "Cache Write", cacheWriteDesc: "new cache writes",
+    syncOk: "Synced", syncError: "Sync failed", syncPartial: "Partially synced",
+    saveFailed: "Failed to save, please retry", syncFailed: "Sync failed",   },
 };
 let lang = "zh";
 function t(key) { return (I18N[lang] && I18N[lang][key]) || I18N.zh[key] || key; }
@@ -237,10 +249,14 @@ let state = {
   ovRetryTimer: null,
   // 统计页环形图图例点击排除的模型: 顶部总卡/Token 构成/排行/趋势全部联动排除
   excludedModels: new Set(),
-  records: { page: 1, pageSize: 7, total: 0, model: "" },
-  sessions: { page: 1, pageSize: 7, total: 0 },
+  records: { page: 1, total: 0, model: "" },
+  sessions: { page: 1, total: 0 },
   settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true },
+  // I4: 从 URL fragment 读取的本地 HTTP token (仅驻内存; 所有 /api 请求带 X-GoGauge-Token)
+  authToken: "",
 };
+/* 分页大小单一来源: 请求 page_size / totalPages / 补空行都用它, 避免 7 这个魔法数漂移 */
+const PAGE_SIZE = 7;
 const COLOR = { input: "#4f8ef7", output: "#22c55e", reasoning: "#a78bfa", cache: "#06b6d4", cost: "#d97706" };
 /* 模型环形图 / 堆叠趋势图共享配色: 同一模型在两图中同色 (第 6 槽粉红为扩展位) */
 const MODEL_PALETTE = [COLOR.input, COLOR.output, COLOR.reasoning, COLOR.cache, COLOR.cost, "#ec4899"];
@@ -258,6 +274,7 @@ const CHART_ANIM_DEFAULTS = window.Chart ? Chart.defaults.animation : null;
 function applyChartAnimation(on) {
   if (!window.Chart) return;
   Chart.defaults.animation = on ? CHART_ANIM_DEFAULTS : false;
+  renderGen += 1;  // 图表创建参数变了: 缓存命中路径也要重建图表 (P3-13)
 }
 const QUOTA_LABEL = { "5h Rolling": () => t("rolling"), "Weekly": () => t("weekly"), "Monthly": () => t("monthly") };
 /* 窗口标签来自远端配额 API, 属不可信输入. 未命中已知键时回退原值, 必须先转义
@@ -267,11 +284,14 @@ function quotaLabel(label) {
   return known ? known() : escapeHtml(label);
 }
 /* ---------------- 格式化 ---------------- */
+/* Token 简写. 阈值取「四舍五入后会进位到下一档」的边界 (999.95k / 999.95M),
+   否则 999999 会显示成 "1000.0k"、999999999 显示成 "1000.00M" (P3-14) */
 function fmtTokens(n) {
   n = Number(n) || 0;
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  const a = Math.abs(n);
+  if (a >= 999.95e6) return (n / 1e9).toFixed(2) + "B";
+  if (a >= 999.95e3) return (n / 1e6).toFixed(2) + "M";
+  if (a >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(Math.round(n));
 }
 function fmtInt(n) { return Number(n || 0).toLocaleString("en-US"); }
@@ -322,26 +342,41 @@ function fmtRelative(iso) {
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
+/* 同步状态枚举 → i18n 文案 (服务端返回 ok/error/partial; 未知值原样展示, 不漏文案) */
+const SYNC_STATUS_KEYS = { ok: "syncOk", error: "syncError", partial: "syncPartial" };
+function syncStatusText(status) {
+  if (!status) return "";
+  const key = SYNC_STATUS_KEYS[status];
+  return key ? t(key) : String(status);
+}
 /* ---------------- API ---------------- */
 const API_TIMEOUT_MS = 15000;  // 本地服务异常时避免永久"加载中"
+/* I4: 本地 HTTP token. main.py 通过 URL fragment 传入, init 时读出后立刻清 hash;
+   只驻内存. 所有请求统一带 X-GoGauge-Token (静态资源由服务端放行, 不校验). */
 async function api(path, opts = {}) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  // opts.timeout: 单请求超时覆盖 (I5 异步更新检查等后端可能跑几十秒的接口用)
+  const timeoutMs = Number(opts.timeout) > 0 ? Number(opts.timeout) : API_TIMEOUT_MS;
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   // 可选外部取消信号 (opts.signal): 与超时共用同一个 fetch 信号; 外部取消与超时
   // 都抛 AbortError, 用 err.cancelled 区分 —— 外部取消要静默 (不弹 toast)
   const ext = opts.signal;
-  const { signal: _sig, ...rest } = opts;
+  const { signal: _sig, timeout: _timeout, headers: optHeaders, ...rest } = opts;
+  const headers = { "Content-Type": "application/json", ...(optHeaders || {}) };
+  if (state.authToken) headers["X-GoGauge-Token"] = state.authToken;
   const onAbort = () => ctrl.abort();
   if (ext) {
     if (ext.aborted) ctrl.abort();
     else ext.addEventListener("abort", onAbort, { once: true });
   }
   try {
-    const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...rest, signal: ctrl.signal });
+    const resp = await fetch(path, { ...rest, headers, signal: ctrl.signal });
     if (!resp.ok) {
       let msg = "HTTP " + resp.status;
       try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch (e) { /* 无 body 或非 JSON 时保持默认 */ }
-      throw new Error(msg);
+      const httpErr = new Error(msg);
+      httpErr.status = resp.status;  // 调用方据此区分 404/409 等语义 (如 I5 旧服务端回退)
+      throw httpErr;
     }
     return await resp.json();
   } catch (e) {
@@ -378,6 +413,7 @@ function applyLang(l) {
     el.title = t(el.dataset.i18nTitle);
   });
   document.querySelectorAll("#set-lang-pills .pill").forEach((b) => b.classList.toggle("active", b.dataset.v === lang));
+  renderGen += 1;  // 图表图例/提示文案随语言变: 缓存命中路径也要重建图表 (P3-13)
   // 版本号: 唯一来源为后端 /api/version (app/__init__.py), 前端动态获取
   const ver = APP_VERSION ? "v" + APP_VERSION : "GoGauge";
   document.getElementById("about-sub").textContent = `${ver} · OpenCode Go Usage Panel`;
@@ -393,9 +429,29 @@ function applyLang(l) {
     loadSessions().catch(() => {});  // 会话表含 t("unassigned") 等动态文案, 也要重渲染
   }
 }
+/* ---------------- 弹框焦点管理 (P3-15) ---------------- */
+/* 弹窗打开时记住触发元素, 焦点移入弹窗, Tab 在弹窗内循环, Esc 关闭, 关闭后归还焦点.
+   aria-modal 只有在焦点真的被限制在弹窗内时才成立, 否则键盘用户会 Tab 到遮罩后面. */
+function modalFocusables(root) {
+  return Array.from(root.querySelectorAll("button, input, textarea, select, a[href]"))
+    .filter((el) => !el.hidden && !el.disabled && el.offsetParent !== null);
+}
+function trapModalTab(e, root) {
+  const list = modalFocusables(root);
+  if (!list.length) return;
+  const first = list[0], last = list[list.length - 1];
+  const cur = document.activeElement;
+  if (e.shiftKey) {
+    if (cur === first || !root.contains(cur)) { e.preventDefault(); last.focus(); }
+  } else if (cur === last || !root.contains(cur)) { e.preventDefault(); first.focus(); }
+}
+function restoreFocus(el) {
+  if (el && typeof el.focus === "function") { try { el.focus(); } catch (e) { /* ignore */ } }
+}
 /* ---------------- 弹框 / Toast ---------------- */
 function showModal({ title = t("confirm"), message = "", okText = t("ok"), cancelText = t("cancel"), danger = false, onOk }) {
   const overlay = $("modal-overlay");
+  const prevFocus = document.activeElement;
   $("modal-title").textContent = title;
   $("modal-message").innerHTML = message;
   $("modal-ok").textContent = okText;
@@ -405,15 +461,25 @@ function showModal({ title = t("confirm"), message = "", okText = t("ok"), cance
   icon.className = "modal-icon" + (danger ? " danger" : "");
   icon.textContent = danger ? "⚠" : "?";
   overlay.hidden = false;
+  let closed = false;
   const cleanup = () => {
+    if (closed) return;
+    closed = true;
     overlay.hidden = true;
     $("modal-ok").onclick = null;
     $("modal-cancel").onclick = null;
     document.removeEventListener("keydown", onKey);
+    restoreFocus(prevFocus);
   };
   const cancel = () => { cleanup(); };
-  const onKey = (e) => { if (e.key === "Escape") cancel(); };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); cancel(); return; }
+    if (e.key === "Tab") trapModalTab(e, overlay);
+  };
   document.addEventListener("keydown", onKey);
+  // 初始焦点: 危险操作落「取消」(防误触 Enter), 其余落主按钮 (改名 input 会在返回后自行聚焦)
+  const firstBtn = danger ? $("modal-cancel") : $("modal-ok");
+  (firstBtn.hidden ? (modalFocusables(overlay)[0] || firstBtn) : firstBtn).focus();
   $("modal-ok").onclick = () => { cleanup(); onOk && onOk(); };
   $("modal-cancel").onclick = cancel;
 }
@@ -493,6 +559,7 @@ function applyDarkMode(on) {
   document.documentElement.dataset.theme = on ? "dark" : "light";
   $("tb-theme").innerHTML = `◐ <span data-i18n="${on ? "themeLight" : "themeDark"}">${on ? t("themeLight") : t("themeDark")}</span>`;
   try { localStorage.setItem("gousage-dark", on ? "1" : "0"); } catch (e) { /* ignore */ }
+  renderGen += 1;  // 图表坐标/图例颜色在创建时固化, 主题变了缓存命中路径也要重建 (P3-13)
   syncThemePills();
   rerenderCharts();  // 统一重绘首页+统计页图表 (勿在此重复创建统计页图表)
 }
@@ -504,6 +571,7 @@ function applyCurrency(cur) {
   document.querySelectorAll("#set-currency-pills .pill").forEach((b) => b.classList.toggle("active", b.dataset.v === cur));
   try { localStorage.setItem("gousage-currency", cur); } catch (e) { /* ignore */ }
   if (!state.data) return;
+  renderGen += 1;  // 金额轴/提示框货币变了: 缓存命中路径也要重建图表 (P3-13)
   rerenderCharts();
   renderOverview(state.data.totals);
   renderStatsTotal(state.data.totals);
@@ -544,7 +612,11 @@ const DASH_REUSE_MS = 5000;  // 同口径复用窗口 (数据只在同步成功�
 const DASH_CACHE_MAX = 8;  // 客户端复用条目上限 (账号/口径/排除集组合也不至于无界)
 const dashCache = new Map();  // dashboardQuery() -> {at, data}: 最近成功的同口径响应
 let dashInflight = null;  // 在途 dashboard 请求控制器: 口径变化时取消, 不再白等/白渲染
-let dashRendered = { page: "", key: "" };  // 已渲染到界面上的 (页面, 口径)
+let dashRendered = { page: "", key: "", gen: -1 };  // 已渲染到界面上的 (页面, 口径, 渲染配置世代)
+/* P3-13: 渲染配置世代. 图表配色/文本/尺寸在创建时固化, 主题/语言/货币/动画/窗口尺寸
+   变化后必须让「缓存命中 + 已渲染」快路径重建图表, 因此把世代计数也纳入缓存键.
+   applyDarkMode / applyLang / applyCurrency / applyChartAnimation / resize 里 ++ */
+let renderGen = 0;
 /* dashboard 查询串: 统计页携带模型排除项 (环形图图例点击 → 全局联动), 其他页不带。
    峰谷分档同理只在统计页生效: 首页的模型构成保持整条, 开关仍由服务端把关。 */
 function dashboardQuery() {
@@ -558,9 +630,11 @@ function dashboardQuery() {
 }
 /* 缓存内容是否已经渲染到当前页面: renderAll 只重建**可见页面**的图表
    (隐藏页 canvas 尺寸为 0), 所以「页面」也是渲染态的一部分 —— 首页↔统计页同口径
-   切换必须用缓存补渲染, 否则统计页图表不会建出来 */
+   切换必须用缓存补渲染, 否则统计页图表不会建出来.
+   渲染配置世代 (主题/语言/货币/动画/视口) 也参与比较: 变了就要重建图表, 否则旧颜色/
+   旧文案/旧像素尺寸会一直留到下一次 force 渲染 (P3-13). */
 function dashRenderedNow(key) {
-  return dashRendered.page === state.page && dashRendered.key === key;
+  return dashRendered.page === state.page && dashRendered.key === key && dashRendered.gen === renderGen;
 }
 /* 返回 true=已渲染 / false=请求失败 / undefined=被更新的请求取代 */
 async function loadDashboard(quiet = false, force = false) {
@@ -579,7 +653,7 @@ async function loadDashboard(quiet = false, force = false) {
   if (hit && !dashInflight) {
     if (!dashRenderedNow(key)) {
       renderAll(hit.data);  // 口径/页面变了没发请求: 用缓存补渲染, 界面与口径保持一致
-      dashRendered = { page: state.page, key };
+      dashRendered = { page: state.page, key, gen: renderGen };
     }
     showLoading(false);
     return true;
@@ -595,7 +669,7 @@ async function loadDashboard(quiet = false, force = false) {
     if (seq !== loadSeq) return undefined;
     dashCache.set(key, { at: Date.now(), data });
     while (dashCache.size > DASH_CACHE_MAX) dashCache.delete(dashCache.keys().next().value);
-    dashRendered = { page: state.page, key };
+    dashRendered = { page: state.page, key, gen: renderGen };
     renderAll(data);
     showLoading(false);
     return true;
@@ -724,7 +798,7 @@ function renderDetail6(totals) {
     { l: t("output"), v: fmtTokens(totals.total_output_tokens), s: t("output") },
     { l: t("colReasoning"), v: fmtTokens(totals.total_reasoning_tokens), s: total ? ((totals.total_reasoning_tokens / total) * 100).toFixed(1) + "%" : "0%" },
     { l: t("colCacheRead"), v: fmtTokens(totals.cache_hit_tokens), s: `${t("hitRate")} ${totals.hit_rate.toFixed(1)}%` },
-    { l: lang === "zh" ? "缓存写" : "Cache Write", v: fmtTokens(totals.cache_write_tokens), s: lang === "zh" ? "新写入缓存" : "new cache writes" },
+    { l: t("colCacheWrite"), v: fmtTokens(totals.cache_write_tokens), s: t("cacheWriteDesc") },
     { l: t("sessions"), v: fmtInt(totals.session_count), s: t("dedup") },
   ];
   $("stats-detail6").innerHTML = cards.map((c) => `
@@ -1108,10 +1182,13 @@ async function loadSessions() {
   const seq = ++sesSeq;
   const body = $("sessions-body");
   try {
-    const q = new URLSearchParams({ page: state.sessions.page, page_size: 7 });
+    const q = new URLSearchParams({ page: state.sessions.page, page_size: PAGE_SIZE });
     const data = await api(`/api/usage/sessions?${q}`);
     if (seq !== sesSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
     state.sessions.total = data.total;
+    const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    // 页码夹紧 (P2-12): 账号切换/数据变少后旧页码可能越过末页, 回退到末页重拉
+    if (state.sessions.page > totalPages) { state.sessions.page = totalPages; return loadSessions(); }
     $("ses-count").textContent = `${t("totalN")} ${fmtInt(data.total)} ${t("sessions")}`;
     if (!data.records.length) {
       body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">${t("noData")}</td></tr>`;
@@ -1122,18 +1199,17 @@ async function loadSessions() {
           ? `<td title="${escapeHtml(s.session_id)}">${escapeHtml(shortId(s.session_id))}</td>`
           : `<td class="unassigned">${t("unassigned")}</td>`}
         <td>${fmtDateTime(s.last_at)}</td>
-        <td class="num">${fmtTokens(s.total_input_tokens)}</td>
+        <td class="num">${fmtTokens(s.uncached_input_tokens)}</td>
         <td class="num">${fmtTokens(s.total_output_tokens)}</td>
         <td class="num">${fmtTokens(s.total_reasoning_tokens)}</td>
         <td class="num">${fmtInt(s.request_count)} / ${fmtTokens(s.total_input_tokens + s.total_output_tokens + s.total_reasoning_tokens)}</td>
         <td class="num">${fmtMoney(s.total_cost_usd)}</td></tr>`).join("");
       // 固定 7 行, 不足补空行
-      if (data.records.length < 7) {
-        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(8) + '</tr>').repeat(7 - data.records.length);
+      if (data.records.length < PAGE_SIZE) {
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(8) + '</tr>').repeat(PAGE_SIZE - data.records.length);
       }
       body.innerHTML = html;
     }
-    const totalPages = Math.max(1, Math.ceil(data.total / 7));
     $("ses-pager").textContent = `${t("pageOf")} ${state.sessions.page} ${t("ofPages")} ${totalPages}`;
     $("ses-prev").disabled = state.sessions.page <= 1;
     $("ses-next").disabled = state.sessions.page >= totalPages;
@@ -1155,18 +1231,27 @@ async function loadRecords() {
   const seq = ++recSeq;
   const body = $("records-body");
   try {
-    const q = new URLSearchParams({ page: state.records.page, page_size: 7 });
+    const q = new URLSearchParams({ page: state.records.page, page_size: PAGE_SIZE });
     if (state.records.model) q.set("model", state.records.model);
     const data = await api(`/api/usage/records?${q}`);
     if (seq !== recSeq) return; // 丢弃过期响应 (快速切页/翻页时旧请求)
     state.records.total = data.total;
+    const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    // 页码夹紧 (P2-12): 账号切换/数据变少后旧页码可能越过末页, 回退到末页重拉
+    if (state.records.page > totalPages) { state.records.page = totalPages; return loadRecords(); }
     const sel = $("rec-model-filter");
-    const cur = sel.value;
     sel.innerHTML = '<option value="">' + t("allModels") + '</option>' + data.models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
-    sel.value = state.records.model || cur || "";
+    sel.value = state.records.model;
+    if (state.records.model && sel.value !== state.records.model) {
+      // 旧筛选模型已不在新选项里 (切账号/数据变化): 清筛选重拉, 否则下拉空白但列表仍被过滤 (P2-12)
+      state.records.model = "";
+      state.records.page = 1;
+      sel.value = "";
+      return loadRecords();
+    }
     $("rec-count").textContent = `${t("totalN")} ${fmtInt(data.total)} ${t("items")}`;
     if (!data.records.length) {
-      body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:24px">${t("noData")}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:24px">${t("noData")}</td></tr>`;
     } else {
       let html = data.records.map((r) => `
         <tr><td class="key-name">${escapeHtml(r.key_name || "—")}</td>
@@ -1176,19 +1261,19 @@ async function loadRecords() {
         <td class="num">${fmtTokens(r.output_tokens)}</td>
         <td class="num">${fmtTokens(r.reasoning_tokens)}</td>
         <td class="num">${fmtTokens(r.cache_read_tokens)}</td>
+        <td class="num">${fmtTokens(r.cache_write_tokens)}</td>
         <td class="num">${fmtMoney(r.cost_usd)}</td></tr>`).join("");
       // 固定 7 行, 不足补空行
-      if (data.records.length < 7) {
-        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(8) + '</tr>').repeat(7 - data.records.length);
+      if (data.records.length < PAGE_SIZE) {
+        html += ('<tr>' + '<td>&nbsp;</td>'.repeat(9) + '</tr>').repeat(PAGE_SIZE - data.records.length);
       }
       body.innerHTML = html;
     }
-    const totalPages = Math.max(1, Math.ceil(data.total / 7));
     $("rec-pager").textContent = `${t("pageOf")} ${state.records.page} ${t("ofPages")} ${totalPages}`;
     $("pg-prev").disabled = state.records.page <= 1;
     $("pg-next").disabled = state.records.page >= totalPages;
   } catch (e) {
-    if (seq === recSeq) body.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
+    if (seq === recSeq) body.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--red);padding:24px">${t("loadFailed")}: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 /* ---------------- 模型图标 ---------------- */
@@ -1248,7 +1333,12 @@ function maskWs(data) {
 async function startSync(mode) {
   $("tb-refresh").disabled = true;
   $("btn-full-sync").disabled = true;
-  try { await api("/api/sync?mode=" + mode, { method: "POST" }); } catch (e) { console.error(e); }
+  try {
+    await api("/api/sync?mode=" + mode, { method: "POST" });
+  } catch (e) {
+    // 409 = 已有同步在跑 (服务端单飞), 提示后继续轮询; 其它错误 (未登录/本地服务异常) 也提示
+    toast(e.message || t("syncFailed"), "err");
+  }
   pollUntilIdle();
 }
 function pollUntilIdle() {
@@ -1264,9 +1354,9 @@ function pollUntilIdle() {
         clearInterval(state.syncTimer); state.syncTimer = null;
         $("tb-refresh").disabled = false;
         $("btn-full-sync").disabled = false;
-        await loadDashboard(false, true);  // 同步刚结束: 数据必然已变, 绕过复用窗口
-        if (state.page === "settings") renderSettings();
-        if (state.page === "overview") loadOverview(true).catch(() => {});
+        // 同步刚结束: 数据必然已变, 刷新**当前页**所有数据源 (含 records/热力图/模型趋势),
+        // 否则在记录页点"刷新"会看起来毫无反应 (P2-12)
+        await refreshCurrentPage({ force: true });
       }
     } catch (e) {
       // 连续失败 3 次 (本地服务异常): 解除按钮禁用并停止轮询, 避免永久卡死
@@ -1450,8 +1540,12 @@ async function renderSettings() {
     const stSyncCounts = stSync.provider === "commandcode" && stSync.chart_requests
       ? t("ccSyncCounts").replace("{m}", fmtInt(stSync.chart_requests)).replace("{n}", fmtInt(stSync.total_records || 0))
       : `${t("totalN")} ${fmtInt(stSync.total_records || 0)} ${t("items")}`;
+    // 同步状态此前直接显示服务端枚举 ok/error/partial (英文原文), 现映射为 i18n;
+    // 失败时把 last_sync_error 一并展示, 否则用户只看到「(error)」不知道原因 (P3-14)
+    const syncStatus = syncStatusText(stSync.last_sync_status);
+    const syncErr = stSync.last_sync_error ? ` · ${String(stSync.last_sync_error).slice(0, 160)}` : "";
     $("set-sync-info").textContent = stSync.last_sync_at
-      ? `${t("lastSync")} ${fmtDateTime(stSync.last_sync_at)} (${stSync.last_sync_status}) · ${stSyncCounts}`
+      ? `${t("lastSync")} ${fmtDateTime(stSync.last_sync_at)}${syncStatus ? ` (${syncStatus})` : ""} · ${stSyncCounts}${syncErr}`
       : t("never");
     $("set-datadir").textContent = st.datadir || "—";
     const settings = await api("/api/settings");
@@ -1496,6 +1590,7 @@ async function startLogin(mode, provider) {
 function showLoginDialog(mode, provider) {
   const prov = provider === "commandcode" ? "commandcode" : "opencode";
   const overlay = $("modal-overlay");
+  const prevFocus = document.activeElement;
   $("modal-title").textContent =
     prov === "commandcode" ? t("addGoatUser") : t("loginDialogTitleOpencode");
   $("modal-message").innerHTML = `
@@ -1514,12 +1609,24 @@ function showLoginDialog(mode, provider) {
   $("modal-cancel").hidden = false;
   $("modal-cancel").textContent = t("cancel");
   overlay.hidden = false;
+  let closed = false;
   const cleanup = () => {
+    if (closed) return;
+    closed = true;
     overlay.hidden = true;
     $("modal-cancel").onclick = null;
     $("modal-ok").hidden = false;
+    document.removeEventListener("keydown", onKey);
+    restoreFocus(prevFocus);
   };
+  // 与 showModal 一致: Esc 关闭 + Tab 焦点循环 (此前登录弹窗只能点取消, 键盘用户被困)
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); cleanup(); return; }
+    if (e.key === "Tab") trapModalTab(e, overlay);
+  };
+  document.addEventListener("keydown", onKey);
   $("modal-cancel").onclick = cleanup;
+  ($("goat-win") || overlay).focus();
   $("goat-win").onclick = async () => {
     cleanup();
     await startLogin(mode, prov);
@@ -1548,9 +1655,7 @@ function showLoginDialog(mode, provider) {
       });
       cleanup();
       toast(t("switchedAccount"));
-      await loadDashboard(false, true);  // 新增/切换账号: 强制刷新, 不走复用
-      if (state.page === "settings") renderSettings().catch(() => {});
-      if (state.page === "overview") loadOverview(true).catch(() => {});
+      onAccountChanged();  // 新增账号并切换: 复用账号变化统一失效点 (P2-12)
     } catch (e) {
       toast(e.message || t("loadFailed"), "err");
       $("goat-paste").disabled = false;
@@ -1580,15 +1685,12 @@ function startLoginWatch() {
       }
       if (sig !== baseline) {
         stopLoginWatch();
-        await loadDashboard(false, true);  // 登录窗口已改变账号: 强制刷新
-        if (state.page === "settings") renderSettings().catch(() => {});
-        else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
-        if (state.page === "overview") loadOverview(true).catch(() => {});
+        onAccountChanged();  // 登录窗口已改变账号: 统一失效点清缓存 + 刷新当前页 (P2-12)
       }
     } catch (e) {
       if (!baselineReady && polls >= 5) {
         polls = 0;
-        await loadDashboard(false, true).catch(() => {});
+        refreshCurrentPage({ force: true });
       }
     }
   };
@@ -1598,15 +1700,46 @@ function startLoginWatch() {
 function stopLoginWatch() {
   if (loginWatchTimer) { clearInterval(loginWatchTimer); loginWatchTimer = null; }
 }
-/* 分页上限: 按后端返回的 total 与固定 page_size 推算, 防连点越过末页出空表 */
-function recPageMax() { return Math.max(1, Math.ceil((state.records.total || 0) / 7)); }
-function sesPageMax() { return Math.max(1, Math.ceil((state.sessions.total || 0) / 7)); }
-/* 切换/删除/退出账号后复位记录页筛选: 新账号可能没有旧筛选的模型, 避免列表恒空 */
+/* 分页上限: 按后端返回的 total 与 PAGE_SIZE 推算, 防连点越过末页出空表 */
+function recPageMax() { return Math.max(1, Math.ceil((state.records.total || 0) / PAGE_SIZE)); }
+function sesPageMax() { return Math.max(1, Math.ceil((state.sessions.total || 0) / PAGE_SIZE)); }
+/* 切号/删除/退出后复位记录页筛选与页码: 新账号可能没有旧筛选的模型, 且旧页码可能越界 */
 function resetRecordFilters() {
   state.records.page = 1;
   state.records.model = "";
   state.sessions.page = 1;
   state.excludedModels.clear();  // 新账号模型集不同: 旧的排除项一并清掉
+}
+/* 数据变化 (同步完成/导入备份/按范围清理) 后刷新当前页的**所有**数据源.
+   此前这些入口只强刷 dashboard, 导致记录页点「刷新」表格不动、统计页热力图/模型趋势
+   不更新 (P2-12). 与 switchPage 的映射保持一致, 避免两处漂移. */
+function refreshCurrentPage({ force = false } = {}) {
+  // 顶栏 (上次同步/条数/账号名/登录态) 由 dashboard 渲染, 任何页面都需要刷新它 ——
+  // 否则在记录页点「刷新」顶栏时间也是旧的 (旧实现只在 home/stats 页刷 dashboard)
+  loadDashboard(false, force);
+  if (state.page === "stats") {  // 两个独立端点: 不随 dashboard 刷新
+    loadHeatmap().catch(() => {});
+    loadModelTrend().catch(() => {});
+  }
+  if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
+  if (state.page === "overview") loadOverview(true).catch(() => {});
+  if (state.page === "settings") renderSettings();
+}
+/* 账号变化 (切号/登录成功/登录监视/粘贴 token/退出/删号/导入备份) 的**单一失效点** (P2-12).
+   客户端有大量 per-account 状态: records/sessions 筛选与页码、excludedModels、
+   热力图/模型趋势缓存、dashboard 5s 复用表、已渲染标记. 以前每个入口各自手写
+   "刷新哪些块", 交集不完整 (统计页顶栏切号后热力图/模型趋势仍是旧账号). 统一收口于此.
+   注: 不在这里销毁 dashboard 图表实例 —— refreshCurrentPage 的 force 重拉会用新数据
+   重建图表, 保留旧图到响应返回可避免闪空; 热力图是独立端点, 先清成占位防残留旧格子. */
+function onAccountChanged() {
+  resetRecordFilters();
+  heatmapDays = [];
+  modelTrendData = null;
+  dashCache.clear();
+  dashRendered = { page: "", key: "", gen: -1 };
+  renderGen += 1;
+  renderHeatmap();  // heatmapDays 已清空 → 占位"暂无历史数据", 不残留旧账号格子
+  refreshCurrentPage({ force: true });
 }
 let menuSeq = 0;  // 用户菜单开关序号: 丢弃迟到的过期 /api/accounts 响应
 async function toggleUserMenu(force) {
@@ -1630,15 +1763,16 @@ function provLabel(a) {
 }
 function renderUserMenu(accounts, activeId) {
   const menu = $("user-menu");
+  // 菜单项用 <button> 而非 <div>: 键盘可 Tab 聚焦 + Enter/Space 触发 (P3-15)
   menu.innerHTML = (accounts.length ? accounts.map((a) => `
-    <div class="um-item" data-id="${a.id}">
+    <button type="button" class="um-item" data-id="${a.id}">
       <span class="um-check">${a.id === activeId ? "✓" : ""}</span>
       <span class="um-meta">
         <span class="um-name">${escapeHtml(a.name)} <span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span></span>
         <span class="um-ws">${a.provider === "commandcode" ? escapeHtml(provLabel(a)) : escapeHtml(a.workspace_id || "—")}${a.has_token ? "" : " · " + t("notLoggedIn")}</span>
       </span>
-    </div>`).join("") : `<div class="um-item um-empty">${t("noUsers")}</div>`) +
-    `<div class="um-item um-manage" id="um-manage"><span class="um-check">⚙</span><span class="um-meta"><span class="um-name">${t("setUsers")}</span></span></div>`;
+    </button>`).join("") : `<div class="um-item um-empty">${t("noUsers")}</div>`) +
+    `<button type="button" class="um-item um-manage" id="um-manage"><span class="um-check">⚙</span><span class="um-meta"><span class="um-name">${t("setUsers")}</span></span></button>`;
   menu.querySelectorAll(".um-item[data-id]").forEach((el) => {
     el.addEventListener("click", async () => {
       const id = Number(el.dataset.id);
@@ -1647,10 +1781,7 @@ function renderUserMenu(accounts, activeId) {
       try {
         await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
         toast(t("switchedAccount"));
-        await loadDashboard(false, true);  // 切换账号: 强制刷新, 不走复用
-        if (state.page === "settings") renderSettings().catch(() => {});
-        else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
-        if (state.page === "overview") loadOverview(true).catch(() => {});
+        onAccountChanged();  // 切号统一失效点: 清筛选/排除集/独立缓存 + 按当前页刷新 (P2-12)
       } catch (e) { toast(e.message || t("loadFailed"), "err"); }
     });
   });
@@ -1694,10 +1825,7 @@ async function onUserRowAction(id, act) {
     try {
       await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
       toast(t("switchedAccount"));
-      resetRecordFilters();  // 新账号可能没有旧筛选的模型: 复位避免列表恒空
-      await loadDashboard(false, true);  // 切换账号: 强制刷新, 不走复用
-      renderSettings().catch(() => {});
-      if (state.page === "overview") loadOverview(true).catch(() => {});
+      onAccountChanged();  // 切号统一失效点 (P2-12)
     } catch (e) { toast(e.message || t("loadFailed"), "err"); }
     return;
   }
@@ -1725,11 +1853,8 @@ async function onUserRowAction(id, act) {
         try {
           await api("/api/logout", { method: "POST", body: "{}" });
           toast(t("loggedOut"));
-          resetRecordFilters();
           const r = await api("/api/accounts").catch(() => ({ accounts: [] }));
-          renderUsersList(r.accounts || [], r.active_id);
-          await loadDashboard(false, true);  // 退出登录已清空本地明细: 强制刷新
-          if (state.page === "overview") loadOverview(true).catch(() => {});  // 退出后账号卡片即时移除
+          onAccountChanged();  // 退出登录: 清 per-account 状态 + 刷新当前页 (P2-12)
           if (!(r.accounts || []).some((x) => x.has_token)) showLoginOverlay(true);  // 全部退出 -> 欢迎页
         } catch (e) { toast(e.message || t("loadFailed"), "err"); }
       },
@@ -1770,10 +1895,7 @@ async function onUserRowAction(id, act) {
         try {
           const r = await api("/api/accounts/delete", { method: "POST", body: JSON.stringify({ id }) });
           toast(t("userDeleted"));
-          resetRecordFilters();
-          await loadDashboard(false, true);  // 删号已清空其明细: 强制刷新
-          renderSettings().catch(() => {});
-          if (state.page === "overview") loadOverview(true).catch(() => {});
+          onAccountChanged();  // 删号: 清 per-account 状态 + 刷新当前页 (P2-12)
           if ((r.remaining ?? 1) === 0) showLoginOverlay(true);
         } catch (e) { toast(e.message || t("loadFailed"), "err"); }
       },
@@ -1795,9 +1917,7 @@ function showLoginOverlay(show) {
           clearInterval(loginPollTimer);
           loginPollTimer = null;
           showLoginOverlay(false);
-          await loadDashboard(false, true);  // 登录成功: 强制刷新
-          renderSettings().catch(() => {});
-          if (state.page === "overview") loadOverview(true).catch(() => {});  // 新登录账号卡片即时出现
+          onAccountChanged();  // 登录成功: 新账号上线, 统一失效点刷新当前页 (P2-12)
         }
       } catch (e) { /* ignore */ }
     }, 2000);
@@ -1822,10 +1942,31 @@ window.gousageOnLoginSuccess = async function () {
     const st = await api("/api/state");
     if (st.logged_in) showLoginOverlay(false);  // 欢迎页场景: 直接进入面板
   } catch (e) { /* ignore */ }
-  loadDashboard(false, true).catch(() => {});  // 登录成功回调: 强制刷新
-  if (state.page === "settings") renderSettings().catch(() => {});
-  else if (state.page === "records") { loadSessions().catch(() => {}); loadRecords().catch(() => {}); }
+  onAccountChanged();  // 登录成功回调: 新账号, 统一失效点 (P2-12)
 };
+/* ---------------- 更新检查 (I5 异步化) ---------------- */
+/* 后端 check_update 两来源 × 3 次重试 × 8s 超时最坏 51.2s, 同步 GET 会被 api() 的 15s
+   超时提前掐断. 改为「POST 触发 + 1s 轮询」, 上限 90s; 旧服务端 (无 async 端点) 回退
+   同步 GET, 并给该请求单独放宽超时到 60s. */
+let pendingReleaseUrl = "";  // 最近一次检查返回的 release 页 URL: 下载失败兜底打开它 (I8)
+async function checkUpdateAsync() {
+  try {
+    await api("/api/update/check/async", { method: "POST" });
+  } catch (e) {
+    // 旧服务端没有 async 端点 (404/405): 回退同步 GET 并放宽超时
+    if (e && (e.status === 404 || e.status === 405 || /HTTP (404|405)/.test(String(e.message || "")))) {
+      return api("/api/update/check", { timeout: 60000 });
+    }
+    throw e;
+  }
+  for (let i = 0; i < 90; i++) {  // 1s × 90 = 90s 上限
+    await new Promise((res) => setTimeout(res, 1000));
+    const st = await api("/api/update/check/status");
+    if (st.state === "done") return st.result || {};
+    if (st.state === "error") throw new Error(st.error || t("updateFailed"));
+  }
+  throw new Error(t("timeout"));
+}
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
   document.querySelectorAll(".side-item").forEach((btn) => btn.addEventListener("click", () => switchPage(btn.dataset.page)));
@@ -1890,7 +2031,7 @@ function bindEvents() {
       const r = await api("/api/backup/import", { method: "POST", body: JSON.stringify({ path }) });
       if (r.ok === false) throw new Error(r.error || t("exportFailed"));
       toast(t("importDone").replace("%1", fmtInt(r.records_added || 0)));
-      await loadDashboard(false, true);  // 导入备份写入了明细: 强制刷新
+      onAccountChanged();  // 导入可能新建账号/写明细: 走账号变化统一失效点 (P2-12)
     } catch (e) { toast(e.message || t("exportFailed"), "err"); }
   });
   $("tb-refresh").addEventListener("click", () => startSync("incremental"));
@@ -1907,21 +2048,25 @@ function bindEvents() {
       return;
     }
     if (preview.window_days == null) { toast(t("pruneNone"), "warn"); return; }
-    if (!preview.count) { toast(t("pruneEmpty")); return; }
+    // I3: 预演同时给出明细/聚合图表两处条数 (旧服务端没有 charts_count 时按 0 兜底)
+    const previewCharts = preview.charts_count || 0;
+    if (!preview.count && !previewCharts) { toast(t("pruneEmpty")); return; }
     showModal({
       title: t("pruneNow"),
       danger: true,
       message: t("pruneConfirm")
         .replace("%1", preview.window_days)
-        .replace("%2", preview.cutoff)
-        .replace("%3", fmtInt(preview.count)),
+        .replace("%2", escapeHtml(preview.cutoff || ""))
+        .replace("%3", fmtInt(preview.count || 0))
+        .replace("%4", fmtInt(previewCharts)),
       okText: t("pruneNow"),
       onOk: async () => {
         try {
           const r = await api("/api/usage/prune", { method: "POST" });
-          toast(t("pruneDone").replace("%1", fmtInt(r.deleted || 0)));
-          await loadDashboard(false, true);
-          if (state.page === "settings") renderSettings();
+          toast(t("pruneDone")
+            .replace("%1", fmtInt(r.deleted || 0))
+            .replace("%2", fmtInt(r.deleted_charts || 0)));
+          refreshCurrentPage({ force: true });  // 存量变了: 刷新当前页全部数据源 (P2-12)
         } catch (e) {
           toast(t("pruneFailed"), "err");
         }
@@ -1953,9 +2098,12 @@ function bindEvents() {
       }
       throw new Error(t("timeout"));
     } catch (e) {
+      // I8: 下载失败兜底优先打开本次 check 返回的 release_url (服务端只放行本仓库
+      // releases URL); 没有该字段时传空 body, 由服务端打开默认 releases 列表页
+      const openBody = pendingReleaseUrl ? JSON.stringify({ url: pendingReleaseUrl }) : "{}";
       showModal({
         title: t("downloadFailed"), message: escapeHtml(e.message || ""), okText: t("openReleasePage"),
-        onOk: () => { api("/api/update/open", { method: "POST" }).catch(() => {}); },
+        onOk: () => { api("/api/update/open", { method: "POST", body: openBody }).catch(() => {}); },
       });
     }
   }
@@ -1967,8 +2115,9 @@ function bindEvents() {
     btn.disabled = true;
     btn.textContent = t("checkingUpdate");
     try {
-      const r = await api("/api/update/check");
+      const r = await checkUpdateAsync();  // I5: 异步触发 + 轮询, 不再被 15s 超时掐断
       if (r.error) throw new Error(r.error);
+      pendingReleaseUrl = r.release_url || "";
       if (r.has_update) {
         desc.textContent = `${t("updateFound")} ${r.latest}`;
         showModal({
@@ -1991,43 +2140,79 @@ function bindEvents() {
     }
   });
   document.querySelectorAll("#set-interval-pills .pill").forEach((b) => b.addEventListener("click", async () => {
-    await api("/api/settings", { method: "PUT", body: JSON.stringify({ sync_interval_sec: Number(b.dataset.v) }) });
-    state.settings = await api("/api/settings");
-    syncSettingsPills(); restartAutoSync(); toast(`${t("syncIntervalSet")} ${b.textContent}`);
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ sync_interval_sec: Number(b.dataset.v) }) });
+      state.settings = await api("/api/settings");
+      syncSettingsPills(); restartAutoSync(); toast(`${t("syncIntervalSet")} ${b.textContent}`);
+    } catch (e) { toast(e.message || t("saveFailed"), "err"); }  // 保存失败不再静默 (P3-16)
   }));
   document.querySelectorAll("#set-window-pills .pill").forEach((b) => b.addEventListener("click", async () => {
     const v = b.dataset.v === "all" ? null : Number(b.dataset.v);
-    await api("/api/settings", { method: "PUT", body: JSON.stringify({ window_days: v }) });
-    state.settings = await api("/api/settings");
-    syncSettingsPills();
-    toast(t("syncRangeUpdated"));
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ window_days: v }) });
+      state.settings = await api("/api/settings");
+      syncSettingsPills();
+      toast(t("syncRangeUpdated"));
+    } catch (e) { toast(e.message || t("saveFailed"), "err"); }
   }));
   document.querySelectorAll("#set-theme-pills .pill").forEach((b) => b.addEventListener("click", () => applyDarkMode(b.dataset.v === "dark")));
   document.querySelectorAll("#set-currency-pills .pill").forEach((b) => b.addEventListener("click", () => applyCurrency(b.dataset.v)));
   document.querySelectorAll("#set-lang-pills .pill").forEach((b) => b.addEventListener("click", () => applyLang(b.dataset.v)));
-  $("set-auto-sync").addEventListener("change", (e) => {
-    state.settings.auto_sync = e.target.checked;
-    api("/api/settings", { method: "PUT", body: JSON.stringify({ auto_sync: e.target.checked }) }).catch(() => {});
-    restartAutoSync();
+  $("set-auto-sync").addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    state.settings.auto_sync = on;
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ auto_sync: on }) });
+      restartAutoSync();
+    } catch (err) {
+      // 保存失败: 回滚开关与本地状态, 避免界面与后端不一致 (P3-16)
+      e.target.checked = !on;
+      state.settings.auto_sync = !on;
+      restartAutoSync();
+      toast(err.message || t("saveFailed"), "err");
+    }
   });
-  $("set-autostart").addEventListener("change", (e) => {
-    state.settings.autostart = e.target.checked;
-    api("/api/settings", { method: "PUT", body: JSON.stringify({ autostart: e.target.checked }) })
-      .then((r) => { if (r && r.autostart_applied === false) toast(t("autostartFail")); })
-      .catch(() => {});
+  $("set-autostart").addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    state.settings.autostart = on;
+    try {
+      const r = await api("/api/settings", { method: "PUT", body: JSON.stringify({ autostart: on }) });
+      if (r && r.autostart_applied === false) toast(t("autostartFail"), "err");
+    } catch (err) {
+      e.target.checked = !on;
+      state.settings.autostart = !on;
+      toast(err.message || t("saveFailed"), "err");
+    }
   });
   // 账户总览面板开关: 控制侧边栏入口显隐 (关闭时停留在总览页则退回首页)
-  $("set-overview-panel").addEventListener("change", (e) => {
-    state.settings.show_accounts_panel = e.target.checked;
-    api("/api/settings", { method: "PUT", body: JSON.stringify({ show_accounts_panel: e.target.checked }) }).catch(() => {});
-    applyOverviewPanel(e.target.checked);
+  $("set-overview-panel").addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    state.settings.show_accounts_panel = on;
+    applyOverviewPanel(on);
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ show_accounts_panel: on }) });
+    } catch (err) {
+      e.target.checked = !on;
+      state.settings.show_accounts_panel = !on;
+      applyOverviewPanel(!on);
+      toast(err.message || t("saveFailed"), "err");
+    }
   });
   // 图表动画开关: 即时生效 — 改 Chart 全局默认后重建可见页图表
-  $("set-chart-anim").addEventListener("change", (e) => {
-    state.settings.chart_animation = e.target.checked;
-    api("/api/settings", { method: "PUT", body: JSON.stringify({ chart_animation: e.target.checked }) }).catch(() => {});
-    applyChartAnimation(e.target.checked);
+  $("set-chart-anim").addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    state.settings.chart_animation = on;
+    applyChartAnimation(on);
     rerenderCharts();
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ chart_animation: on }) });
+    } catch (err) {
+      e.target.checked = !on;
+      state.settings.chart_animation = !on;
+      applyChartAnimation(!on);
+      rerenderCharts();
+      toast(err.message || t("saveFailed"), "err");
+    }
   });
   // DeepSeek 峰谷分档: 纯展示口径开关 —— 只重算聚合, 不触碰任何落库数据
   $("set-peak-split").addEventListener("change", async (e) => {
@@ -2042,9 +2227,10 @@ function bindEvents() {
       return;
     }
     toast(t(on ? "peakSplitOn" : "peakSplitOff"));
-    // force: 客户端复用表按「口径」缓存, 模型名集合变了必须整体作废
-    await loadDashboard(false, true);
-    loadModelTrend();
+    // 客户端复用表按「口径」缓存, 模型名集合变了必须整体作废; 统计页的两条独立
+    // 端点也随分档口径变化, 由 refreshCurrentPage 一起重拉 (P2-12/P3-13)
+    dashCache.clear();
+    refreshCurrentPage({ force: true });
   });
   // 账户操作已合并进「OpenCode 账户」卡片内的账号行 (relogin/logout 为行级动作)
   // 多用户: 顶栏切换器 + 设置页账户列表
@@ -2052,6 +2238,12 @@ function bindEvents() {
   document.addEventListener("click", (e) => {
     const menu = $("user-menu");
     if (menu && !menu.hidden && !e.target.closest(".user-switch")) toggleUserMenu(false);
+  });
+  // 用户菜单 Esc 关闭 (菜单项现在是 button, 键盘可达; Esc 行为与弹窗一致)
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const menu = $("user-menu");
+    if (menu && !menu.hidden) { e.preventDefault(); toggleUserMenu(false); }
   });
   $("btn-add-user").addEventListener("click", () => { showLoginDialog("add", "opencode"); });
   $("btn-add-goat").addEventListener("click", () => { showGoatLoginDialog(); });
@@ -2077,8 +2269,9 @@ function restartAutoSync() {
   if (state.settings.auto_sync === false) return;
   const sec = Math.max(30, Number(state.settings?.sync_interval_sec) || 300) * 1000;
   autoSyncTimer = setInterval(() => {
-    if (state.data && state.data.logged_in === false) return;  // 未登录: 不自动同步
-    const prog = state.data && state.data.progress;
+    // state.data 为 null 时同样视为未登录 (启动停在欢迎页时不打 401 同步, P3-16)
+    if (!state.data || state.data.logged_in === false) return;
+    const prog = state.data.progress;
     if (!prog || !prog.running) startSync("incremental");
   }, sec);
 }
@@ -2112,11 +2305,64 @@ window.addEventListener("resize", () => {
       safeResize(cTrend);
     }
     if (!document.getElementById("page-overview").hidden) safeResize(cOvTrendChart);
+    // 视口变了: 隐藏页的图表仍是旧像素尺寸 (responsive:false), 让下一次缓存命中也重建 (P3-13)
+    renderGen += 1;
   }, 250);
 });
 /* ---------------- 启动 ---------------- */
 let APP_VERSION = "";  // 后端版本号 (app/__init__.py), 唯一版本源
-(async function init() {
+/* I4: 本地 HTTP token 的获取顺序 (双保险):
+   1) URL fragment —— 主路径. main.py 里 dashboard_url = "http://host:port/#<token>",
+      fragment 不进 HTTP 请求行/Referer/服务端日志, 取到后立刻 replaceState 清掉;
+   2) pywebview js_api get_auth_token() —— 某些 WebView 可能丢弃 fragment 时的兜底.
+      该接口只读且只挂主窗口 (登录窗口不挂 js_api), 不会把 token 暴露给外部站点;
+   3) 都没有 (dev/浏览器/旧服务端) → 不带 header, 由服务端决定是否要求鉴权.
+   注意: get_auth_token() 是异步的 (window.pywebview.api.* 返回 Promise), 且 pywebview
+   API 可能在页面脚本之后才注入 — 所以这里等 pywebviewready / 有限超时, 拿不到就继续
+   初始化 (下游 401 已有 unauthorized 提示), 绝不因此卡住启动. */
+const AUTH_TOKEN_WAIT_MS = 1500;
+function waitPywebviewApi(timeoutMs = AUTH_TOKEN_WAIT_MS) {
+  return new Promise((resolve) => {
+    const current = () => (window.pywebview && window.pywebview.api ? window.pywebview.api : null);
+    const api = current();
+    if (api) { resolve(api); return; }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("pywebviewready", onReady);
+      clearTimeout(timer);
+      resolve(current());
+    };
+    const onReady = () => finish();
+    const timer = setTimeout(finish, timeoutMs);
+    window.addEventListener("pywebviewready", onReady);
+  });
+}
+async function resolveAuthToken() {
+  let token = "";
+  // 1) fragment 主路径
+  try {
+    const raw = location.hash ? location.hash.slice(1) : "";
+    if (raw) token = decodeURIComponent(raw);
+  } catch (e) { token = ""; }
+  // 2) js_api 兜底 (等待 pywebview 注入 API, 最多 AUTH_TOKEN_WAIT_MS; 非 WebView 下超时后继续)
+  if (!token) {
+    try {
+      const api = (await pywebviewApi()) || (await waitPywebviewApi());
+      if (api && typeof api.get_auth_token === "function") {
+        const v = await api.get_auth_token();
+        if (typeof v === "string") token = v.trim();
+      }
+    } catch (e) { token = ""; }  // 兜底失败: 继续初始化, 请求会由服务端 401 提示
+  }
+  if (!token) return;
+  state.authToken = token;  // 仅驻内存
+  // fragment 用完即清 (不留在地址栏/截图里)
+  try { history.replaceState(null, "", location.pathname + location.search); } catch (e) { /* ignore */ }
+}
+async function init() {
+  await resolveAuthToken();  // 必须在第一个 api() 之前: 所有 /api 请求都要带 token
   let dark = false, cur = "CNY", l = "zh";
   try {
     dark = localStorage.getItem("gousage-dark") === "1";
@@ -2138,4 +2384,11 @@ let APP_VERSION = "";  // 后端版本号 (app/__init__.py), 唯一版本源
   applyChartAnimation(state.settings.chart_animation === true);
   await checkState();
   restartAutoSync();
-})();
+}
+/* 脚本在 </body> 前, 正常 DOM 已就绪; 若将来改为 head/defer 加载也能正确启动.
+   init 内部对局部失败都有兜底, 这里再兜住未预期异常, 避免页面停在半初始化状态. */
+function startApp() {
+  init().catch((e) => console.error("init failed", e));
+}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startApp, { once: true });
+else startApp();

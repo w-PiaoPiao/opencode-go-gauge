@@ -1,6 +1,10 @@
-# Windows 单文件 exe 自动构建 (旧式单平台发布; 统一发布见 release.yml): 推送 v*-windows tag 时触发,
-# 构建产物自动附到同名 release.
-# 与 build.bat 等效 (bat 末尾 pause 不可用于 CI); 另生成 _build_info.py 使更新检查指向本 fork.
+# Windows 单文件 exe 自动构建 (旧式单平台发布; 统一发布见 release.yml): 推送
+# v*-windows tag 时触发, 构建产物自动附到同名 release.
+#
+# 与统一发布一样先过 preflight: 全量 pytest + tag 去 -windows 后缀后必须等于
+# 桌面 __version__。此前单平台 hotfix 链完全没有测试/版本校验, 可能发出
+# __version__ 仍是旧值的包（已安装客户端于是"永远有新版本"循环）。
+# 构建参数统一在 scripts/build.py（与 build.bat 共用同一实现）。
 name: release-windows
 
 on:
@@ -12,38 +16,57 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Shanghai
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          # 构建 job 会执行第三方依赖 (pip/gradle), 不把 token 落进 .git/config
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ --timeout=120 -W error::DeprecationWarning
+
+      - name: Verify tag matches desktop version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: >
+          python scripts/check_versions.py
+          --tag "$GITHUB_REF_NAME" --platform desktop
+
+  build:
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 构建 job 会执行第三方依赖 (pip), 不把 token 落进 .git/config
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-windows.lock.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -q -r requirements-windows.lock.txt
 
       - name: Build GoGauge.exe
-        shell: pwsh
-        run: |
-          python -m pip install -q -r requirements-windows.lock.txt
-          @"
-          """构建时自动生成 (gitignored): 打包产物元信息, 供更新检查使用."""
-          UPDATE_REPO = "${{ github.repository }}"
-          "@ | Out-File -Encoding utf8 app/_build_info.py
-          python -m PyInstaller --noconfirm --clean --onefile --noconsole --name GoGauge `
-            --add-data "app/web;app/web" `
-            --add-data "assets;assets" `
-            --icon assets/GoGauge.ico `
-            --collect-submodules webview `
-            --hidden-import clr `
-            --hidden-import pythonnet `
-            --hidden-import pystray `
-            --exclude-module numpy `
-            --exclude-module cryptography `
-            --exclude-module PIL._avif `
-            entry.py
+        run: python scripts/build.py --platform windows --repo "${{ github.repository }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -57,6 +80,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:

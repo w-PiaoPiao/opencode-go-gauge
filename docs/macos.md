@@ -50,6 +50,6 @@ xattr -cr /Applications/GoGauge.app
 
 The macOS build adds a menu-bar quick panel (today's cost / requests and quota remaining, ~30s auto-refresh), a template monochrome menu-bar icon (auto light/dark), semi-automatic updates (downloads the new build to `~/Downloads` and reveals it in Finder; falls back to the Releases page on failure), launch-at-login (LaunchAgent, toggle in Settings, packaged builds only), window position memory, and menus that follow the system language.
 
-Build with `./build_macos.sh` (requires macOS 11+, Python 3.12, Xcode CLT) → `dist/GoGauge.app`. The build is Apple Silicon (arm64) native; Intel Macs use the `-x86_64` package from Releases. Pushing a `v*-macos` tag triggers dual-arch CI builds (macos-14 arm64 / macos-13 x86_64) that attach artifacts to the matching release.
+Build with `./build_macos.sh` (requires macOS 11+, Python 3.12, Xcode CLT) → `dist/GoGauge.app`. The build is Apple Silicon (arm64) native; Intel Macs use the `-x86_64` package from Releases. Pushing a `v*-macos` tag triggers dual-arch CI builds (macos-14 arm64 / macos-15-intel x86_64) that attach artifacts to the matching release.
 
 Packages are published in this fork's **Releases**. The app is **not notarized**; if Gatekeeper blocks first launch, run `xattr -cr /Applications/GoGauge.app` once in Terminal. Known limitations: no Apple notarization ($99/yr account), and after moving the `.app` you must toggle launch-at-login off/on again (the plist records the old path).

@@ -335,3 +335,106 @@ def test_extract_workspace_id():
 def test_iso_from_ms_invalid_returns_empty():
     assert api._iso_from_ms(None) == ""
     assert api._iso_from_ms(0) == ""
+
+
+# ---------------------------------------------------------------------------
+# P3-19: 窗口 kind 稳定协议 / P3-20: 重试分类与 Retry-After
+# ---------------------------------------------------------------------------
+
+import urllib.error  # noqa: E402
+
+import pytest  # noqa: E402
+
+from app import _http_retry as _hr  # noqa: E402
+
+
+def test_go_status_windows_expose_stable_kind():
+    """to_dict 必须带稳定 kind (rolling/weekly/monthly); server 不再按 label 字面量判协议."""
+    windows = api.parse_go_status(GO_STATUS, NOW)
+    assert [w.kind for w in windows] == ["rolling", "weekly", "monthly"]
+    payload = [w.to_dict() for w in windows]
+    assert [w["kind"] for w in payload] == ["rolling", "weekly", "monthly"]
+    assert [w["label"] for w in payload] == ["5h Rolling", "Weekly", "Monthly"]
+
+
+def _http_error(code: int, headers=None) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://example.test/x", code, "boom", headers or {}, None)
+
+
+def _fake_response(headers: dict, body: bytes):
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, _n=-1):
+            return body
+
+    resp = _Resp()
+    resp.headers = headers
+    return resp
+
+
+def test_opencode_does_not_retry_deterministic_4xx(monkeypatch):
+    calls = []
+
+    def _fake_urlopen(*_a, **_k):
+        calls.append(1)
+        raise _http_error(422)
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", _fake_urlopen)
+    with pytest.raises(api.OpenCodeAPIError, match="422"):
+        api._api_get("/go/status", "token", org_id="wrk_x")
+    assert len(calls) == 1
+
+
+def test_opencode_retries_5xx(monkeypatch):
+    calls, sleeps = [], []
+    monkeypatch.setattr(api.time, "sleep", lambda s: sleeps.append(s))
+
+    def _fake_urlopen(*_a, **_k):
+        calls.append(1)
+        raise _http_error(503)
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", _fake_urlopen)
+    with pytest.raises(api.OpenCodeAPIError, match="503"):
+        api._api_get("/go/status", "token", org_id="wrk_x")
+    assert len(calls) == api.FETCH_RETRIES
+    assert sleeps == [_hr.RETRY_BACKOFF[0], _hr.RETRY_BACKOFF[1]]
+
+
+def test_opencode_honors_retry_after_capped(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(api.time, "sleep", lambda s: sleeps.append(s))
+
+    def _fake_urlopen(*_a, **_k):
+        raise _http_error(429, {"Retry-After": "60"})
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", _fake_urlopen)
+    with pytest.raises(api.OpenCodeAPIError, match="429"):
+        api._api_get("/go/status", "token", org_id="wrk_x")
+    assert sleeps == [_hr.MAX_RETRY_AFTER_SEC, _hr.MAX_RETRY_AFTER_SEC]
+
+
+def test_opencode_auth_and_404_not_retried(monkeypatch):
+    calls = []
+
+    def _fake_urlopen(*_a, **_k):
+        calls.append(1)
+        raise _http_error(401)
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", _fake_urlopen)
+    with pytest.raises(api.AuthError):
+        api._api_get("/go/status", "token", org_id="wrk_x")
+    assert len(calls) == 1
+
+
+def test_opencode_maps_oversized_response_to_domain_error(monkeypatch):
+    monkeypatch.setattr(
+        api.urllib.request, "urlopen",
+        lambda *_a, **_k: _fake_response(
+            {"Content-Length": str(api.MAX_BODY_BYTES + 1)}, b""))
+    with pytest.raises(api.OpenCodeAPIError, match="响应过大"):
+        api._api_get("/request-logs", "token", org_id="wrk_x")

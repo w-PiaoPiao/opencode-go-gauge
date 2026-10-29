@@ -13,9 +13,13 @@ from app.db import PROVIDER_COMMANDCODE, PROVIDER_OPENCODE
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
-    db._DB = None
+    # 真实复位 (db 没有 _DB 属性): 重新走建表/迁移并清进程级缓存
+    db._schema_init_path = None
+    db._invalidate_payload_cache()
+    db._invalidate_cred_cache()
     yield tmp_path
     db.close_db()
+    db._schema_init_path = None
 
 
 def _make_legacy_db(path) -> None:
@@ -185,3 +189,30 @@ class TestPeriodBounds:
             end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
         assert db.monthly_cycle_start() == start.strftime("%Y-%m-%d %H:%M:%S")
+
+    def test_monthly_reset_past_value_rolls_forward(self, tmp_db):
+        """存储的「下次重置」已过期 (App 关闭 >1 个周期): 向前滚动到覆盖 now 的周期.
+
+        回归 P3-10: 旧实现把 60 天前的 reset 原样当「本周期」起点, 窗口横跨两个
+        周期、数量偏大; period_bounds 路径会顺延, 两条回退路径语义曾不一致.
+        """
+        now = datetime.now(timezone.utc)
+        db.record_monthly_reset(
+            None, (now - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        start = db.monthly_cycle_start()
+        assert start is not None
+        start_dt = datetime.strptime(start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        # 顺延到覆盖 now 的 30 天周期: 起点不会还是 60 天前
+        assert now - timedelta(days=31) < start_dt <= now
+
+    def test_monthly_reset_45d_past_rolls_to_recent_cycle(self, tmp_db):
+        now = datetime.now(timezone.utc)
+        db.record_monthly_reset(
+            None, (now - timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        start = db.monthly_cycle_start()
+        assert start is not None
+        start_dt = datetime.strptime(start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        delta_days = (now - start_dt).total_seconds() / 86400
+        assert 14.5 < delta_days < 15.5  # reset 45d 前 + 30d 顺延 = 起点 15d 前

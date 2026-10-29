@@ -186,6 +186,20 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                     }
                 },
             )
+            // 区分 DeepSeek 峰谷 (v2.2.2, desktop peakSplit parity): 纯展示口径,
+            // 打开后统计页把 deepseek flash 拆成「峰」「谷」两条, 落库数据不变。
+            SetRow(
+                s.setPeakSplit,
+                s.setPeakSplitDesc,
+                trailing = {
+                    Switch(
+                        checked = vm.settings.dsPeakSplit,
+                        onCheckedChange = { on ->
+                            vm.saveSettings(vm.settings.copy(dsPeakSplit = on))
+                        },
+                    )
+                },
+            )
             // 「按同步范围清理」: 同步不再自动删数据, 这是唯一的删除入口
             // (desktop 6995669 同语义; 先预演, 再二次确认)
             SetRow(
@@ -511,7 +525,9 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 s.pruneConfirm
                     .replace("%1", action.preview.windowDays.toString())
                     .replace("%2", action.preview.cutoff)
-                    .replace("%3", Fmt.int(action.preview.count)),
+                    // 合计 = 明细 + GOAT 聚合桶 (desktop P2-7: charts 是统计主口径,
+                    // 只报明细条数会让清理后 totals 仍含历史)
+                    .replace("%3", Fmt.int(action.preview.total)),
                 s.pruneNow, true,
             )
         }

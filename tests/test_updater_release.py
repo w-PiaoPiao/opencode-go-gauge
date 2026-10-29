@@ -197,3 +197,131 @@ def test_check_update_reports_unified_version(monkeypatch):
     info = updater.check_update()
     assert info["has_update"] is True
     assert info["latest"] == "v9.9.9"
+
+
+# ---------------------------------------------------------------------------
+# P3-4 / I6: 严格版本解析、预发布过滤、check_update 带出资产信息、I8 页面 helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("2.2.2", (2, 2, 2, 0)),
+        ("v2.2.2", (2, 2, 2, 0)),
+        ("V2.2.2", (2, 2, 2, 0)),
+        ("v2.2.1d", (2, 2, 1, 4)),
+        ("v2.2.1d-macos", (2, 2, 1, 4)),          # 平台 tag 仍可解析 (语义不变)
+        ("v2.2.1d-macos-arm64", (2, 2, 1, 4)),    # 平台+架构组合后缀
+        ("v2.2.1d-windows", (2, 2, 1, 4)),
+        ("v2.2.3-rc1", None),                     # 预发布不参与版本比较
+        ("v2.2.3-beta", None),
+        ("v2.2.2+build.7", None),                 # 构建元数据不是稳定发布
+        ("v2.2", None),
+        ("not-a-version", None),
+        ("", None),
+    ],
+)
+def test_parse_version_strict_and_platform_suffixes(tag, expected):
+    assert updater._parse_version(tag) == expected
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("v2.2.3-rc1", True),
+        ("v2.2.3-beta.2", True),
+        ("v2.2.3-alpha", True),
+        ("v2.2.3-pre", True),
+        ("v2.2.3-dev", True),
+        ("v2.2.2+build.7", True),
+        ("v2.2.3-rc1-macos", True),
+        ("v2.2.1d-macos", False),
+        ("v2.2.1d-macos-arm64", False),
+        ("v2.2.2", False),
+        ("", False),
+    ],
+)
+def test_is_prerelease_tag(tag, expected):
+    assert updater._is_prerelease_tag(tag) is expected
+
+
+def test_platform_and_unified_tag_predicates(monkeypatch):
+    _as_platform(monkeypatch, win=False, machine="arm64")
+    assert updater._is_platform_tag("v2.2.1d-macos")
+    assert not updater._is_platform_tag("v2.2.1d")
+    assert not updater._is_platform_tag("v2.2.3-rc1-macos")
+    assert updater._is_unified_tag("v2.2.1d")
+    assert not updater._is_unified_tag("v2.2.1d-macos")
+    assert not updater._is_unified_tag("v2.2.3-rc1")
+
+
+def test_fetch_latest_platform_release_skips_prerelease_and_draft(monkeypatch):
+    """GitHub 标记的 prerelease/draft 即使版本更高也不能推给稳定版用户."""
+    _as_platform(monkeypatch, win=False, machine="arm64")
+    pre = _unified("v9.9.9-rc1")
+    pre["prerelease"] = True
+    draft = _unified("v9.9.8")
+    draft["draft"] = True
+    monkeypatch.setattr(updater, "_fetch_json", lambda url: [pre, draft, _unified("v2.2.1d")])
+    info = updater._fetch_latest_platform_release()
+    assert info["tag"] == "v2.2.1d"
+    assert info["asset_url"].endswith("-macos-arm64.zip")
+    assert info["asset_digest"].startswith("sha256:")
+
+
+def test_fetch_latest_atom_skips_prerelease_tags(monkeypatch):
+    """Atom 没有 prerelease 布尔字段, 只能靠 tag 语义过滤 -rc/-beta/+build."""
+    atom = """<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>tag:github.com,2008:Repository/1/v9.9.9-rc1</id>
+    <content type="html">rc</content></entry>
+  <entry><id>tag:github.com,2008:Repository/1/v9.9.8+build.7</id>
+    <content type="html">build meta</content></entry>
+  <entry><id>tag:github.com,2008:Repository/1/v2.2.1d</id>
+    <content type="html">stable</content></entry>
+</feed>"""
+    monkeypatch.setattr(updater, "_fetch_text", lambda url: atom)
+    info = updater._fetch_latest_atom()
+    assert info["tag"] == "v2.2.1d"
+    assert info["asset_url"] == "" and info["asset_digest"] == ""
+
+
+def test_check_update_exposes_asset_url_and_digest(monkeypatch):
+    """I6: 列表路径把匹配资产的 url/digest 一并返回, download 不再二次打 API."""
+    _as_platform(monkeypatch, win=False, machine="arm64")
+    monkeypatch.setattr(updater, "_fetch_json", lambda url: [_unified("v9.9.9")])
+    monkeypatch.setattr(updater, "__version__", "2.2.1c")
+    info = updater.check_update()
+    assert info["has_update"] is True
+    assert info["latest"] == "v9.9.9"
+    assert info["asset_url"].endswith("-macos-arm64.zip")
+    assert info["asset_digest"].startswith("sha256:")
+
+
+def test_check_update_atom_fallback_has_empty_asset_fields(platform_case, monkeypatch):
+    """Atom 路径拿不到资产列表: asset_url/asset_digest 必须为空 (交给 SHA256SUMS 兜底)."""
+    monkeypatch.setattr(
+        updater, "_fetch_json",
+        lambda url: (_ for _ in ()).throw(OSError("HTTP 403 rate limit")))
+    monkeypatch.setattr(updater, "_fetch_text", lambda url: _ATOM)
+    monkeypatch.setattr(updater, "__version__", "2.2.1c")
+    info = updater.check_update()
+    assert info["has_update"] is True
+    assert info["asset_url"] == ""
+    assert info["asset_digest"] == ""
+
+
+def test_release_page_helpers(monkeypatch):
+    """I8: 默认打开列表页, 且 POST url 只允许本仓库 releases 前缀."""
+    assert updater.RELEASES_PAGE_URL.endswith("/releases")
+    assert updater.RELEASE_PAGE_URL == updater.RELEASES_PAGE_URL
+    tag_url = updater.release_url_for_tag("v2.2.1d")
+    assert tag_url == f"https://github.com/{updater.REPO}/releases/tag/v2.2.1d"
+    assert updater.is_allowed_release_url(updater.RELEASES_PAGE_URL)
+    assert updater.is_allowed_release_url(tag_url)
+    assert not updater.is_allowed_release_url("https://github.com/other/repo/releases")
+    assert not updater.is_allowed_release_url("http://github.com/x/releases")
+    assert not updater.is_allowed_release_url(
+        f"https://user:pass@github.com/{updater.REPO}/releases")
+    assert not updater.is_allowed_release_url("")

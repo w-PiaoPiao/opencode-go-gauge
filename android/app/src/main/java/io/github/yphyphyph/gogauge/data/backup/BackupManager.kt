@@ -34,8 +34,14 @@ object BackupManager {
         "cache_write_1h_tokens", "cost_usd", "session_id", "key_id", "plan", "account_id",
     )
 
+    /** OWASP CSV 注入前缀: Excel/LibreOffice 会把以这些字符开头的单元格当公式执行. */
+    private val CSV_FORMULA_PREFIXES = charArrayOf('=', '+', '-', '@', '\t', '\r')
+
     private fun csvField(v: Any?): String {
-        val s = v?.toString() ?: ""
+        val raw = v?.toString() ?: ""
+        // 数据可来自"导入的备份" (model/session_id/key_id/plan 完全由文件内容决定),
+        // 形成 "导入恶意备份 → 导出 CSV → Excel 打开" 的注入链 (desktop P3-2 同修法)
+        val s = if (raw.isNotEmpty() && raw[0] in CSV_FORMULA_PREFIXES) "'$raw" else raw
         return if (s.contains(',') || s.contains('"') || s.contains('\n')) {
             '"' + s.replace("\"", "\"\"") + '"'
         } else s

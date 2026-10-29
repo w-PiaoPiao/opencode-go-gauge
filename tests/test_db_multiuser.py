@@ -13,10 +13,13 @@ from app import db
 def tmp_db(tmp_path, monkeypatch):
     """独立临时库: 重定向 data_dir 并重置模块级连接."""
     monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
-    db._DB = None
+    # 真实复位: 不存在 db._DB (历史误写的死属性); 换库要重新走建表/迁移 + 清缓存
+    db._schema_init_path = None
+    db._invalidate_payload_cache()
     db._invalidate_cred_cache()  # 进程级凭证缓存跨测试共享, 换库必须清
     yield tmp_path
     db.close_db()
+    db._schema_init_path = None
 
 
 def _rec(usg_id, created="2026-01-01T00:00:00Z", model="m", inp=10, outp=20, cost_usd=0.5):
@@ -439,10 +442,10 @@ def test_daily_stats_fills_zero_days(tmp_db):
         ]
     )
     stats = db.daily_stats(7)
-    # 窗口 = [今天-7, 今天] 共 8 天, 首尾对齐 SQL 过滤口径
-    assert len(stats) == 8
+    # 恰好 7 个点 = [今天-6, 今天] (I10: 与前端「7 日」文案/totals("7d") 同源)
+    assert len(stats) == 7
     dates = [s["date"] for s in stats]
-    assert dates[0] == (today - timedelta(days=7)).isoformat()
+    assert dates[0] == (today - timedelta(days=6)).isoformat()
     assert dates[-1] == today.isoformat()
     # 日期严格连续无重复
     assert dates == sorted(set(dates))
@@ -475,5 +478,275 @@ def test_daily_stats_fills_zero_days(tmp_db):
 def test_daily_stats_empty_returns_zero_series(tmp_db):
     """窗口内完全没有记录时返回全 0 的连续日期序列 (而非空列表)."""
     stats = db.daily_stats(30)
-    assert len(stats) == 31
+    assert len(stats) == 30  # 恰好 N 个点 (I10)
     assert all(s["request_count"] == 0 and s["total_cost_usd"] == 0.0 for s in stats)
+
+
+# ---------------------------------------------------------------------------
+# I1: 重登录目标账号固化 (save_token account_id)
+# ---------------------------------------------------------------------------
+
+
+def test_save_token_targets_explicit_account(tmp_db):
+    """登录发起时固化的目标账号: 即使活跃账号已被切走, 也只写目标账号 (P1-1 db 侧)."""
+    a = db.add_account("tA", "ws-a")
+    b = db.add_account("tB", "ws-b")  # 活跃 = b
+    conn = db.get_db()
+    conn.execute("UPDATE usage_sync_state SET deepest_page_fetched = 9 WHERE account_id = ?", (a,))
+    conn.commit()
+    # 登录途中切号, 回调时带发起时的目标 a
+    assert db.set_active_account(b) is True
+    assert db.save_token("tA-new", "ws-a2", account_id=a) is True
+    tokens = {r["id"]: r["token"] for r in conn.execute("SELECT id, token FROM accounts")}
+    assert tokens[a] == "tA-new" and tokens[b] == "tB"  # b 的原凭证分毫不动
+    assert db.get_active_account_id() == b               # 活跃账号不被写回操作改掉
+    sa, sb = db.get_sync_state(a), db.get_sync_state(b)
+    assert sa["deepest_page_fetched"] == -1  # 目标账号游标被重置
+    assert sb["deepest_page_fetched"] == -1
+
+
+def test_save_token_missing_target_returns_false(tmp_db):
+    """目标账号已被删: 明确返回 False (调用方回退新增), 不误写活跃账号."""
+    db.add_account("tA", "ws-a")
+    before = db.count_accounts()
+    assert db.save_token("tok-x", "ws", account_id=9999) is False
+    assert db.count_accounts() == before
+    assert db.get_token() == "tA"  # 活跃账号未被写入 tok-x
+
+
+# ---------------------------------------------------------------------------
+# I2: insert_usage_records / add_account 的 commit=False 事务参与
+# ---------------------------------------------------------------------------
+
+
+def test_commit_false_participates_in_caller_transaction(tmp_db):
+    """备份导入场景: 账号创建 + 记录写入并入外层事务, 回滚后库内无半截数据."""
+    conn = db.get_db()
+    before_accounts = db.count_accounts()
+    conn.execute("BEGIN")
+    aid = db.add_account("tok-tx", "ws-tx", switch=False, commit=False)
+    db.insert_usage_records([_rec("tx-1")], aid, commit=False)
+    db.rename_account(aid, "TX", commit=False)
+    assert conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == before_accounts + 1
+    conn.rollback()
+    assert db.count_accounts() == before_accounts
+    assert db.count_records() == 0
+    assert not [x for x in db.list_accounts() if x["name"] == "TX"]
+
+
+def test_commit_false_committed_by_caller_persists(tmp_db):
+    conn = db.get_db()
+    conn.execute("BEGIN")
+    aid = db.add_account("tok-tx", "ws-tx", switch=False, commit=False)
+    assert db.insert_usage_records([_rec("tx-1")], aid, commit=False) == 1
+    conn.commit()
+    assert db.count_records() == 1
+    assert next(x for x in db.list_accounts() if x["id"] == aid)["has_token"] is True
+
+
+# ---------------------------------------------------------------------------
+# P2-2: 空 token 占位行按 (provider, workspace_id, name) 去重 (导入幂等)
+# ---------------------------------------------------------------------------
+
+
+def test_add_account_dedupes_placeholder_identity(tmp_db):
+    a1 = db.add_account("", "ws-ph", switch=False, name="Backup A")
+    a2 = db.add_account("", "ws-ph", switch=False, name="Backup A")
+    assert a1 == a2
+    assert db.count_accounts() == 2  # 种子 + 1 个占位行
+    # 同 workspace 不同名字: 不同备份账号, 不能合并
+    a3 = db.add_account("", "ws-ph", switch=False, name="Backup B")
+    assert a3 != a1
+    # 有 token 的账号不会被占位行去重命中
+    tok = db.add_account("tok-x", "ws-ph", switch=False)
+    assert tok not in (a1, a3)
+
+
+# ---------------------------------------------------------------------------
+# I3: prune 覆盖 charts (P2-7) / 脏 window_days 防御 (P3-9)
+# ---------------------------------------------------------------------------
+
+
+def _old_created(days_ago: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def test_prune_preview_and_expired_cover_charts(tmp_db):
+    aid = db.get_active_account_id()
+    db.insert_usage_records(
+        [_rec("old-rec", created=_old_created(400)), _rec("new-rec", created=_old_created(1))]
+    )
+    db.insert_usage_charts(
+        [
+            {"model": "goat", "time_bucket": (datetime.now(timezone.utc) - timedelta(days=400))
+             .strftime("%Y-%m-%d %H:%M:%S"), "requests": 3},
+            {"model": "goat", "time_bucket": datetime.now(timezone.utc)
+             .strftime("%Y-%m-%d %H:%M:%S"), "requests": 1},
+        ],
+        aid,
+    )
+    preview = db.prune_preview(30)
+    assert preview["count"] == 1 and preview["charts_count"] == 1
+
+    result = db.prune_expired(30)
+    assert result == {"records": 1, "charts": 1}
+    assert db.count_records() == 1
+    assert db.get_db().execute("SELECT COUNT(*) FROM usage_charts").fetchone()[0] == 1
+    # 再清理一次不出错且无可删
+    assert db.prune_expired(30) == {"records": 0, "charts": 0}
+
+
+def test_prune_all_and_invalid_window_are_noops(tmp_db):
+    db.insert_usage_records([_rec("u-old", created="2020-01-01T00:00:00Z")])
+    assert db.prune_preview(None) == {
+        "window_days": None, "cutoff": None, "count": 0, "charts_count": 0,
+    }
+    assert db.prune_expired(None) == {"records": 0, "charts": 0}
+    # 脏值 (字符串/None 以外) 不得抛异常让接口 500
+    assert db._prune_window("oops") is None
+    assert db.prune_expired("oops") == {"records": 0, "charts": 0}
+    assert db._prune_window(0) == 1
+    assert db._prune_window(99999) == 3650
+
+
+# ---------------------------------------------------------------------------
+# I13: set_data_dir(None) 复位
+# ---------------------------------------------------------------------------
+
+
+def test_set_data_dir_none_resets_process_state(tmp_path, monkeypatch):
+    """切库状态复位: override / schema 标记 / payload/凭证缓存全清, 并关当前连接."""
+    monkeypatch.setattr(db, "data_dir", lambda: str(tmp_path))
+    db.set_data_dir(str(tmp_path))
+    db.get_db()
+    assert db._data_dir_override == str(tmp_path)
+    assert db._schema_init_path == str(tmp_path / "gousage.db")  # 以库文件路径为键
+    db._cred_cache[1] = (0.0, ("t", "w", "opencode"))
+
+    db.set_data_dir(None)
+    assert db._data_dir_override is None
+    assert db._schema_init_path is None
+    assert db._payload_cache is None and db._payload_cache_path is None
+    assert db._cred_cache == {}
+    assert getattr(db._db_local, "conn", None) is None  # 当前线程连接已关
+
+
+# ---------------------------------------------------------------------------
+# I15/P3-9: 设置读取/写入的类型规整
+# ---------------------------------------------------------------------------
+
+
+def _write_raw_payload(payload: dict) -> None:
+    import json as _json
+
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE settings SET payload = ? WHERE id = 1",
+        (_json.dumps(payload),),
+    )
+    conn.commit()
+    db._invalidate_payload_cache()
+
+
+def test_get_settings_coerces_dirty_values(tmp_db):
+    _write_raw_payload(
+        {
+            "sync_interval_sec": "oops",
+            "auto_sync": "false",
+            "window_days": "abc",
+            "chart_animation": "true",
+            "key_names": {"k": "v"},
+        }
+    )
+    settings = db.get_settings()
+    assert settings["sync_interval_sec"] == 300     # 非法 -> 默认
+    assert settings["auto_sync"] is False           # 字符串 "false" 不能变 True
+    assert settings["window_days"] == 60            # 非法 -> 默认
+    assert settings["chart_animation"] is True
+    # 正常数值仍照常钳制
+    _write_raw_payload({"sync_interval_sec": 5})
+    assert db.get_settings()["sync_interval_sec"] == 30
+
+
+def test_save_settings_parses_string_booleans(tmp_db):
+    out = db.save_settings({"auto_sync": "false", "autostart": "true", "ds_peak_split": 0})
+    assert out["auto_sync"] is False
+    assert out["autostart"] is True
+    assert out["ds_peak_split"] is False
+    assert db.get_settings()["auto_sync"] is False
+    # 非白名单键 (key_names) 不会被整体覆盖丢失
+    db.save_key_names({"k1": "名字"})
+    db.save_settings({"auto_sync": True})
+    assert db.get_key_names() == {"k1": "名字"}
+
+
+# ---------------------------------------------------------------------------
+# P3-8: payload 缓存回写持锁 (旧值不能覆盖新写入)
+# ---------------------------------------------------------------------------
+
+
+def test_payload_cache_fill_holds_lock(tmp_db, monkeypatch):
+    import threading
+    import time as _time
+
+    db.save_settings({"sync_interval_sec": 300})
+    db._invalidate_payload_cache()
+    started = threading.Event()
+    release = threading.Event()
+    real_read = db._read_payload_row
+
+    def slow_read(conn):
+        started.set()
+        release.wait(3)
+        return real_read(conn)
+
+    monkeypatch.setattr(db, "_read_payload_row", slow_read)
+    result: dict = {}
+
+    def reader():
+        result["payload"] = db._raw_payload(db.get_db())
+
+    reader_thread = threading.Thread(target=reader)
+    reader_thread.start()
+    assert started.wait(3)
+
+    def writer():
+        db.save_settings({"sync_interval_sec": 123})
+
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    _time.sleep(0.2)  # 写线程此时应被 _payload_lock 挡在锁外
+    release.set()
+    reader_thread.join(5)
+    writer_thread.join(5)
+
+    assert not reader_thread.is_alive() and not writer_thread.is_alive()
+    assert result["payload"]["sync_interval_sec"] == 300  # 读线程拿到的是旧值
+    # 最终缓存必须是新写入的值 (旧读不能把 300 回写进缓存)
+    assert db.get_settings()["sync_interval_sec"] == 123
+    assert db._payload_cache["sync_interval_sec"] == 123
+
+
+# ---------------------------------------------------------------------------
+# P3-11: last_inserted_count 语义 / clear_account 重置 last_sync_at
+# ---------------------------------------------------------------------------
+
+
+def test_last_inserted_count_is_per_update(tmp_db):
+    """last_inserted_count 记"本次更新写入条数"而非历史累加 (旧实现只增不减)."""
+    db.update_sync_state("ok", None, inserted=5)
+    assert db.get_sync_state()["last_inserted_count"] == 5
+    db.update_sync_state("ok", None, inserted=3)
+    assert db.get_sync_state()["last_inserted_count"] == 3  # 不是 8
+
+
+def test_clear_account_resets_last_sync_at(tmp_db):
+    aid = db.add_account("tA", "ws-a")
+    db.update_sync_state("ok", None, inserted=2, account_id=aid)
+    assert db.get_sync_state(aid)["last_sync_at"] is not None
+    db.clear_account()
+    st = db.get_sync_state(aid)
+    assert st["last_sync_at"] is None  # 登出后不再显示旧的"上次同步"
+    assert st["last_inserted_count"] == 0

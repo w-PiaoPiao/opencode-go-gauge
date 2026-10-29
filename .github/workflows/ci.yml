@@ -1,19 +1,24 @@
-# 桌面端 CI: PR / push 到 main 时跑 pytest.
+# 桌面端 CI + Android JVM 单测: PR / push main / **push tag** 时跑测试.
 #
-# 此前仓库只有 release workflow (单平台 + 统一发布), 全部只构建不测试 —— 约 3.5k 行 pytest 对
-# 发布没有任何约束力, tag 一打就发最后一次提交的内容. 本 workflow 补上这道闸.
-#
-# 只覆盖桌面端 (Python); Android (gradle) 与 HarmonyOS (hvigor) 另见各自 release
-# workflow, 未在此处纳入.
+# 历史教训: 这里原先只响应 push main + PR, 而发布 workflow 全部只构建不测试.
+# 结果 tag 可以钉在任意 commit 上, 测试红/根本没跑的代码照样进 Windows exe、
+# macOS app、APK（实证: v2.2.1a/-b 从 ci=failure 的 commit 发布成功）。现在:
+# - tag push 也跑本 workflow, release 页面能直接看到"这个 tag 绿不绿";
+# - release.yml 另加 preflight（pytest + 版本一致性）作为所有 build 的 needs,
+#   在构建之前硬拦（见 release.yml）。
 #
 # Windows/macOS/Linux 三平台各跑一遍: 代码里有 sys.platform 分支 (登录 watcher 的
 # win32 / 非 win32 路径、凭证加密的 DPAPI / 钥匙串 / 明文), 只在一平台上跑会漏掉
 # 另外两条路径的回归.
+#
+# TZ=Asia/Shanghai: 本地日/周期口径的断言此前在 UTC runner 上退化成恒等变换
+# （把 local_date 误写成 UTC 也全绿）。固定时区让本地与 CI 口径一致。
 name: ci
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -21,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -31,6 +36,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
     steps:
       # checkout v5+ / setup-python v6+ 起改用 Node 24 运行时, 消掉 "Node.js 20 is
       # deprecated" 注解 (该注解本身不判失败, 属顺手收尾).
@@ -42,12 +50,16 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          # 依赖版本稳定时可省掉每次重新下载 (requirements-dev.txt 只有测试依赖;
+          # 用 requirements.txt 哈希做 key 也可以, 但没有必要)
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install test dependencies
         # 只装 requirements-dev.txt (不装 requirements.txt): 被测模块 (db/server/auth/
-        # backup/updater/api) 除 auth.py 顶层的 webview 外全是标准库, 而测试用空模块
-        # 占位绕过 webview (见 tests/test_auth_login.py); pywebview 的图形栈没有必要
-        # 拖进 runner.
+        # backup/updater/api) 除 auth.py 顶层的 webview 外全是标准库, 测试在
+        # tests/conftest.py 里对缺失的 webview 注入空模块占位; pywebview 的图形栈
+        # 没有必要拖进 runner.
         #
         # 例外是 pystray: tests/test_perf_runtime_opt.py 的托盘面板用例必须用真实
         # pystray 验证 callable/visible 求值语义, 占位模块验不出来, 故写进
@@ -58,5 +70,65 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Syntax check (Python)
+        # 低成本静态门: 语法错误不必等 3 平台 × 测试跑完才暴露
+        run: python -m compileall -q app scripts tests entry.py
+
+      - name: Version invariants
+        # Android 不得高于桌面 / 三端版本格式合法（tag 与版本的一致性校验在
+        # release preflight 里做）。不等发布才暴露版本漂移。
+        run: python scripts/check_versions.py
+
+      - name: Syntax check (JS)
+        # 前端是手写 app/web/app.js（无构建步骤）, 用 node --check 兜语法错误。
+        # 只在一个平台跑: 语法与平台无关, 三平台都跑纯属浪费。
+        if: runner.os == 'Linux'
+        run: node --check app/web/app.js
+
       - name: Run tests
-        run: python -m pytest tests/ -q
+        # --timeout=120: 真实 HTTP 服务/后台线程类用例挂死时快速失败;
+        # coverage 只做可见性输出, 不设失败阈值（避免为数字写无意义断言）。
+        run: |
+          python -m pytest tests/ \
+            --cov=app --cov-report=term-missing \
+            --timeout=120
+
+      - name: Deprecation-warnings gate
+        # 把弃用警告升级为失败: 3.13/3.14 的破坏性变更在迁版本之前就能暴露。
+        # 只在 Linux 多跑一遍（警告与平台无关, 三平台各跑一遍代价翻倍）;
+        # 若将来出现某第三方库的平台独有警告导致误红, 应修库而不是放宽本步骤。
+        if: runner.os == 'Linux'
+        run: python -m pytest tests/ --timeout=120 -W error::DeprecationWarning
+
+  # Android 侧有 17 个 JVM 单测 + 4 个仪器测试源集, 但两个 release workflow 只跑
+  # assembleRelease —— 单测从未执行, androidTest 连编译都没验证。这里补上
+  # （JVM 单测不需要模拟器; 仪器测试只做编译检查）。
+  #
+  # 注意: 本 job 无法在开发机本地验证 gradle（无 Android SDK 的 macOS 环境）,
+  # 工具链刻意与 release-android.yml 保持一致 (JDK 17 + Gradle 8.14.3):
+  # 仓库里的 gradle wrapper 是 9.1.0, 但发布产物一直用 8.14.3 构建, 测试若用
+  # wrapper 会与发布工具链漂移; 将来统一升级时两处要一起改。
+  android-unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ubuntu-latest 镜像自带 Android SDK（compileSdk 36 / build-tools 36.0.0）,
+      # 与 release-android.yml 的 assembleRelease 同一套环境.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Run JVM unit tests + compile instrumented tests
+        working-directory: android
+        run: |
+          gradle :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin \
+            --no-daemon --console=plain
