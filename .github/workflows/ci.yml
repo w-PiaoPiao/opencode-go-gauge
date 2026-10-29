@@ -88,10 +88,11 @@ jobs:
       - name: Run tests
         # --timeout=120: 真实 HTTP 服务/后台线程类用例挂死时快速失败;
         # coverage 只做可见性输出, 不设失败阈值（避免为数字写无意义断言）。
-        run: |
-          python -m pytest tests/ \
-            --cov=app --cov-report=term-missing \
-            --timeout=120
+        #
+        # 必须写成**单行**: windows-latest 的默认 shell 是 pwsh, bash 的 "\" 续行
+        # 不是 PowerShell 语法, 会被解析成 "Missing expression after unary operator
+        # '--'" 而整步失败（v2.2.2b ci 实证: 命令根本没跑起来）。
+        run: python -m pytest tests/ --cov=app --cov-report=term-missing --timeout=120
 
       - name: Deprecation-warnings gate
         # 把弃用警告升级为失败: 3.13/3.14 的破坏性变更在迁版本之前就能暴露。
