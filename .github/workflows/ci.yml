@@ -35,9 +35,13 @@ jobs:
       fail-fast: false
       matrix:
         # macOS 固定 macos-15 而不是 macos-latest: latest 现在指向 macOS 26 Arm64,
-        # 容量紧张 —— v2.2.2b 实测排队 20 分钟仍拿不到 runner, 最后被系统取消,
-        # 让整个 ci run 变红。macos-15 是发布链里已验证可用的 arm64 镜像。
+        # 容量更紧张（v2.2.2b 实测 macos-latest 与 macos-15 各排队 20 分钟仍拿不到
+        # runner, 最终被 GitHub 取消 —— 那是 cancelled 而不是测试失败）。
         os: [ubuntu-latest, windows-latest, macos-15]
+    # push 到 main 时不跑 macOS: 排队不可控，会把 CI 长期吊在 queued/in_progress 或
+    # 判红，却与代码无关。PR 与手动触发仍跑（覆盖面不减），macOS 专属行为
+    # （launchctl 自启 / 钥匙串 / 路径语义）另由 release 的真实 macOS 构建覆盖。
+    if: ${{ matrix.os != 'macos-15' || github.event_name != 'push' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
