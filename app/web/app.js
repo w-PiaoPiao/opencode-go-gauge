@@ -99,6 +99,8 @@ const I18N = {
      loggedOut: "已退出登录",
     logoutUserConfirm: "将退出「{name}」并清除其本地用量数据与同步记录，确定？",
         heatmapTitle: "日历热力图", heatmapNoData: "本地暂无历史数据", fewer: "少", more: "多",
+    heatmapZero: "无用量",
+    hmNote: "档位按有量日的分位划分（中位 / 上四分位 / P90），峰值日另加描边",
     hmPeak: "峰值", hmCurStreak: "当前连续", hmMaxStreak: "最长连续", hmDay: "天", hmDayOne: "天",
     trendHintGap: "30 天（{n} 天前无数据）",
     exportCsv: "导出 CSV", exportCsvDesc: "用量明细导出为表格文件（时间/模型/Token/费用）",
@@ -204,6 +206,8 @@ const I18N = {
      loggedOut: "Signed out",
     logoutUserConfirm: "Sign out \"{name}\" and remove their local usage data and sync history?",
         heatmapTitle: "Daily Heatmap", heatmapNoData: "No local history yet", fewer: "less", more: "more",
+    heatmapZero: "no usage",
+    hmNote: "Levels split by quantiles of active days (median / p75 / p90); record day gets an outline",
     hmPeak: "Peak", hmCurStreak: "Current streak", hmMaxStreak: "Longest streak", hmDay: "days", hmDayOne: "day",
     trendHintGap: "30 days (no data for the first {n} days)",
     exportCsv: "Export CSV", exportCsvDesc: "Export usage records as a spreadsheet (time/model/tokens/cost)",
@@ -730,6 +734,24 @@ function renderDetail6(totals) {
 /* 热力图数据按账号缓存: 切指标不重拉, 切到统计页/换账号时重新加载 */
 let heatmapDays = [];
 let heatmapSeq = 0;
+/* 分档锚点: 只在「有量日」上取分位 —— 全窗口含大量 0 值, 直接取分位会被压到 0 附近.
+   p50 / p75 / p90 三个锚点切出 4 个非零档: 一个异常峰值再高也只占满色一档, 不会像
+   旧的「按峰值线性归一」那样把其余日子全挤进最低档 (档 3 甚至整档空置). */
+function heatmapBreaks(values) {
+  const on = values.filter((v) => v > 0).sort((a, b) => a - b);
+  if (on.length < 8) {
+    // 有量日太少分位不稳: 退回等比四档, 至少让深浅能分出层次
+    const max = Math.max(...values, 1);
+    return [max * 0.25, max * 0.5, max * 0.75];
+  }
+  const q = (p) => {
+    const i = p * (on.length - 1);
+    const lo = Math.floor(i);
+    const hi = Math.min(on.length - 1, lo + 1);
+    return on[lo] + (on[hi] - on[lo]) * (i - lo);
+  };
+  return [q(0.5), q(0.75), q(0.9)];
+}
 async function loadHeatmap() {
   const seq = ++heatmapSeq;
   try {
@@ -768,7 +790,14 @@ function renderHeatmap() {
   const val = (d) => metric === "cost" ? (d.total_cost_usd || 0)
     : metric === "requests" ? (d.request_count || 0)
     : (d.total_input_tokens || 0) + (d.total_output_tokens || 0) + (d.total_reasoning_tokens || 0);
-  const max = Math.max(...heatmapDays.map(val), 1);
+  const values = heatmapDays.map(val);
+  const breaks = heatmapBreaks(values);
+  // 有请求但该指标为 0 (免费模型 / 空转请求) 不是「没数据」: 落到最低可见档,
+  // 否则这些日子会和真正的空白格混在一起
+  const levelOf = (d, v) => v > 0 ? Math.min(4, 1 + breaks.filter((b) => v > b).length)
+    : ((d.request_count || 0) > 0 ? 1 : 0);
+  let peakIdx = -1;
+  values.forEach((v, i) => { if (v > 0 && (peakIdx < 0 || v > values[peakIdx])) peakIdx = i; });
   const first = new Date(heatmapDays[0].date + "T00:00:00");
   const leadingBlanks = (first.getDay() + 6) % 7;  // 周一为首行
   const cols = Math.ceil((leadingBlanks + heatmapDays.length) / 7);
@@ -777,14 +806,24 @@ function renderHeatmap() {
   // 窗口不够时右侧摘要换行而不是把网格挤成横向滚动条
   let html = `<div class="hm-left" style="--hm-w:${cols * 12 + (cols - 1) * 3}px"><div class="hm-scroll"><div class="hm-grid" style="--hm-cols:${cols}">`;
   for (let i = 0; i < leadingBlanks; i++) html += `<div class="hcell empty"></div>`;
-  for (const d of heatmapDays) {
-    const v = val(d);
-    const level = v <= 0 ? 0 : Math.min(4, Math.floor(v / max * 4) + 1);
+  heatmapDays.forEach((d, i) => {
+    const level = levelOf(d, values[i]);
     const tip = `${d.date} · ${fmtMoney(d.total_cost_usd)} · ${fmtInt(d.request_count)} · ${fmtTokens(d.total_input_tokens + d.total_output_tokens + d.total_reasoning_tokens)}`;
-    html += `<div class="hcell lv${level}" title="${escapeHtml(tip)}"></div>`;
-  }
-  html += `</div></div><div class="hm-legend"><span>${t("fewer")}</span>`;
-  for (let i = 0; i < 5; i++) html += `<div class="hcell lv${i}"></div>`;
+    html += `<div class="hcell lv${level}${i === peakIdx ? " peak" : ""}" title="${escapeHtml(tip)}"></div>`;
+  });
+  html += `</div></div><div class="hm-legend" title="${t("hmNote")}"><span>${t("fewer")}</span>`;
+  // 各档阈值挂在色块 title 上: 分位分档不标区间就只剩"深浅"、没有含义.
+  // 不写成图例下方的一行文字 —— 那句话会把 .hm-left 的 max-content 撑宽,
+  // 右侧摘要 (104px + 16px 间距) 挤不进同一行就换行, 结构直接散掉.
+  const fmtBand = (v) => metric === "cost" ? fmtMoney(v) : metric === "requests" ? fmtInt(v) : fmtTokens(v);
+  const band = [
+    t("heatmapZero"),
+    `≤ ${fmtBand(breaks[0])}`,
+    `${fmtBand(breaks[0])} – ${fmtBand(breaks[1])}`,
+    `${fmtBand(breaks[1])} – ${fmtBand(breaks[2])}`,
+    `> ${fmtBand(breaks[2])}`,
+  ];
+  for (let i = 0; i < 5; i++) html += `<div class="hcell lv${i}" title="${escapeHtml(band[i])}"></div>`;
   html += `<span>${t("more")}</span></div></div>`;
   html += heatmapSummaryHtml(metric, val);
   body.innerHTML = html;
