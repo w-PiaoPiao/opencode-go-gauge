@@ -144,3 +144,25 @@ python scripts/check_versions.py --tag v2.2.2    # release preflight 用
 排障入口：`gh run view <run-id> -R w-PiaoPiao/opencode-go-gauge --log-failed`，
 job 级日志用 `gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs`（run 未结束
 时 `--log-failed` 不可用）。
+
+### ci 侧另外四条（同样来自 v2.2.2b 的连环修复）
+
+4. **Windows 步骤别用 bash 的 `\` 续行**。`windows-latest` 默认 shell 是 pwsh，
+   续行反斜杠不是 PowerShell 语法，命令会被解析成
+   `Missing expression after unary operator '--'`，一步都没跑就失败。要么写成单行，
+   要么显式 `shell: bash`。
+
+5. **job 级 `if` 不能引用 `matrix`**。`if: matrix.os != 'macos-15'` 会让 workflow
+   解析失败（Unrecognized named-value: 'matrix'），整次 run 里连一个 job 都不生成，
+   看起来像"莫名其妙 failure 且没有日志"。需要按平台差异化时，拆成独立 job。
+
+6. **脚本输出与测试解码必须约定一致**。`scripts/*.py` 入口统一把 stdout 强制成
+   UTF-8；`tests/test_versions.py` 用 `subprocess.run(..., text=True)` 时**必须**
+   显式 `encoding="utf-8"`，否则 Windows 会按 locale（cp1252/cp936）解码中文子进程
+   输出，出现 `UnicodeDecodeError` 或拿到 `None` 的诡异断言失败。
+
+7. **macOS runner 排队不可控**。当前 `macos-latest` 指向 macOS 26 Arm64，容量紧张；
+   v2.2.2b 期间 `macos-latest` 与 `macos-15` 都曾排队 20 分钟拿不到 runner 后被
+   GitHub 取消（cancelled ≠ 测试失败）。因此：release 的 arm64 构建固定 `macos-15`，
+   ci 的 macOS 测试拆成独立 job 且只在 PR / 手动触发时执行，push 门禁由
+   ubuntu + windows + Android JVM 单测承担。
