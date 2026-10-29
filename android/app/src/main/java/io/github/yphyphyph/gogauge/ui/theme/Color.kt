@@ -19,6 +19,12 @@ object Gg {
     val Amber = Color(0xFFE8A55A)       // warning/amber
     val Red = Color(0xFFC64545)         // error
     val Slate = Color(0xFF87867F)
+
+    // 热力图档 1..4 (档 0 = Tile): CIELAB 等亮度步进, 相邻对比 ≈1.4:1.
+    // 旧的 PrimarySoft 与 Tile 只有 1.006:1, 有量但量低的日子肉眼就是空白格.
+    val Heat = listOf(
+        Color(0xFFE2C0AE), Color(0xFFD29880), Color(0xFFBF7154), Color(0xFFA8492B),
+    )
 }
 
 // 暗色主题 — 暖炭体系
@@ -38,6 +44,11 @@ object GgDark {
     val Amber = Color(0xFFEBB275)
     val Red = Color(0xFFD96A6A)
     val Slate = Color(0xFF8E8B82)
+
+    // 热力图档 1..4 (档 0 = Tile): 暗色下"越亮 = 越多", 与亮色方向相反.
+    val Heat = listOf(
+        Color(0xFF564136), Color(0xFF815846), Color(0xFFB07157), Color(0xFFE08A68),
+    )
 }
 
 // 图表语义色 — 暖调克制系 (亮暗主题共用; 暗块上已足够对比)

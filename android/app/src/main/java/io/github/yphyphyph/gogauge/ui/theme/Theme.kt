@@ -5,6 +5,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 private val LightColors = lightColorScheme(
@@ -55,6 +57,11 @@ private val DarkColors = darkColorScheme(
     onErrorContainer = GgDark.Red,
 )
 
+/** 热力图档 1..4 配色 (档 0 取 surfaceVariant): 亮暗各一套, 由 GoGaugeTheme 注入.
+ *  ColorScheme 的语义槽位不够放 4 个热力档, 单开一个 CompositionLocal 比塞进
+ *  secondaryContainer 之类的槽位清楚. */
+val LocalHeatRamp = staticCompositionLocalOf { Gg.Heat }
+
 @Composable
 fun GoGaugeTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -63,6 +70,10 @@ fun GoGaugeTheme(
     MaterialTheme(
         colorScheme = if (darkTheme) DarkColors else LightColors,
         typography = Typography,
-        content = content,
-    )
+    ) {
+        CompositionLocalProvider(
+            LocalHeatRamp provides if (darkTheme) GgDark.Heat else Gg.Heat,
+            content = content,
+        )
+    }
 }

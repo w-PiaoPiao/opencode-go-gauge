@@ -31,7 +31,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yphyphyph.gogauge.data.model.DailyStat
-import io.github.yphyphyph.gogauge.ui.theme.Gg
+import io.github.yphyphyph.gogauge.ui.theme.LocalHeatRamp
 import io.github.yphyphyph.gogauge.ui.theme.NumFontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -39,12 +39,14 @@ import io.github.yphyphyph.gogauge.ui.Strings
 import io.github.yphyphyph.gogauge.util.Fmt
 import java.time.LocalDate
 import kotlin.math.ceil
-import kotlin.math.max
 
 /**
  * 日历热力图 (v2.2.0b) — GitHub contribution 风格: 周列 × 7 行,
  * 颜色梯度取暖橙主题 token, 指标可切 (费用/请求/Token)。
  * 点击某格选中并在下方显示当日明细; 窄屏横向滚动。
+ *
+ * 分档口径与桌面 heatmapBreaks 一致: 有量日的 p50/p75/p90 三个锚点切 4 档,
+ * 而不是按峰值线性归一 —— 后者遇到一个异常峰值就把其余日子全压进最低档。
  */
 @Composable
 fun CalendarHeatmap(
@@ -65,8 +67,14 @@ fun CalendarHeatmap(
         return
     }
 
-    val values = days.map { dailyMetricValue(it, metric) }
-    val maxValue = max(values.max(), 1.0)
+    val values = remember(days, metric) { days.map { dailyMetricValue(it, metric) } }
+    val levels = remember(days, metric) {
+        heatmapLevels(days.map { dailyMetricValue(it, metric) }, days.map { it.requestCount > 0 })
+    }
+    // 峰值日单独描边: 颜色已封顶在档 4, 不再靠"再加一档颜色"来表达记录日
+    val peakIdx = remember(days, metric) {
+        values.indices.filter { values[it] > 0 }.maxByOrNull { values[it] } ?: -1
+    }
     val firstDate = LocalDate.parse(days.first().date)
     // 首格按星期几对齐行位 (周一为首行): 前面留空格
     val leadingBlanks = (firstDate.dayOfWeek.value + 6) % 7
@@ -75,6 +83,11 @@ fun CalendarHeatmap(
     val tile = MaterialTheme.colorScheme.surfaceVariant
     val outline = MaterialTheme.colorScheme.outline
     val trackText = MaterialTheme.colorScheme.onSurfaceVariant
+    val heatStops = LocalHeatRamp.current
+    val ringColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+    // 档 0 = 空档 tile, 1..4 沿注入的五档色阶
+    fun levelColor(level: Int) =
+        if (level <= 0) tile else heatStops[(level - 1).coerceAtMost(heatStops.lastIndex)]
 
     Column(modifier) {
         Row(
@@ -116,16 +129,24 @@ fun CalendarHeatmap(
                     val pos = leadingBlanks + idx
                     val col = pos / 7
                     val row = pos % 7
-                    val v = values[idx]
-                    val color = heatColor(v / maxValue, tile)
                     val x = col * step
                     val y = row * step
                     drawRoundRect(
-                        color = color,
+                        color = levelColor(levels[idx]),
                         topLeft = Offset(x, y),
                         size = Size(cell.toPx(), cell.toPx()),
                         cornerRadius = CornerRadius(r, r),
                     )
+                    if (idx == peakIdx) {
+                        // 描边压在格外的 1dp 上 (格间距 2dp), 不与邻格填充重叠
+                        drawRoundRect(
+                            color = ringColor,
+                            topLeft = Offset(x - 1.dp.toPx(), y - 1.dp.toPx()),
+                            size = Size(cell.toPx() + 2.dp.toPx(), cell.toPx() + 2.dp.toPx()),
+                            cornerRadius = CornerRadius(r + 1.dp.toPx(), r + 1.dp.toPx()),
+                            style = Stroke(width = 1.dp.toPx()),
+                        )
+                    }
                     if (days[idx].date == selected) {
                         drawRoundRect(
                             color = outline,
@@ -155,7 +176,7 @@ fun CalendarHeatmap(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                // 强度图例 (少 → 多)
+                // 强度图例 (少 → 多): 从空档起 5 格, 与桌面 .hm-legend 一致
                 Text("少", fontSize = 10.sp, color = trackText)
                 repeat(5) { i ->
                     Spacer(Modifier.width(3.dp))
@@ -163,7 +184,7 @@ fun CalendarHeatmap(
                         Modifier
                             .size(9.dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(heatColor((i + 1) / 5.0, tile)),
+                            .background(levelColor(i)),
                     )
                 }
                 Spacer(Modifier.width(3.dp))
@@ -176,21 +197,8 @@ fun CalendarHeatmap(
     }
 }
 
-/** 值强度 (0-1) → 颜色: 空档 tile, 其余沿暖橙梯度加深。 */
-private fun heatColor(intensity: Double, empty: androidx.compose.ui.graphics.Color): androidx.compose.ui.graphics.Color {
-    if (intensity <= 0.0) return empty
-    // 插值: 浅橙 (#F0D9C4) → 主题橙 (#C15F3C) → 砖红
-    val stops = listOf(
-        Gg.PrimarySoft,
-        androidx.compose.ui.graphics.Color(0xFFDD7E4F),
-        Gg.Primary,
-        androidx.compose.ui.graphics.Color(0xFF9C3F22),
-    )
-    val t = intensity.coerceIn(0.0, 1.0) * (stops.size - 1)
-    val i = t.toInt().coerceAtMost(stops.size - 2)
-    val f = (t - i).toFloat()
-    return androidx.compose.ui.graphics.lerp(stops[i], stops[i + 1], f)
-}
+/** 热力图档位不在这里算颜色: 5 档色阶由 theme 的 LocalHeatRamp 注入 (亮暗各一套),
+ *  档 0 取 surfaceVariant. 分档见 StatsMath.heatmapLevels. */
 
 /** 热力图摘要行 (desktop heatmapSummaryHtml parity): 峰值随所选指标, 连续天数只看「当天有请求」. */
 @Composable
