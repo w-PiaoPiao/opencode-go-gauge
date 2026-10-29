@@ -34,14 +34,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS 固定 macos-15 而不是 macos-latest: latest 现在指向 macOS 26 Arm64,
-        # 容量更紧张（v2.2.2b 实测 macos-latest 与 macos-15 各排队 20 分钟仍拿不到
-        # runner, 最终被 GitHub 取消 —— 那是 cancelled 而不是测试失败）。
-        os: [ubuntu-latest, windows-latest, macos-15]
-    # push 到 main 时不跑 macOS: 排队不可控，会把 CI 长期吊在 queued/in_progress 或
-    # 判红，却与代码无关。PR 与手动触发仍跑（覆盖面不减），macOS 专属行为
-    # （launchctl 自启 / 钥匙串 / 路径语义）另由 release 的真实 macOS 构建覆盖。
-    if: ${{ matrix.os != 'macos-15' || github.event_name != 'push' }}
+        # macOS 单独成 job（见 pytest-macos）:
+        # ① job 级 if 不能引用 matrix 上下文 —— 引用会让整个 workflow 解析失败,
+        #    run 里连一个 job 都不生成 (v2.2.2b ci 实证);
+        # ② push 时不跑 macOS, 避免 runner 排队把 CI 长期吊在 queued 或判红。
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -107,6 +104,46 @@ jobs:
         # 若将来出现某第三方库的平台独有警告导致误红, 应修库而不是放宽本步骤。
         if: runner.os == 'Linux'
         run: python -m pytest tests/ --timeout=120 -W error::DeprecationWarning
+
+  # macOS 测试独立成 job: 只在 PR / 手动触发时执行, 且固定 macos-15
+  # (macos-latest 现在指向 macOS 26 Arm64, 容量更紧)。v2.2.2b 实测: macos-latest
+  # 与 macos-15 都曾排队 20 分钟拿不到 runner 并被 GitHub 取消 —— 那是 cancelled,
+  # 与代码无关, 所以不放进 push 门禁; macOS 专属行为(launchctl 自启 / 钥匙串 /
+  # 路径语义)另由 release 里真实的 macOS 构建覆盖。
+  #
+  # 步骤与上面的 pytest 一致, 刻意复制而不是用 YAML 锚点: 锚点在 workflow 里的
+  # 支持带解析差异风险, 复制一份更稳 (改动时两处一起改)。
+  pytest-macos:
+    name: pytest (macos-15)
+    if: ${{ github.event_name != 'push' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Syntax check (Python)
+        run: python -m compileall -q app scripts tests entry.py
+
+      - name: Version invariants
+        run: python scripts/check_versions.py
+
+      - name: Run tests
+        run: python -m pytest tests/ --cov=app --cov-report=term-missing --timeout=120
 
   # Android 侧有 17 个 JVM 单测 + 4 个仪器测试源集, 但两个 release workflow 只跑
   # assembleRelease —— 单测从未执行, androidTest 连编译都没验证。这里补上
