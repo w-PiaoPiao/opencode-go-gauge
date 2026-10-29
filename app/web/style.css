@@ -18,6 +18,7 @@
   --danger: #ef4444;
   --danger-soft: #fdf0f0;
   --muted: #f1eff6;
+  --hm-ring: #3f3560;
   --titlebar: #ffffff;
   --sidebar: #fbfaf8;
   --hover: #f3f0fb;
@@ -39,6 +40,7 @@ html[data-theme="dark"] {
   --primary-strong: #8b6cf6;
   --primary-soft: #272040;
   --muted: #232030;
+  --hm-ring: #ded7f5;
   --titlebar: #1d1a26;
   --sidebar: #181520;
   --hover: #272040;
@@ -437,13 +439,25 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .hm-left { flex: 1 1 auto; min-width: var(--hm-w, 0px); }
 .hm-scroll { overflow-x: auto; padding-bottom: 4px; }
 .hm-grid { display: grid; grid-template-rows: repeat(7, 12px); grid-auto-flow: column; grid-auto-columns: 12px; gap: 3px; width: max-content; }
+/* 五档色阶: CIELAB 等亮度步进, 相邻对比 ≈1.4:1 —— 关键是档 1 与空档必须能分辨.
+   旧配色档 1 用 --primary-soft, 与 --muted 的对比只有 1.03:1(暗)/1.00:1(亮),
+   有量但量低的日子肉眼等于空白格; 旧档 3/档 4 (primary / primary-strong) 之间
+   也只有 1.20:1 且档 4 更暗, 五档实际只有三档可辨. */
 .hcell { width: 12px; height: 12px; border-radius: 3px; background: var(--muted); }
 .hcell.empty { visibility: hidden; }
-.hcell.lv1 { background: var(--primary-soft); }
-.hcell.lv2 { background: #c9b4f8; }
-.hcell.lv3 { background: var(--primary); }
-.hcell.lv4 { background: var(--primary-strong); }
-html[data-theme="dark"] .hcell.lv2 { background: #4a3d78; }
+.hcell.lv1 { background: #d9c9f7; }
+.hcell.lv2 { background: #bea4f8; }
+.hcell.lv3 { background: #a080f7; }
+.hcell.lv4 { background: #7c5cf6; }
+html[data-theme="dark"] .hcell.lv1 { background: #3f355d; }
+html[data-theme="dark"] .hcell.lv2 { background: #5d4c8d; }
+html[data-theme="dark"] .hcell.lv3 { background: #7c63c1; }
+html[data-theme="dark"] .hcell.lv4 { background: #9d7cf8; }
+/* 峰值日: 颜色已封顶在档 4, 用一圈描边单独标出「这是记录日」, 不靠再加一档颜色 */
+.hcell.peak { box-shadow: 0 0 0 1.5px var(--hm-ring); }
+/* 注意: 图例下面不要再加一行文字说明. .hm-left 是 flex:1 1 auto, 宽度取 max-content,
+   一行长文案会把左列撑到 400px+, 右侧摘要 (104px + 16px 间距) 挤不进同一行就换行,
+   卡片下半截全空. 档位口径与阈值一律走 title. */
 .hm-legend { display: flex; align-items: center; gap: 4px; margin-top: 8px; font-size: 10.5px; color: var(--text3); }
 .hm-legend .hcell { width: 10px; height: 10px; }
 /* 右侧摘要 (峰值 / 当前连续 / 最长连续) — 填满网格右侧留白, 靠右成组.
@@ -454,11 +468,28 @@ html[data-theme="dark"] .hcell.lv2 { background: #4a3d78; }
 .hm-stat-l { font-size: 11px; line-height: 1.25; color: var(--text3); white-space: nowrap; }
 .hm-stat-v { font-size: 16px; font-weight: 700; line-height: 1.3; font-family: var(--font-mono); font-variant-numeric: tabular-nums; margin-top: 1px; }
 .hm-stat-v small { font-size: 11px; font-weight: 500; color: var(--text3); font-family: var(--font-sans); margin-left: 4px; }
-/* 1001~1240px: 热力图卡在 1fr 列里放不下右侧摘要, 摘要改到图例下方横向三栏 */
-@media (min-width: 1001px) and (max-width: 1240px) {
+/* 摘要改成网格下方横向三栏的判定: 按「卡片实际宽度」而不是视口宽度.
+   网格 19 列固定 282px, 加摘要 104px 与 16px 间距 = 402px 内容宽才排得下, 临界处浏览器
+   取整可能差一两像素, 阈值取 410 留余量. 放不下时若只是普通换行, 摘要会靠右飘在下方、
+   左侧一大片空 —— 拆成横排才不浪费纵向空间.
+   之前用 @media 1001~1240px 判视口, 但那个区间卡片宽度由 .two-col 列宽决定 (可能只有
+   430px), 视口够宽而卡片不够宽时正好漏判, 表现就是用户截到的那张: 网格在上、摘要孤零零
+   挂在右下、中间全空. container query 直接量 .hm-body 自己. */
+.hm-body { container-type: inline-size; }
+@container (max-width: 410px) {
   .hm-left { flex: 1 1 100%; }
   .hm-stats { flex: 1 1 100%; margin-left: 0; display: flex; padding: 4px 12px; }
   .hm-stat { flex: 1; padding: 3px 0 3px 12px; }
   .hm-stat:first-child { padding-left: 0; }
   .hm-stat + .hm-stat { border-top: none; border-left: 1px solid var(--border); }
+}
+/* 兜底 (WebView 不认 container query): 仍按视口判断, 与上面同一套横排规则 */
+@supports not (container-type: inline-size) {
+  @media (min-width: 1001px) and (max-width: 1240px) {
+    .hm-left { flex: 1 1 100%; }
+    .hm-stats { flex: 1 1 100%; margin-left: 0; display: flex; padding: 4px 12px; }
+    .hm-stat { flex: 1; padding: 3px 0 3px 12px; }
+    .hm-stat:first-child { padding-left: 0; }
+    .hm-stat + .hm-stat { border-top: none; border-left: 1px solid var(--border); }
+  }
 }
