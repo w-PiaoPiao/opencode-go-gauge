@@ -316,7 +316,7 @@ gh api repos/w-PiaoPiao/opencode-go-gauge/branches/main --jq .protected    # P1-
 2. **分支保护未启用**：属仓库设置，代码无法自动开启；`docs/release.md` 已写操作步骤。发布硬闸门已由 `preflight` 承担。
 3. **GitHub Actions 无法本机实跑**：6 个 workflow 已过 YAML 解析、`check_versions`/`build.py` 已 dry-run；`android-unit-tests` job 与 Windows DPAPI 真跑用例需首次 push 后在 CI 确认。
 4. **Windows lock 的 Windows-only 传递依赖**按 PyPI metadata 解析（顶层版本未动），首次 Windows CI 构建若个别 pin 冲突需微调。
-5. **Android / HarmonyOS 版本未推进**：按版本策略，Android 仅在侧适配后升版；当前统一 release 会跳过 APK（`android_ready=false`），属预期。
+5. **Android 已适配到 2.2.2b（2026-10-29 补齐，原条目为"版本未推进"）**：Android 侧同步了桌面 2.2.2 代表的特性——DeepSeek 峰谷分档（`PeakSplit.kt`：按模型计价起始门 / UTC 峰窗 / 2026 法定节假日 + `ds_peak_split` 开关 + 统计页模型与趋势按「峰 / 谷」拆条）、两段式 tier 查询（覆盖明细与 `usage_charts` 双源）、`daily_stats`/`model_trend` 恰好 N 天、`fmtTokens` 进位、清理同事务删除 `usage_charts`、CSV 公式注入转义、更新检查过滤 prerelease/draft。`versionName=2.2.2b` / `versionCode=14`，统一 release 的 `android_ready=true`，APK 已随 `v2.2.2b` 发布（126 JVM 单测全绿）。HarmonyOS 仍为独立版本（1.0.0，只校验格式）。
 6. **超大备份导入**：单事务原子性保留，导入连接 `busy_timeout=60s` + 导入/同步互斥（409）；1M 记录上限约 20s 可导入；若未来要支持 >~2.5M 行，需要重新评估"分批提交（牺牲单事务原子性）"或提高上限。
 
 ### 7.5 过程中的一次测试污染事故（已闭环，如实记录）
