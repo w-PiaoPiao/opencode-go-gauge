@@ -34,7 +34,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS 固定 macos-15 而不是 macos-latest: latest 现在指向 macOS 26 Arm64,
+        # 容量紧张 —— v2.2.2b 实测排队 20 分钟仍拿不到 runner, 最后被系统取消,
+        # 让整个 ci run 变红。macos-15 是发布链里已验证可用的 arm64 镜像。
+        os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
