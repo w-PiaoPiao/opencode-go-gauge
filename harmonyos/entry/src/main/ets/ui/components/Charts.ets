@@ -1,113 +1,72 @@
 /**
- * 图表组件 (ArkUI 原生, 零三方依赖) —— 配额环 / 24h 柱状图 / 环形图 / 折线趋势。
- * 组件内封闭实现, 后续如需可平滑替换为 mpchart 等三方库。
+ * 图表组件（ArkUI 原生，零三方依赖）—— 24h 双柱 / 环形占比 / 多序列折线 / 模型堆叠面积 / 日历热力图。
+ *
+ * - 布局型图表（柱状/热力图）用 ArkUI 布局元素实现，天然响应式 + 可做弹性动画；
+ * - 曲线类图表用 Canvas 绘制，进入时整体淡入（Canvas 不逐帧重绘，避免动画掉帧）。
+ * - 颜色一律来自 Theme 令牌；数据由页面传入，组件不读 Repo/DB。
  */
 import { HourStat } from '../../common/model/Models'
-import { Theme } from '../theme/Theme'
+import { I18n } from '../../common/i18n/I18n'
+import { Theme, Dimens } from '../theme/Theme'
 
-/** 配额环: Ring Progress + 中央百分比。 */
-@Component
-export struct QuotaRing {
-  @Prop percent: number = 0
-  @Prop label: string = ''
-  @Prop caption: string = ''
-  @Prop accent: string = Theme.accent()
-
-  build() {
-    Column({ space: 6 }) {
-      Stack({ alignContent: Alignment.Center }) {
-        Progress({ value: this.percent, total: 100, type: ProgressType.Ring })
-          .width(86)
-          .height(86)
-          .style({ strokeWidth: 9 })
-          .color(this.accent)
-          .rotate({ angle: -90 })
-        Text(`${Math.round(this.percent)}%`)
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-      }
-      Text(this.label)
-        .fontSize(13)
-        .fontColor(Theme.text())
-      Text(this.caption)
-        .fontSize(11)
-        .fontColor(Theme.sub())
-        .maxLines(1)
-    }
-    .width(120)
-    .padding(8)
-    .backgroundColor(Theme.surfaceSoft())
-    .borderRadius(12)
-  }
+/** 环形图 / 占比图的一段。 */
+export interface ChartSegment {
+  name: string
+  value: number
+  color: string
 }
 
-/** 24h 输入/输出双柱状图。 */
+/** 折线/面积图的一条序列。 */
+export interface TrendSeries {
+  name: string
+  color: string
+  values: number[]
+}
+
+/** 热力图的一天。 */
+export interface HeatDay {
+  date: string
+  value: number
+  requests: number
+  cost: number
+}
+
+/** 24 小时输入/输出双柱图（手机/宽屏共用，宽度自适应）。 */
 @Component
 export struct BarChart24h {
-  @Prop hours: HourStat[] = []
+  @Prop @Watch('onData') hours: HourStat[] = []
+  /** true = 输入含缓存读/写（与桌面「含缓存」口径一致）。 */
+  @Prop totalMode: boolean = false
+  @Prop chartHeight: number = 132
+  @Prop inputLabel: string = ''
+  @Prop outputLabel: string = ''
+  @State private grow: number = 0
 
-  build() {
-    Column({ space: 4 }) {
-      Row() {
-        Text(`${this.hours.length} 小时输入/输出`)
-          .fontSize(12)
-          .fontColor(Theme.sub())
-        Blank()
-        Row({ space: 8 }) {
-          Row({ space: 3 }) {
-            Circle({ width: 8, height: 8 }).fill('#4C8DFF')
-            Text('输入').fontSize(11).fontColor(Theme.sub())
-          }
-          Row({ space: 3 }) {
-            Circle({ width: 8, height: 8 }).fill('#FFB74D')
-            Text('输出').fontSize(11).fontColor(Theme.sub())
-          }
-        }
-      }
-      .width('100%')
+  aboutToAppear(): void {
+    this.play()
+  }
 
-      Row({ space: 2 }) {
-        ForEach(this.hours, (h: HourStat, idx: number) => {
-          Column({ space: 2 }) {
-            Column({ space: 1 }) {
-              Column()
-                .width(4)
-                .height(this.barHeight(h.input, true))
-                .backgroundColor('#4C8DFF')
-                .borderRadius(2)
-              Column()
-                .width(4)
-                .height(this.barHeight(h.output, false))
-                .backgroundColor('#FFB74D')
-                .borderRadius(2)
-            }
-            .height(96)
-            .justifyContent(FlexAlign.End)
-            if (idx % 4 === 0) {
-              Text(h.hour.slice(0, 2))
-                .fontSize(9)
-                .fontColor(Theme.faint())
-            } else {
-              Text('')
-                .fontSize(9)
-            }
-          }
-        }, (h: HourStat) => h.hour)
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Bottom)
-    }
-    .width('100%')
-    .padding(12)
-    .backgroundColor(Theme.surfaceSoft())
-    .borderRadius(12)
+  onData(): void {
+    this.play()
+  }
+
+  private play(): void {
+    this.grow = 0
+    animateTo({ duration: 450, curve: Curve.EaseOut }, () => {
+      this.grow = 1
+    })
+  }
+
+  private inputValue(h: HourStat): number {
+    return this.totalMode ? h.input + h.cacheRead + h.cacheWrite : h.input
   }
 
   private maxVal(): number {
     let m = 1
     for (const h of this.hours) {
-      if (h.input > m) {
-        m = h.input
+      const iv = this.inputValue(h)
+      if (iv > m) {
+        m = iv
       }
       if (h.output > m) {
         m = h.output
@@ -116,123 +75,592 @@ export struct BarChart24h {
     return m
   }
 
-  private barHeight(v: number, isInput: boolean): number {
+  private barH(v: number): number {
     const m = this.maxVal()
     const ratio = m > 0 ? v / m : 0
-    const h = Math.round(ratio * 88)
-    if (h < 2 && v > 0) {
-      return 2
+    return Math.max(2, ratio * this.chartHeight * this.grow)
+  }
+
+  build() {
+    Column({ space: 6 }) {
+      Row({ space: 12 }) {
+        Row({ space: 4 }) {
+          Circle({ width: 7, height: 7 }).fill(Theme.chartInput())
+          Text(this.inputLabel)
+            .fontSize(11)
+            .fontColor(Theme.faint())
+            .maxLines(1)
+        }
+        Row({ space: 4 }) {
+          Circle({ width: 7, height: 7 }).fill(Theme.chartOutput())
+          Text(this.outputLabel)
+            .fontSize(11)
+            .fontColor(Theme.faint())
+            .maxLines(1)
+        }
+        Blank()
+      }
+      .width('100%')
+
+      Stack({ alignContent: Alignment.TopStart }) {
+        // 网格线（4 条，顶部到底部均匀分布）
+        Column() {
+          ForEach([0, 1, 2, 3], (i: number) => {
+            Divider()
+              .strokeWidth(0.5)
+              .color(Theme.border())
+              .opacity(i === 3 ? 0.9 : 0.45)
+          }, (i: number) => `g_${i}`)
+        }
+        .width('100%')
+        .height(this.chartHeight)
+        .justifyContent(FlexAlign.SpaceBetween)
+
+        Row() {
+          ForEach(this.hours, (h: HourStat, idx: number) => {
+            Column() {
+              Row({ space: 1 }) {
+                Column()
+                  .width('46%')
+                  .height(this.barH(this.inputValue(h)))
+                  .backgroundColor(Theme.chartInput())
+                  .borderRadius(1)
+                Column()
+                  .width('46%')
+                  .height(this.barH(h.output))
+                  .backgroundColor(Theme.chartOutput())
+                  .borderRadius(1)
+              }
+              .width('100%')
+              .height(this.chartHeight)
+              .alignItems(VerticalAlign.Bottom)
+            }
+            .layoutWeight(1)
+          }, (h: HourStat) => h.hour)
+        }
+        .width('100%')
+        .height(this.chartHeight)
+      }
+      .width('100%')
+      .height(this.chartHeight)
+
+      Row() {
+        ForEach(this.hours, (h: HourStat, idx: number) => {
+          Text(idx % 4 === 0 ? h.hour.slice(0, 2) : '')
+            .fontSize(9)
+            .fontColor(Theme.faint())
+            .layoutWeight(1)
+            .textAlign(TextAlign.Center)
+        }, (h: HourStat) => `l_${h.hour}`)
+      }
+      .width('100%')
     }
-    return h
+    .width('100%')
   }
 }
 
-/** 环形占比图 + 图例 (由调用方渲染 legend 行)。 */
+/** 环形占比图：Canvas 绘制圆环 + 居中总量（尺寸自适应由调用方指定）。 */
 @Component
 export struct DonutChart {
-  @Prop percent: number = 0
+  @Prop @Watch('onData') segments: ChartSegment[] = []
+  @Prop centerValue: string = ''
   @Prop centerLabel: string = ''
-  @Prop accent: string = Theme.accent()
+  @Prop chartSize: number = 156
+  @Prop thickness: number = 16
+  @State private appear: number = 0
+  private settings: RenderingContextSettings = new RenderingContextSettings(true)
+  private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings)
+
+  aboutToAppear(): void {
+    animateTo({ duration: 380, curve: Curve.EaseOut }, () => {
+      this.appear = 1
+    })
+  }
+
+  onData(): void {
+    this.paint()
+  }
+
+  private total(): number {
+    let t = 0
+    for (const s of this.segments) {
+      if (s.value > 0) {
+        t += s.value
+      }
+    }
+    return t
+  }
+
+  private paint(): void {
+    const c = this.ctx
+    const w = this.chartSize
+    const h = this.chartSize
+    const r = w / 2 - this.thickness / 2 - 2
+    c.clearRect(0, 0, w, h)
+    // 轨道
+    c.lineWidth = this.thickness
+    c.lineCap = 'butt'
+    c.strokeStyle = Theme.surfaceStrong()
+    c.beginPath()
+    c.arc(w / 2, h / 2, r, 0, Math.PI * 2)
+    c.stroke()
+    const total = this.total()
+    if (total <= 0) {
+      return
+    }
+    let start = -Math.PI / 2
+    for (const seg of this.segments) {
+      if (seg.value <= 0) {
+        continue
+      }
+      const angle = seg.value / total * Math.PI * 2
+      c.strokeStyle = seg.color
+      c.beginPath()
+      c.arc(w / 2, h / 2, r, start, start + angle)
+      c.stroke()
+      start += angle
+    }
+  }
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
-      Progress({ value: this.percent, total: 100, type: ProgressType.Ring })
-        .width(110)
-        .height(110)
-        .style({ strokeWidth: 12 })
-        .color(this.accent)
-        .rotate({ angle: -90 })
-      Column({ space: 0 }) {
-        Text(this.centerLabel)
-          .fontSize(16)
+      Canvas(this.ctx)
+        .width(this.chartSize)
+        .height(this.chartSize)
+        .onReady(() => {
+          this.paint()
+        })
+        .opacity(this.appear)
+      Column({ space: 2 }) {
+        Text(this.centerValue)
+          .fontSize(17)
           .fontWeight(FontWeight.Bold)
+          .fontColor(Theme.text())
+          .maxLines(1)
+        if (this.centerLabel.length > 0) {
+          Text(this.centerLabel)
+            .fontSize(11)
+            .fontColor(Theme.faint())
+            .maxLines(1)
+        }
       }
     }
-    .padding(8)
+    .width(this.chartSize)
+    .height(this.chartSize)
   }
 }
 
-/** 折线趋势图 (多序列归一化, Canvas 绘制)。 */
+/** 多序列折线图：Canvas 绘制网格 + 折线，坐标轴文字用布局承载。 */
 @Component
-export struct TrendLine {
-  // @Watch 必需: ArkUI 的 Canvas 不会因状态变化自动重绘, 只在 onReady 回调里
-  // 画一次. 没有它时, 统计页 load() 换掉数据后曲线仍是上一份 (要等组件重建,
-  // 例如切 tab, 才会更新).
-  @Prop @Watch('onSeriesChanged') series: TrendPointSeries[] = []
-  @Prop chartHeight: number = 150
+export struct TrendLineChart {
+  @Prop @Watch('onData') series: TrendSeries[] = []
+  @Prop labels: string[] = []
+  @Prop chartHeight: number = 190
+  @Prop yMaxLabel: string = ''
+  @Prop yMidLabel: string = ''
+  @State private appear: number = 0
+  @State private cw: number = 0
   private settings: RenderingContextSettings = new RenderingContextSettings(true)
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings)
-  /** onReady 是否已触发: 数据先到时不能画 (画布尺寸为 0), 需在 ready 后补画。 */
-  private ready: boolean = false
 
-  onSeriesChanged(): void {
-    if (this.ready) {
-      this.draw()
+  aboutToAppear(): void {
+    animateTo({ duration: 380, curve: Curve.EaseOut }, () => {
+      this.appear = 1
+    })
+  }
+
+  onData(): void {
+    this.paint()
+  }
+
+  private maxVal(): number {
+    let m = 1
+    for (const s of this.series) {
+      for (const v of s.values) {
+        if (v > m) {
+          m = v
+        }
+      }
+    }
+    return m
+  }
+
+  private labelAt(index: number): string {
+    if (index < 0 || index >= this.labels.length) {
+      return ''
+    }
+    return this.labels[index]
+  }
+
+  private paint(): void {
+    const c = this.ctx
+    const w = this.cw
+    const h = this.chartHeight
+    if (w <= 0 || h <= 0) {
+      return
+    }
+    const left = 6
+    const right = 6
+    const top = 8
+    const bottom = 14
+    const plotW = w - left - right
+    const plotH = h - top - bottom
+    c.clearRect(0, 0, w, h)
+    // 网格
+    c.lineWidth = 0.5
+    c.strokeStyle = Theme.border()
+    for (let i = 0; i <= 3; i++) {
+      const y = top + plotH * i / 3
+      c.beginPath()
+      c.moveTo(left, y)
+      c.lineTo(left + plotW, y)
+      c.stroke()
+    }
+    const n = this.labels.length
+    if (n < 2) {
+      return
+    }
+    const maxV = this.maxVal()
+    for (const s of this.series) {
+      if (s.values.length === 0) {
+        continue
+      }
+      c.lineWidth = 2
+      c.strokeStyle = s.color
+      c.beginPath()
+      for (let i = 0; i < n; i++) {
+        const v = i < s.values.length ? s.values[i] : 0
+        const x = left + plotW * i / (n - 1)
+        const y = top + plotH * (1 - v / maxV)
+        if (i === 0) {
+          c.moveTo(x, y)
+        } else {
+          c.lineTo(x, y)
+        }
+      }
+      c.stroke()
     }
   }
 
   build() {
-    Canvas(this.ctx)
+    Column({ space: 6 }) {
+      Row({ space: 12 }) {
+        ForEach(this.series, (s: TrendSeries) => {
+          Row({ space: 4 }) {
+            Circle({ width: 7, height: 7 }).fill(s.color)
+            Text(s.name)
+              .fontSize(11)
+              .fontColor(Theme.faint())
+              .maxLines(1)
+          }
+        }, (s: TrendSeries) => s.name)
+        Blank()
+      }
       .width('100%')
-      .height(this.chartHeight)
-      .backgroundColor(Theme.surfaceSoft())
-      .borderRadius(12)
-      .onReady(() => {
-        this.ready = true
-        this.draw()
-      })
+
+      Row({ space: 6 }) {
+        Column() {
+          if (this.yMaxLabel.length > 0) {
+            Text(this.yMaxLabel).fontSize(9).fontColor(Theme.faint())
+          }
+          Blank()
+          if (this.yMidLabel.length > 0) {
+            Text(this.yMidLabel).fontSize(9).fontColor(Theme.faint())
+          }
+          Blank()
+          Text('0').fontSize(9).fontColor(Theme.faint())
+        }
+        .height(this.chartHeight)
+        .alignItems(HorizontalAlign.End)
+        .justifyContent(FlexAlign.SpaceBetween)
+
+        Column() {
+          Canvas(this.ctx)
+            .width('100%')
+            .height(this.chartHeight)
+            .onReady(() => {
+              this.paint()
+            })
+            .onAreaChange((_old: Area, nw: Area) => {
+              this.cw = Number(nw.width)
+              this.paint()
+            })
+            .opacity(this.appear)
+          Row() {
+            Text(this.labelAt(0)).fontSize(9).fontColor(Theme.faint())
+            Blank()
+            Text(this.labelAt(Math.floor(this.labels.length / 2)))
+              .fontSize(9)
+              .fontColor(Theme.faint())
+            Blank()
+            Text(this.labelAt(this.labels.length - 1)).fontSize(9).fontColor(Theme.faint())
+          }
+          .width('100%')
+          .padding({ left: 2, right: 2 })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+    }
+    .width('100%')
+  }
+}
+
+/** 模型用量趋势：按天堆叠面积图（每个模型一层），进入淡入。 */
+@Component
+export struct ModelTrendChart {
+  @Prop @Watch('onData') series: TrendSeries[] = []
+  @Prop labels: string[] = []
+  @Prop chartHeight: number = 150
+  @State private appear: number = 0
+  @State private cw: number = 0
+  private settings: RenderingContextSettings = new RenderingContextSettings(true)
+  private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings)
+
+  aboutToAppear(): void {
+    animateTo({ duration: 380, curve: Curve.EaseOut }, () => {
+      this.appear = 1
+    })
   }
 
-  private draw(): void {
-    const w = this.ctx.width
-    const h = this.ctx.height
-    if (w <= 0 || h <= 0) {
+  onData(): void {
+    this.paint()
+  }
+
+  private labelAt(index: number): string {
+    if (index < 0 || index >= this.labels.length) {
+      return ''
+    }
+    return this.labels[index]
+  }
+
+  private stacked(): number[][] {
+    const out: number[][] = []
+    const n = this.labels.length
+    let base: number[] = []
+    for (let i = 0; i < n; i++) {
+      base.push(0)
+    }
+    for (const s of this.series) {
+      const next: number[] = []
+      for (let i = 0; i < n; i++) {
+        const v = i < s.values.length ? s.values[i] : 0
+        next.push(base[i] + v)
+      }
+      out.push(next)
+      base = next
+    }
+    return out
+  }
+
+  private paint(): void {
+    const c = this.ctx
+    const w = this.cw
+    const h = this.chartHeight
+    const n = this.labels.length
+    if (w <= 0 || h <= 0 || n < 2) {
       return
     }
-    this.ctx.clearRect(0, 0, w, h)
-    const pad = 8
-    let maxV = 0
-    let n = 0
-    for (const s of this.series) {
-      if (s.values.length > n) {
-        n = s.values.length
-      }
-      for (const v of s.values) {
+    c.clearRect(0, 0, w, h)
+    const stack = this.stacked()
+    let maxV = 1
+    if (stack.length > 0) {
+      const top = stack[stack.length - 1]
+      for (const v of top) {
         if (v > maxV) {
           maxV = v
         }
       }
     }
-    if (n === 0 || maxV <= 0) {
-      return
+    const topPad = 6
+    const plotH = h - topPad
+    const xAt = (i: number): number => w * i / (n - 1)
+    const yAt = (v: number): number => topPad + plotH * (1 - v / maxV)
+    let lower: number[] = []
+    for (let i = 0; i < n; i++) {
+      lower.push(0)
     }
-    const step = n > 1 ? (w - pad * 2) / (n - 1) : 0
-    const top = pad + 4
-    const bottom = h - pad - 4
-    for (const s of this.series) {
-      if (s.values.length < 2) {
-        continue
+    for (let k = 0; k < stack.length; k++) {
+      const upper = stack[k]
+      c.fillStyle = this.series[k].color
+      c.globalAlpha = 0.85
+      c.beginPath()
+      c.moveTo(xAt(0), yAt(upper[0]))
+      for (let i = 1; i < n; i++) {
+        c.lineTo(xAt(i), yAt(upper[i]))
       }
-      this.ctx.beginPath()
-      for (let i = 0; i < s.values.length; i++) {
-        const x = pad + i * step
-        const y = bottom - (s.values[i] / maxV) * (bottom - top)
-        if (i === 0) {
-          this.ctx.moveTo(x, y)
-        } else {
-          this.ctx.lineTo(x, y)
+      for (let i = n - 1; i >= 0; i--) {
+        c.lineTo(xAt(i), yAt(lower[i]))
+      }
+      c.closePath()
+      c.fill()
+      c.globalAlpha = 1
+      lower = upper
+    }
+  }
+
+  build() {
+    Column({ space: 6 }) {
+      Flex({ wrap: FlexWrap.Wrap }) {
+        ForEach(this.series.slice(0, 8), (s: TrendSeries) => {
+          Row({ space: 4 }) {
+            Circle({ width: 7, height: 7 }).fill(s.color)
+            Text(s.name)
+              .fontSize(11)
+              .fontColor(Theme.faint())
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+        }, (s: TrendSeries) => s.name)
+      }
+      .width('100%')
+
+      Column() {
+        Canvas(this.ctx)
+          .width('100%')
+          .height(this.chartHeight)
+          .onReady(() => {
+            this.paint()
+          })
+          .onAreaChange((_old: Area, nw: Area) => {
+            this.cw = Number(nw.width)
+            this.paint()
+          })
+          .opacity(this.appear)
+        Row() {
+          Text(this.labelAt(0)).fontSize(9).fontColor(Theme.faint())
+          Blank()
+          Text(this.labelAt(Math.floor(this.labels.length / 2)))
+            .fontSize(9)
+            .fontColor(Theme.faint())
+          Blank()
+          Text(this.labelAt(this.labels.length - 1)).fontSize(9).fontColor(Theme.faint())
         }
+        .width('100%')
+        .padding({ left: 2, right: 2 })
       }
-      this.ctx.strokeStyle = s.color
-      this.ctx.lineWidth = 2
-      this.ctx.lineJoin = 'round'
-      this.ctx.stroke()
+      .width('100%')
     }
+    .width('100%')
   }
 }
 
-export interface TrendPointSeries {
-  name: string
-  color: string
-  values: number[]
+/** 日历热力图：7 行 × N 周，档位色来自 Theme.heatRamp；底部带"少→多"图例。 */
+@Component
+export struct CalendarHeatmap {
+  @Prop days: HeatDay[] = []
+  @Prop ramp: string[] = []
+  @Prop cellHeight: number = 11
+  @Prop maxValue: number = 0
+
+  private paddedDays(): HeatDay[] {
+    const out: HeatDay[] = []
+    if (this.days.length === 0) {
+      return out
+    }
+    const first = this.days[0].date
+    const d = new Date(`${first}T00:00:00`)
+    let lead = d.getDay() - 1
+    if (lead < 0) {
+      lead = 6
+    }
+    for (let i = 0; i < lead; i++) {
+      out.push({ date: '', value: 0, requests: 0, cost: 0 })
+    }
+    for (const day of this.days) {
+      out.push(day)
+    }
+    return out
+  }
+
+  private weeks(): HeatDay[][] {
+    const padded = this.paddedDays()
+    const out: HeatDay[][] = []
+    let week: HeatDay[] = []
+    for (const day of padded) {
+      week.push(day)
+      if (week.length === 7) {
+        out.push(week)
+        week = []
+      }
+    }
+    if (week.length > 0) {
+      while (week.length < 7) {
+        week.push({ date: '', value: 0, requests: 0, cost: 0 })
+      }
+      out.push(week)
+    }
+    return out
+  }
+
+  private maxOf(): number {
+    if (this.maxValue > 0) {
+      return this.maxValue
+    }
+    let m = 1
+    for (const d of this.days) {
+      if (d.value > m) {
+        m = d.value
+      }
+    }
+    return m
+  }
+
+  private level(v: number): number {
+    if (v <= 0) {
+      return 0
+    }
+    const ratio = v / this.maxOf()
+    if (ratio >= 0.75) {
+      return 4
+    }
+    if (ratio >= 0.5) {
+      return 3
+    }
+    if (ratio >= 0.25) {
+      return 2
+    }
+    return 1
+  }
+
+  private cellColor(v: number): string {
+    const ramp = this.ramp.length > 0 ? this.ramp : Theme.heatRamp()
+    const lv = this.level(v)
+    return lv === 0 ? Theme.surfaceSoft() : ramp[lv - 1]
+  }
+
+  build() {
+    Column({ space: 6 }) {
+      Row({ space: 2 }) {
+        ForEach(this.weeks(), (week: HeatDay[], wi: number) => {
+          Column({ space: 2 }) {
+            ForEach(week, (day: HeatDay, di: number) => {
+              Column()
+                .width('100%')
+                .height(this.cellHeight)
+                .backgroundColor(this.cellColor(day.value))
+                .borderRadius(2)
+            }, (day: HeatDay, di: number) => `h_${wi}_${di}_${day.date}`)
+          }
+          .layoutWeight(1)
+        }, (week: HeatDay[], wi: number) => `w_${wi}`)
+      }
+      .width('100%')
+
+      Row({ space: 4 }) {
+        Text(I18n.t('fewer')).fontSize(9).fontColor(Theme.faint())
+        ForEach([0, 1, 2, 3, 4], (lv: number) => {
+          Column()
+            .width(9)
+            .height(9)
+            .backgroundColor(lv === 0 ? Theme.surfaceSoft() : (this.ramp.length > 0 ? this.ramp : Theme.heatRamp())[lv - 1])
+            .borderRadius(2)
+        }, (lv: number) => `lg_${lv}`)
+        Text(I18n.t('more')).fontSize(9).fontColor(Theme.faint())
+        Blank()
+      }
+      .width('100%')
+    }
+    .width('100%')
+  }
 }

@@ -7,7 +7,7 @@ import { AppDb } from './AppDb'
 import { RowReader } from './RowReader'
 import { Fmt } from '../../common/util/Fmt'
 import { MonthlyCycle } from '../../common/util/MonthlyCycle'
-import { DailyStat, HourStat, ModelStat, SessionStat, Totals, UsageRecordRow } from '../../common/model/Models'
+import { DailyStat, HourStat, ModelDailyRow, ModelStat, SessionStat, Totals, UsageRecordRow } from '../../common/model/Models'
 
 export interface UsageRecordEntity {
   usgId: string
@@ -290,7 +290,7 @@ export class UsageDao {
        WHERE account_id = ? AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
        GROUP BY substr(datetime(created_at, 'localtime'), 1, 10)
        ORDER BY date ASC`,
-      [accountId.toString(), `-${clamped} days`],
+      [accountId.toString(), `-${clamped - 1} days`],
     )
     const reader = new RowReader(rs)
     const byDate: Map<string, DailyStat> = new Map()
@@ -318,7 +318,9 @@ export class UsageDao {
     // 只返回有记录的天会让趋势图 x 轴压缩、缺天跳线
     const out: DailyStat[] = []
     const now = new Date()
-    for (let i = clamped; i >= 0; i--) {
+    // 恰好 N 个日历日 (今天-N+1 … 今天): 原先 i 从 clamped 起会多出 1 天,
+    // 与「N 日」文案/安卓 I10 口径不一致
+    for (let i = clamped - 1; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
       const key = `${d.getFullYear()}-${Fmt.pad2(d.getMonth() + 1)}-${Fmt.pad2(d.getDate())}`
       const existing = byDate.get(key)
@@ -348,7 +350,9 @@ export class UsageDao {
       `SELECT CAST(strftime('%H', datetime(created_at, 'localtime')) AS INTEGER) AS hour,
               COALESCE(SUM(input_tokens), 0) AS input,
               COALESCE(SUM(output_tokens), 0) AS output,
-              COALESCE(SUM(reasoning_tokens), 0) AS reasoning
+              COALESCE(SUM(reasoning_tokens), 0) AS reasoning,
+              COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+              COALESCE(SUM(cache_write_5m_tokens + cache_write_1h_tokens), 0) AS cache_write
        FROM usage_records
        WHERE account_id = ? AND substr(datetime(created_at, 'localtime'), 1, 10) = date('now', 'localtime')
        GROUP BY hour`,
@@ -363,6 +367,8 @@ export class UsageDao {
         input: reader.getLong('input'),
         output: reader.getLong('output'),
         reasoning: reader.getLong('reasoning'),
+        cacheRead: reader.getLong('cache_read'),
+        cacheWrite: reader.getLong('cache_write'),
       })
     }
     reader.close()
@@ -374,6 +380,8 @@ export class UsageDao {
         input: r !== undefined ? r.input : 0,
         output: r !== undefined ? r.output : 0,
         reasoning: r !== undefined ? r.reasoning : 0,
+        cacheRead: r !== undefined ? r.cacheRead : 0,
+        cacheWrite: r !== undefined ? r.cacheWrite : 0,
       })
     }
     return out
@@ -419,6 +427,36 @@ export class UsageDao {
         totalOutputTokens: reader.getLong('total_output_tokens'),
         totalCostUsd: reader.getDouble('total_cost_usd'),
         hitRate: Math.round(hitRate * 100) / 100,
+      })
+    }
+    reader.close()
+    return out
+  }
+
+  /** 近 N 天「日 × 模型」聚合 —— db.model_daily_stats (按账号；供模型用量趋势图)。 */
+  async modelDailyStats(days: number, accountId: number): Promise<ModelDailyRow[]> {
+    const clamped = Math.min(365, Math.max(1, days))
+    const rs = await this.store().querySql(
+      `SELECT substr(datetime(created_at, 'localtime'), 1, 10) AS date,
+              model,
+              COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens), 0) AS input,
+              COALESCE(SUM(output_tokens), 0) AS output,
+              COALESCE(SUM(cost_usd), 0) AS cost_usd
+       FROM usage_records
+       WHERE account_id = ? AND substr(datetime(created_at, 'localtime'), 1, 10) >= date('now', 'localtime', ?)
+       GROUP BY date, model
+       ORDER BY date ASC`,
+      [accountId.toString(), `-${clamped - 1} days`],
+    )
+    const reader = new RowReader(rs)
+    const out: ModelDailyRow[] = []
+    while (reader.next()) {
+      out.push({
+        date: reader.getStr('date'),
+        model: reader.getStr('model'),
+        input: reader.getLong('input'),
+        output: reader.getLong('output'),
+        costUsd: reader.getDouble('cost_usd'),
       })
     }
     reader.close()
@@ -574,9 +612,9 @@ export class UsageDao {
   /** 清除 injectSampleData 注入的调试记录 (debug 构建的设置页入口), 返回删除条数。 */
   async clearSampleData(): Promise<number> {
     const store = this.store()
-    const rs = await store.querySql(
-      "SELECT COUNT(*) AS count FROM usage_records WHERE usg_id LIKE 'usg_sample_%'",
-    )
+    // v1.0 起演示数据前缀为 usg_demo_；兼容历史调试注入的 usg_sample_ 前缀
+    const where = "usg_id LIKE 'usg_sample_%' OR usg_id LIKE 'usg_demo_%'"
+    const rs = await store.querySql(`SELECT COUNT(*) AS count FROM usage_records WHERE ${where}`)
     const reader = new RowReader(rs)
     let count = 0
     if (reader.next()) {
@@ -586,7 +624,7 @@ export class UsageDao {
     if (count === 0) {
       return 0
     }
-    await store.executeSql("DELETE FROM usage_records WHERE usg_id LIKE 'usg_sample_%'")
+    await store.executeSql(`DELETE FROM usage_records WHERE ${where}`)
     return count
   }
 }

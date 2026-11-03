@@ -4,12 +4,12 @@
 #
 # ⚠️ 前提 (公共 runner 需要):
 #   1. 安装 HarmonyOS 命令行工具链 (hvigor/ohpm/node) 与 SDK (API 24) —
-#      建议以自托管 runner + 本机 DevEco 工具目录运行, 或在 Actions 中下载
-#      developer command-line tools (HarmonyOS Command Line Tools)。
-#   2. 签名材料 (release.p12 / 签名 Profile p7b / 证书 cer) 存入仓库 Secrets:
-#      HAP_STORE_FILE / HAP_STORE_PASSWORD / HAP_KEY_ALIAS / HAP_KEY_PASSWORD /
-#      HAP_PROFILE_P7B / HAP_SIGN_CER  (详见 harmonyos/docs/agc-release-checklist.md)
-#   3. 构建时在 build-profile.json5 注入 signingConfigs (本地调试可跳过, 产物为 unsigned)。
+#      建议以自托管 runner + 本机 DevEco 工具目录运行。
+#   2. 本 workflow 只产 **unsigned** HAP/.app 作为 CI 构建产物（GitHub Release 附件）。
+#      AppGallery 上架必须用发布证书 + 发布 Profile 签名的 .app，签名材料敏感且需
+#      hvigor 兼容的加密格式（material/ 目录），请在本地按 harmonyos/scripts/
+#      {gen-signing-material.js,inject-signing.sh} + docs/release-guide.md 完成；
+#      CI 不存放签名密钥。
 #
 # 本文件相对历史版本的修复:
 # - 签名注入步骤原写作 step 级 `if: env.HAP_STORE_PASSWORD != ''` —— GitHub 的
@@ -33,18 +33,9 @@ permissions:
 jobs:
   build:
     # 默认公共 runner 未装工具链 -> 工具链检查步骤会给出明确错误; 自托管 runner
-    # 或自行安装 Command Line Tools 后可直接运行。workflow_dispatch 也可用于
-    # 在分支上验证构建（无 secrets 时构建 unsigned HAP, 但不发布）。
+    # 或自行安装 Command Line Tools 后可直接运行。workflow_dispatch 也可用于在分支上验证构建。
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # job 级 env: step 级 if 只能看到这一层（secrets 上下文不能直接在 if 里用）
-      HAP_STORE_FILE: ${{ secrets.HAP_STORE_FILE }}
-      HAP_STORE_PASSWORD: ${{ secrets.HAP_STORE_PASSWORD }}
-      HAP_KEY_ALIAS: ${{ secrets.HAP_KEY_ALIAS }}
-      HAP_KEY_PASSWORD: ${{ secrets.HAP_KEY_PASSWORD }}
-      HAP_PROFILE_P7B: ${{ secrets.HAP_PROFILE_P7B }}
-      HAP_SIGN_CER: ${{ secrets.HAP_SIGN_CER }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -64,20 +55,6 @@ jobs:
           fi
           echo "HarmonyOS toolchain OK: ohpm=$(command -v ohpm) node=$(command -v node) sdk=$DEVECO_SDK_HOME"
 
-      - name: Require signing materials for release tags
-        # tag 发布必须带签名材料; workflow_dispatch 在分支上允许 unsigned 构建
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          set -euo pipefail
-          missing=()
-          for v in HAP_STORE_FILE HAP_STORE_PASSWORD HAP_KEY_ALIAS HAP_KEY_PASSWORD HAP_PROFILE_P7B HAP_SIGN_CER; do
-            [ -n "${!v:-}" ] || missing+=("$v")
-          done
-          if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::发布 tag 需要签名材料, 缺少 secrets: ${missing[*]}（配置见 harmonyos/docs/agc-release-checklist.md）"
-            exit 1
-          fi
-
       - name: ohpm install
         working-directory: harmonyos
         run: ohpm install
@@ -88,19 +65,21 @@ jobs:
         working-directory: harmonyos
         run: bash scripts/build.sh test
 
-      - name: Inject signing config (if secrets present)
-        if: env.HAP_STORE_PASSWORD != ''
-        working-directory: harmonyos
-        run: bash scripts/inject-signing.sh
-
-      - name: Build HAP
+      - name: Build HAP (debug, 侧载/调试)
         working-directory: harmonyos
         run: bash scripts/build.sh hap
 
+      - name: Build App Pack (release .app, unsigned — 签名请本地完成)
+        # 产物为 unsigned .app；上架前需用发布证书/Profile 签名（见 docs/release-guide.md）。
+        working-directory: harmonyos
+        run: bash scripts/build.sh app
+
       - uses: actions/upload-artifact@v4
         with:
-          name: GoGauge-harmonyos-hap
-          path: harmonyos/entry/build/default/outputs/default/*.hap
+          name: GoGauge-harmonyos-packages
+          path: |
+            harmonyos/entry/build/default/outputs/default/*.hap
+            harmonyos/build/outputs/default/*.app
           if-no-files-found: error
 
   release:
@@ -122,15 +101,17 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # v2.2.2-harmony -> 资产命名 GoGauge-v2.2.2-harmony.hap
+          # v1.0.0-harmony -> GoGauge-v1.0.0-harmony.hap / -harmony.app
           VER="${TAG#v}"; VER="${VER%-harmony}"
           HAP=$(ls *.hap 2>/dev/null | head -1 || true)
-          if [ -z "$HAP" ]; then
-            echo "::error::没有找到 HAP 产物"
+          APP=$(ls *.app 2>/dev/null | head -1 || true)
+          if [ -z "$HAP" ] && [ -z "$APP" ]; then
+            echo "::error::没有找到 HAP/APP 产物"
             exit 1
           fi
-          mv "$HAP" "GoGauge-v${VER}-harmony.hap"
+          [ -n "$HAP" ] && mv "$HAP" "GoGauge-v${VER}-harmony.hap"
+          [ -n "$APP" ] && mv "$APP" "GoGauge-v${VER}-harmony.app"
           ls -l
-          gh release upload "$TAG" "GoGauge-v${VER}-harmony.hap" --clobber || \
-            gh release create "$TAG" "GoGauge-v${VER}-harmony.hap" \
+          gh release upload "$TAG" GoGauge-v${VER}-harmony.* --clobber || \
+            gh release create "$TAG" GoGauge-v${VER}-harmony.* \
               --title "GoGauge $TAG" --generate-notes

@@ -12,10 +12,11 @@ import { UsagePage } from '../remote/UsageParser'
 import { ExchangeApi } from '../remote/ExchangeApi'
 import { MonthlyCycle } from '../../common/util/MonthlyCycle'
 import { Fmt } from '../../common/util/Fmt'
+import { AppPrefs } from '../../common/store/AppPrefs'
 import {
-  AccountInfo, AppSettings, DashboardData, DailyStat, HourStat, ModelStat, PageResult, QuotaResult,
-  QuotaWindow, SessionStat, SyncProgress, SyncResult, SyncState, Totals, UsageRecord, UsageRecordRow,
-  emptySyncProgress,
+  AccountInfo, AppSettings, DashboardData, DailyStat, HourStat, ModelDailyRow, ModelStat, ModelTrendData,
+  ModelTrendSeries, PageResult, QuotaResult, QuotaWindow, SessionStat, SyncProgress, SyncResult, SyncState,
+  Totals, UsageRecord, UsageRecordRow, emptySyncProgress,
 } from '../../common/model/Models'
 
 interface QuotaCacheSlot {
@@ -37,6 +38,8 @@ export class DashboardRepository {
   private quotaRefreshing: Set<number> = new Set()
   private exchangeCache: ExchangeCache = { at: 0, usdCny: DashboardRepository.DEFAULT_USD_CNY }
   private exchangeFetching: boolean = false
+  /** 演示模式（截图 seed）写入的配额：非空时 currentQuota/ensureQuota 直接返回它，不发网络请求。 */
+  private demoQuota: QuotaResult | null = null
 
   private usageDao: UsageDao = AppDb.usageDao()
   private syncDao: SyncDao = AppDb.syncDao()
@@ -112,6 +115,10 @@ export class DashboardRepository {
   // ------------------------------------------------------------------
 
   async ensureQuota(): Promise<void> {
+    if (this.demoQuota !== null) {
+      // 演示模式：配额为 seed 注入，不发起网络请求（离线/无效 token 也不覆盖）
+      return
+    }
     const accountId = await this.syncDao.getActiveAccountId()
     if (accountId === 0) {
       return
@@ -172,12 +179,20 @@ export class DashboardRepository {
   }
 
   async currentQuota(): Promise<QuotaResult | null> {
+    if (this.demoQuota !== null) {
+      return this.demoQuota
+    }
     const accountId = await this.syncDao.getActiveAccountId()
     const slot = this.quotaCache.get(accountId)
     return slot !== undefined ? slot.data : null
   }
 
   private async usdCny(): Promise<number> {
+    // 只有用户选择人民币显示时才请求汇率（与隐私政策「仅在展示人民币金额时」一致）；
+    // USD 用户不访问 open.er-api.com。切到 CNY 后下一轮加载会重新请求。
+    if (AppPrefs.getCurrency() !== 'CNY') {
+      return DashboardRepository.DEFAULT_USD_CNY
+    }
     const now = Date.now() / 1000
     if (now - this.exchangeCache.at < DashboardRepository.EXCHANGE_TTL) {
       return this.exchangeCache.usdCny
@@ -262,6 +277,111 @@ export class DashboardRepository {
       usdCny: parts[7] as number,
       serverTime: DashboardRepository.fmtServerTime(),
     }
+  }
+
+  /** 轻量同步摘要（壳层顶栏用）：只查同步状态，不跑 dashboard 聚合。 */
+  async syncState(): Promise<SyncState> {
+    const aid = await this.syncDao.getActiveAccountId()
+    if (aid === 0) {
+      return {
+        lastSyncAt: null, lastSyncStatus: null, lastSyncError: null, lastInsertedCount: 0,
+        deepestPageFetched: 0, totalRecords: 0, oldestRecordAt: null, newestRecordAt: null,
+      }
+    }
+    return this.syncDao.getSyncStateFor(aid)
+  }
+
+  /** 日历热力图数据源：近 N 天逐日聚合（DailyStat[]，已零填充）。 */
+  async loadHeatmapDays(days: number): Promise<DailyStat[]> {
+    const aid = await this.syncDao.getActiveAccountId()
+    if (aid === 0) {
+      return []
+    }
+    return this.usageDao.dailyStats(days, aid)
+  }
+
+  /**
+   * 模型用量趋势（近 N 天，日 × 模型）—— 对齐桌面 /api/model_trend。
+   *
+   * 返回的 days 恰好 N 个连续日期（今天-N+1 … 今天），series 按总用量降序；
+   * 数值口径与模型构成环形图一致：input 含缓存读/写，output 为输出 token。
+   */
+  async loadModelTrend(days: number = 30): Promise<ModelTrendData> {
+    const aid = await this.syncDao.getActiveAccountId()
+    const clamped = Math.min(365, Math.max(1, days))
+    const empty: ModelTrendData = { days: [], series: [] }
+    if (aid === 0) {
+      return empty
+    }
+    const rows = await this.usageDao.modelDailyStats(clamped, aid)
+    const dayList: string[] = []
+    const now = new Date()
+    for (let i = clamped - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
+      dayList.push(`${d.getFullYear()}-${Fmt.pad2(d.getMonth() + 1)}-${Fmt.pad2(d.getDate())}`)
+    }
+    const idx: Map<string, number> = new Map()
+    for (let i = 0; i < dayList.length; i++) {
+      idx.set(dayList[i], i)
+    }
+    const byModel: Map<string, ModelTrendSeries> = new Map()
+    for (const r of rows) {
+      const di = idx.get(r.date)
+      if (di === undefined) {
+        continue
+      }
+      let s = byModel.get(r.model)
+      if (s === undefined) {
+        const input: number[] = []
+        const output: number[] = []
+        const cost: number[] = []
+        for (let k = 0; k < dayList.length; k++) {
+          input.push(0)
+          output.push(0)
+          cost.push(0)
+        }
+        s = { model: r.model, input: input, output: output, cost: cost }
+        byModel.set(r.model, s)
+      }
+      s.input[di] += r.input
+      s.output[di] += r.output
+      s.cost[di] += r.costUsd
+    }
+    const series: ModelTrendSeries[] = []
+    byModel.forEach((v: ModelTrendSeries) => {
+      series.push(v)
+    })
+    series.sort((a: ModelTrendSeries, b: ModelTrendSeries): number => {
+      return DashboardRepository.sumOf(b.input) + DashboardRepository.sumOf(b.output)
+        - (DashboardRepository.sumOf(a.input) + DashboardRepository.sumOf(a.output))
+    })
+    const out: ModelTrendData = { days: dayList, series: series }
+    return out
+  }
+
+  private static sumOf(values: number[]): number {
+    let t = 0
+    for (const v of values) {
+      t += v
+    }
+    return t
+  }
+
+  /**
+   * 演示模式（仅 debug 截图工具使用）：把一组配额窗口写进缓存并保持常驻，
+   * 让无网络/无有效凭证时首页也能渲染真实形态的配额卡。
+   */
+  setDemoQuota(data: QuotaResult | null): void {
+    this.demoQuota = data
+    if (data !== null) {
+      this.quotaCache.set(0, { at: Date.now() / 1000, data: data })
+    } else {
+      this.quotaCache.clear()
+    }
+  }
+
+  isDemoQuota(): boolean {
+    return this.demoQuota !== null
   }
 
   // ------------------------------------------------------------------
@@ -637,37 +757,74 @@ export class DashboardRepository {
    * 开发调试: 注入一组模拟用量记录 (360 条, 覆盖今天全部 24 小时/多模型/多会话/多 key),
    * 用于无网络环境下验证图表/列表渲染 (上架截图前准备数据)。返回新增条数。
    */
-  async injectSampleData(): Promise<number> {
+  async injectSampleData(days: number = 180): Promise<number> {
     const aid = await this.syncDao.getActiveAccountId()
-    const models: string[] = ['deepseek-chat', 'gpt-4o', 'qwen-max', 'glm-4', 'claude-sonnet']
-    const now = Date.now()
+    if (aid === 0) {
+      return 0
+    }
+    // 多模型 / 多 Key / 多渠道：与真实 opencode 记录形状一致（provider 仅作展示）
+    const models: string[] = ['deepseek-v4.1-flash', 'deepseek-v4-flash', 'gpt-5.1-codex', 'qwen3.5-coder', 'glm-5', 'claude-sonnet-4.5']
+    const plans: string[] = ['lite', 'pro', 'max']
+    const keys: string[] = ['key_demo1', 'key_demo2', 'key_demo3']
+    const now = new Date()
     const records: UsageRecord[] = []
-    for (let i = 0; i < 360; i++) {
-      const t = now - i * 15 * 60 * 1000
-      const model = models[i % models.length]
-      records.push({
-        usgId: `usg_sample_${i}`,
-        createdAt: new Date(t).toISOString(),
-        model: model,
-        provider: model.split('-')[0],
-        inputTokens: 100 + (i * 37) % 5000,
-        outputTokens: 50 + (i * 23) % 2000,
-        reasoningTokens: (i * 11) % 300,
-        cacheReadTokens: (i * 7) % 900,
-        cacheWrite5mTokens: (i * 5) % 200,
-        cacheWrite1hTokens: (i * 3) % 100,
-        costRaw: 1000000 + (i * 12345) % 90000000,
-        keyId: i % 2 === 0 ? 'key_demo1' : 'key_demo2',
-        sessionId: `ses_${Math.floor(i / 6) % 25}`,
-        plan: i % 3 === 0 ? 'lite' : null,
-      })
+    let seq = 0
+    const totalDays = Math.min(180, Math.max(1, days))
+    for (let d = totalDays - 1; d >= 0; d--) {
+      // 越接近今天记录越多（自然增长趋势）+ 工作日/周末节律 + 确定性噪声：
+      // 让 7 天/30 天趋势图有真实起伏，而不是一条直线（截图与演示观感）
+      const dayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - d)
+      const weekday = dayDate.getDay()
+      const weekendFactor = (weekday === 0 || weekday === 6) ? 0.5 : 1.0
+      const noise = 0.75 + ((d * 37 + 11) % 50) / 100.0
+      const dayCount = Math.max(4,
+        Math.round((14 + (totalDays - d) / 2 + (d % 4)) * weekendFactor * noise))
+      for (let i = 0; i < dayCount; i++) {
+        // 时/分：今天必须覆盖全部 24 小时（24h 柱状图不留空档）
+        let hour = 9 + (i % 11)
+        let minute = (i * 17) % 60
+        if (d === 0 && i < 24) {
+          hour = i
+          minute = (i * 7) % 60
+        }
+        const ts = new Date(now.getFullYear(), now.getMonth(), now.getDate() - d, hour, minute, (i * 13) % 60)
+        if (ts.getTime() > now.getTime()) {
+          ts.setHours(Math.max(0, ts.getHours() - 6))
+        }
+        const model = models[(d + i) % models.length]
+        const uncached = 800 + ((d * 37 + i * 131) % 6000)
+        const cached = 12000 + ((d * 211 + i * 977) % 52000)
+        const out = 300 + ((d * 17 + i * 53) % 2600)
+        const reasoning = (i % 3 === 0) ? 120 + ((d * 11 + i * 29) % 700) : 0
+        const cacheWrite = (i % 4 === 0) ? 400 + ((d * 7 + i * 23) % 1200) : 0
+        const cost = (uncached + cached + out + reasoning) * 0.0000032
+          + (cached * 0.0000009) + (i % 5) * 0.0002
+        records.push({
+          usgId: `usg_demo_${d}_${i}_${seq}`,
+          createdAt: ts.toISOString(),
+          model: model,
+          provider: model.split('-')[0],
+          inputTokens: uncached,
+          outputTokens: out,
+          reasoningTokens: reasoning,
+          cacheReadTokens: cached,
+          cacheWrite5mTokens: cacheWrite,
+          cacheWrite1hTokens: 0,
+          costRaw: Math.max(1, Math.round(cost * 100000000.0)),
+          keyId: keys[(d + i) % keys.length],
+          sessionId: `ses_${(d * 3 + Math.floor(i / 3)) % 28}`,
+          plan: (i % 4 === 0) ? plans[(d + i) % plans.length] : null,
+        })
+        seq++
+      }
     }
     const syncedAt = new Date().toISOString()
-    const entities = records.map((r) => toEntity(r, syncedAt, aid))
+    const entities: UsageRecordEntity[] = records.map((r: UsageRecord) => toEntity(r, syncedAt, aid))
     const inserted = await this.usageDao.insertUsageRecords(entities, aid)
     const names: Map<string, string> = new Map()
     names.set('key_demo1', '产品密钥')
     names.set('key_demo2', '测试密钥')
+    names.set('key_demo3', '个人密钥')
     await AppDb.settingsDao().saveKeyNames(names)
     return inserted
   }
