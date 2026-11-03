@@ -7,7 +7,16 @@ cd "$(dirname "$0")/.."
 HAP="${1:-entry/build/default/outputs/default/entry-default-signed.hap}"
 BUNDLE="io.github.yphyphyph.gogauge"
 ABIL="EntryAbility"
-HDC="${HDC:-$HOME/Library/OpenHarmony/Sdk/13/toolchains/hdc}"
+# hdc 自动探测: DevEco Studio 自带 SDK -> 旧版 OpenHarmony SDK
+if [ -z "${HDC:-}" ]; then
+  for cand in \
+    "/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc" \
+    "$HOME/Library/OpenHarmony/Sdk/13/toolchains/hdc" \
+    "$(command -v hdc 2>/dev/null || true)"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then HDC="$cand"; break; fi
+  done
+fi
+: "${HDC:?找不到 hdc，请设置 HDC=/path/to/hdc}"
 
 [ -f "$HAP" ] || { echo "HAP 不存在: $HAP (先构建并签名)"; exit 1; }
 

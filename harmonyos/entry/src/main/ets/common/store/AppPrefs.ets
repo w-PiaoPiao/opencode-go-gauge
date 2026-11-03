@@ -18,6 +18,7 @@ export class AppPrefs {
   static readonly KEY_LANGUAGE: string = 'language'             // 'zh' | 'en'
   static readonly KEY_DARK_MODE: string = 'dark_mode'           // '0' | '1'
   static readonly KEY_CURRENCY: string = 'currency'             // 'USD' | 'CNY'
+  static readonly KEY_PRIVACY_ACCEPTED: string = 'privacy_accepted' // '0' | '1'（首次启动合规弹窗）
 
   private static store: preferences.Preferences | null = null
 
@@ -70,6 +71,18 @@ export class AppPrefs {
 
   static setCurrency(value: string): void {
     AppPrefs.put(AppPrefs.KEY_CURRENCY, value === 'CNY' ? 'CNY' : 'USD')
+  }
+
+  /** 隐私政策是否已被用户明确同意（首次启动弹窗；应用内可再次查看）。 */
+  static isPrivacyAccepted(): boolean {
+    if (AppPrefs.store === null) {
+      return false
+    }
+    return (AppPrefs.store.getSync(AppPrefs.KEY_PRIVACY_ACCEPTED, '0') as string) === '1'
+  }
+
+  static setPrivacyAccepted(accepted: boolean): void {
+    AppPrefs.put(AppPrefs.KEY_PRIVACY_ACCEPTED, accepted ? '1' : '0')
   }
 
   private static put(key: string, value: string): void {

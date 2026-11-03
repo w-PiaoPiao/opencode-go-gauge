@@ -111,9 +111,14 @@ export interface DailyStat {
 /** 今日某小时 —— 对齐 db.today_trend 输出。 */
 export interface HourStat {
   hour: string
+  /** 未命中缓存的输入 token。 */
   input: number
   output: number
   reasoning: number
+  /** 缓存读 token（"含缓存" 口径 = input + cacheRead + cacheWrite）。 */
+  cacheRead: number
+  /** 缓存写 token（5m + 1h）。 */
+  cacheWrite: number
 }
 
 /** 单模型聚合 —— 对齐 db.model_stats 输出。 */
@@ -129,6 +134,30 @@ export interface ModelStat {
   totalOutputTokens: number
   totalCostUsd: number
   hitRate: number
+}
+
+/** 单日 × 单模型聚合行 —— 对齐 db.model_daily_stats (model trend 数据源)。 */
+export interface ModelDailyRow {
+  date: string
+  model: string
+  /** 输入含缓存读/写（与模型构成环形图 input 口径一致）。 */
+  input: number
+  output: number
+  costUsd: number
+}
+
+/** 模型用量趋势的一条模型序列（按天对齐，长度 = days.length）。 */
+export interface ModelTrendSeries {
+  model: string
+  input: number[]
+  output: number[]
+  cost: number[]
+}
+
+/** 模型用量趋势数据包 —— 对齐桌面 /api/model_trend。 */
+export interface ModelTrendData {
+  days: string[]
+  series: ModelTrendSeries[]
 }
 
 /** 同步元数据 —— 对齐 db.get_sync_state 输出。 */

@@ -39,6 +39,12 @@ export default class SyncWorkerAbility extends WorkSchedulerExtensionAbility {
       if (!AppDb.isReady()) {
         return
       }
+      // 设置页可能已关闭「自动增量同步」：已注册的任务也直接跳过（不发网络请求）
+      const settings = await Repo.get().settings()
+      if (!settings.autoSync) {
+        hilog.info(0x0000, TAG, 'auto sync disabled, skip')
+        return
+      }
       const result = await Repo.get().syncUsage('incremental')
       hilog.info(0x0000, TAG, 'sync done ok=%{public}s inserted=%{public}d', `${result.ok}`, result.inserted)
     } catch (e) {
