@@ -138,6 +138,12 @@ def paste_center(canvas: Image.Image, img: Image.Image, cx: int, cy: int) -> Non
 # 应用图标
 # ----------------------------------------------------------------------------
 def make_icon(size: int = 1024) -> Image.Image:
+    # 优先直接使用包内 AppScope 图标（foreground+background 合成），保证 AGC
+    # 「应用图标必须与包内图标一致」逐像素一致；文件不存在时才按品牌 Logo 重绘。
+    pkg_icon = os.path.join(REPO, "harmonyos", "AppScope", "resources",
+                            "base", "media", "app_icon.png")
+    if os.path.exists(pkg_icon):
+        return Image.open(pkg_icon).convert("RGB").resize((size, size), Image.LANCZOS)
     canvas = vertical_gradient((size, size), NAVY_TOP, NAVY_BOTTOM).convert("RGBA")
     canvas.alpha_composite(radial_glow((size, size), (size // 2, int(size * 0.44)),
                                        int(size * 0.62), BLUE))

@@ -1,5 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
-  <circle cx="24" cy="24" r="16" fill="none" stroke="#1890FF" stroke-width="6" stroke-dasharray="75 100" transform="rotate(-90 24 24)"/>
-  <circle cx="24" cy="24" r="9" fill="none" stroke="#06B6D4" stroke-width="5" stroke-dasharray="42 57" transform="rotate(30 24 24)"/>
-  <text x="24" y="27.8" text-anchor="middle" font-family="Fira Sans, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" fill="#1890FF">H</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- GoGauge 品牌标记（与 assets/GoGauge.png 同一几何）：
+       仪表盘外环在左上角留出断口，字母 H 置于断口处。 -->
+  <g fill="none">
+    <!-- 外环：中径 138.5、环宽 65，弧从顶部(270°)顺时针 270° 到左侧(180°)，左上留 90° 断口 -->
+    <circle cx="256" cy="256" r="138.5" stroke="#1890FF" stroke-width="65"
+            stroke-dasharray="652.7 870.2" transform="rotate(-90 256 256)"/>
+    <!-- 内环：中径 70、环宽 52，弧从 299° 顺时针 253° 到 192° -->
+    <circle cx="256" cy="256" r="70" stroke="#06B6D4" stroke-width="52"
+            stroke-dasharray="309.1 439.8" transform="rotate(299 256 256)"/>
+  </g>
+  <!-- H：位于断口处（中心 170.4,170.4，宽 60.7 / 高 77.3 / 杆宽 10.1 / 横杆 12.0） -->
+  <g fill="#1890FF">
+    <rect x="140.1" y="131.75" width="10.12" height="77.3"/>
+    <rect x="190.6" y="131.75" width="10.12" height="77.3"/>
+    <rect x="140.1" y="164.4" width="60.62" height="11.96"/>
+  </g>
 </svg>
