@@ -1,6 +1,6 @@
 # GoGauge HarmonyOS 商店截图清单（screenshot-manifest）
 
-> 自动生成于 2026-11-03 23:06:11 CST，由 `scripts/emu/capture-store-shots.sh` 扫描输出目录生成。
+> 自动生成于 2026-11-04 20:19:50 CST，由 `scripts/emu/capture-store-shots.sh` 扫描输出目录生成。
 > 本清单仅收录正式素材（顶层 <page>-<theme>.jpeg）；`_degraded/` 与 `smoke-*` 为验证/退化资产，**不得用于上架**。
 
 | 文件（相对 docs/store-assets/screenshots/） | 形态 | 页面 | 主题 | 分辨率 | 大小 |

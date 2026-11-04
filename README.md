@@ -140,8 +140,12 @@ Python · pywebview (WebView2 / WKWebView) · SQLite · Chart.js · pystray
 
 ## 📬 联系
 
-- GitHub：[yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge)
-- CSDN：[Ying_ph](https://blog.csdn.net/Ying_ph)
+- GitHub：[w-PiaoPiao/opencode-go-gauge](https://github.com/w-PiaoPiao/opencode-go-gauge)
+
+## 🙏 致谢
+
+- 数据提供：**OpenCode**
+- 原始项目：**yphyphyph** —— [yphyphyph/opencode-go-gauge](https://github.com/yphyphyph/opencode-go-gauge)（本项目 fork 自该仓库）
 
 ## 📄 License
 
