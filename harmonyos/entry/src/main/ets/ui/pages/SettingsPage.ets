@@ -1080,6 +1080,12 @@ export struct SettingsPage {
         .width('100%')
         .height(this.touchH())
 
+        Text(I18n.t('thanksSub'))
+          .fontSize(11)
+          .fontColor(Theme.faint())
+          .width('100%')
+          .lineHeight(17)
+
         Divider()
           .color(Theme.divider())
 

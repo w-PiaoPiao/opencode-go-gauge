@@ -1,12 +1,15 @@
 package io.github.yphyphyph.gogauge.ui.settings
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -427,10 +430,39 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                 }
             }
             Text(
-                "${s.thanksText} OpenCode · ${s.pageFoot.replace("{version}", "v${BuildConfig.VERSION_NAME}")}",
+                s.aboutLinks,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(start = 16.dp, top = 6.dp),
+            )
+            Text(
+                "GitHub: github.com/w-PiaoPiao/opencode-go-gauge",
+                fontSize = 12.5.sp,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .clickable {
+                        runCatching {
+                            context.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/w-PiaoPiao/opencode-go-gauge"),
+                                ),
+                            )
+                        }
+                    },
+            )
+            Text(
+                "${s.thanksText} OpenCode · ${s.thanksSub}",
                 fontSize = 11.5.sp,
+                lineHeight = 18.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+            Text(
+                s.pageFoot.replace("{version}", "v${BuildConfig.VERSION_NAME}"),
+                fontSize = 10.5.sp,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
             )
         }
         Spacer(Modifier.height(8.dp))

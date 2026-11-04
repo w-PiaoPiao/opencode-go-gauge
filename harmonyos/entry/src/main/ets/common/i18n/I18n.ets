@@ -268,6 +268,7 @@ const EXTRA_ZH: string[][] = [
   ['dayAgo', '天前'],
   ['never', '从未同步'],
   ['loginLoading', '正在加载授权页…'],
+  ['thanksSub', '感谢 yphyphyph 开源原始项目'],
   ['loginPageTitle', 'OpenCode Go 登录'],
 ]
 for (const kv of EXTRA_ZH) {
@@ -538,6 +539,7 @@ const EXTRA_EN: string[][] = [
   ['dayAgo', 'd ago'],
   ['never', 'Never synced'],
   ['loginLoading', 'Loading authorization page…'],
+  ['thanksSub', 'Thanks to yphyphyph for the original open-source project'],
   ['loginPageTitle', 'OpenCode Go Sign-in'],
 ]
 for (const kv of EXTRA_EN) {
