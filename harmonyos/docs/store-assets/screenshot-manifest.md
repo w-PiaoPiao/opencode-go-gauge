@@ -1,6 +1,6 @@
 # GoGauge HarmonyOS 商店截图清单（screenshot-manifest）
 
-> 自动生成于 2026-11-04 20:19:50 CST，由 `scripts/emu/capture-store-shots.sh` 扫描输出目录生成。
+> 自动生成于 2026-11-04 20:58:46 CST，由 `scripts/emu/capture-store-shots.sh` 扫描输出目录生成。
 > 本清单仅收录正式素材（顶层 <page>-<theme>.jpeg）；`_degraded/` 与 `smoke-*` 为验证/退化资产，**不得用于上架**。
 
 | 文件（相对 docs/store-assets/screenshots/） | 形态 | 页面 | 主题 | 分辨率 | 大小 |
@@ -17,7 +17,7 @@
 | `pc/home-light.jpeg` | pc | home | light | 3120x2080 | 252K |
 | `pc/records-light.jpeg` | pc | records | light | 3120x2080 | 328K |
 | `pc/settings-light.jpeg` | pc | settings | light | 3120x2080 | 276K |
-| `pc/stats-light.jpeg` | pc | stats | light | 3120x2080 | 332K |
+| `pc/stats-light.jpeg` | pc | stats | light | 3120x2080 | 328K |
 
 AppGallery 上传规格（由 release-materials 的 prep-screenshots.py 转换）：
 - 手机：1080x1920（竖向 9:16）；PC/2in1：1920x1080（16:9）；平板：1920x1280（横向 3:2）。
