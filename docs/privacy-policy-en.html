@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoGauge Privacy Policy</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #f6f4ee; color: #23211d;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
+  line-height: 1.85; }
+main { max-width: 860px; margin: 0 auto; padding: 40px 24px 72px; background: #fbfaf6; }
+h1 { font-size: 30px; line-height: 1.35; margin: 8px 0 20px; }
+h2 { font-size: 21px; margin: 36px 0 12px; padding-top: 10px; border-top: 1px solid #e6e1d6; }
+h3 { font-size: 17px; margin: 24px 0 8px; }
+p, li { font-size: 15px; }
+ul, ol { padding-left: 24px; }
+blockquote { margin: 14px 0; padding: 10px 16px; background: #f1ede3; border-left: 3px solid #c96442; color: #5b574f; }
+blockquote p { margin: 4px 0; font-size: 13.5px; }
+code { background: #efece3; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+th, td { border: 1px solid #e0dacd; padding: 7px 9px; text-align: left; vertical-align: top; }
+th { background: #f1ede3; }
+a { color: #b4542f; }
+@media (prefers-color-scheme: dark) {
+  body { background: #171613; color: #e8e4da; }
+  main { background: #1e1d1a; }
+  h2 { border-top-color: #33312c; }
+  blockquote { background: #26241f; border-left-color: #d97757; color: #c9c4b8; }
+  code { background: #2b2924; }
+  th, td { border-color: #3a372f; }
+  th { background: #26241f; }
+  a { color: #e08a66; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>GoGauge Privacy Policy (English)</h1>
+<blockquote><p>Applies to: GoGauge for HarmonyOS NEXT 1.0.0 (<code>versionCode</code> 1000000, bundle name <code>io.github.yphyphyph.gogauge</code>)</p><p>Effective date: <code>2026-11-04</code></p><p>Last updated: <code>2026-11-04</code></p><p>⚠️ The developer name below <strong>must exactly match</strong> the real-name entity of the Huawei developer account (AppGallery review rule 7.1). Current value: Wang Yizhi (王逸之).</p><p>This policy mirrors the actual behavior of the code. Source files: <code>common/auth/Login.ets</code>, <code>common/store/AppPrefs.ets</code>, <code>data/db/AppDb.ets</code>, <code>data/repository/DashboardRepository.ets</code>, <code>data/remote/{OpenCodeApi,ExchangeApi,UpdateApi}.ets</code>, <code>entry/src/main/module.json5</code>.</p></blockquote>
+<blockquote><p>📌 In-app version: the text shown on the in-app <code>pages/PrivacyPage</code> comes from <code>common/legal/PrivacyText.ets</code> (a summarized/equivalent version of this policy). <strong>Before submitting, verify paragraph by paragraph that the in-app text matches both this document and the hosted privacy-policy URL submitted to AGC</strong> (review rule 7.1).</p></blockquote>
+<h2>Introduction</h2>
+<p>GoGauge ("the App") is an <strong>OpenCode Go usage dashboard</strong> for HarmonyOS NEXT developed by <strong>Wang Yizhi (王逸之)</strong> ("we", "us"). It lets you view the quota windows, usage statistics and request records of your own OpenCode account.</p>
+<p><strong>The App has no backend server. We do not collect, receive or upload any personal data or usage data.</strong> All data stays on your device. The App is an <strong>unofficial third-party client</strong> and is not affiliated with, endorsed by, or acting as an agent of OpenCode / OpenCode Go.</p>
+<h2>1. Information we process (locally only)</h2>
+<p>The App processes the following data <strong>on your device only</strong>, strictly to provide its features. We (the developer) never receive it.</p>
+<table><thead><tr><th>Data</th><th>Content</th><th>Storage</th><th>Purpose</th><th>Uploaded to developer?</th></tr></thead><tbody>
+<tr><td>Login credential</td><td>Session cookie captured from opencode.ai after you sign in in the in-app WebView (currently <code>__Host-console_session=…</code>; legacy <code>auth=…</code> also supported)</td><td>App-private database, <code>accounts.token</code></td><td>Authenticate requests to opencode.ai on your behalf, read your own account data</td><td>No</td></tr>
+<tr><td>Usage data</td><td>Request logs (time, model, input/output/reasoning/cached tokens, cost, session/key identifiers), quota windows, sync state, key-name cache</td><td>App-private database (4 RDB tables)</td><td>Render Home / Stats / Records</td><td>No</td></tr>
+<tr><td>Preferences</td><td>Language (zh/en), dark mode, currency (USD/CNY)</td><td>App-private preferences</td><td>Remember display settings</td><td>No</td></tr>
+<tr><td>Workspace identifier</td><td>Your opencode.ai workspace ID / hint</td><td>App-private database</td><td>Fetch data for the right workspace</td><td>No</td></tr>
+</tbody></table>
+<p><strong>We do NOT collect</strong> contacts, SMS, call logs, location, photos, camera, microphone, clipboard, device identifiers (IMEI/OAID/MAC, etc.), installed-app lists, browsing/search history, advertising IDs or biometric data. We do not build user profiles or provide personalized recommendations.</p>
+<blockquote><p>Note on credential storage: the session cookie is stored in the app-private system database (security level S2) protected by the HarmonyOS app sandbox. The App does not apply additional custom encryption to it. Please avoid using the App on rooted or untrusted devices.</p></blockquote>
+<h2>2. Network requests and third-party services</h2>
+<p>The App connects <strong>directly</strong> to the following third-party services. Requests originate from your device (not from a developer server) and include network-layer information such as your IP address, which is processed by each provider under its own privacy policy.</p>
+<ol>
+<li><strong>opencode.ai (<a href="https://opencode.ai)">https://opencode.ai)</a></strong> — required</li>
+</ol>
+<ul>
+<li>Login page <code>https://opencode.ai/console/login</code> loaded in the in-app WebView; the sign-in itself is handled by opencode.ai.</li>
+<li>APIs: <code>/console/api/go/status</code> (quota), <code>/request-logs</code> (usage), <code>/orgs</code> (workspaces), <code>/service-accounts</code> (key names).</li>
+<li>Requests carry your session cookie <strong>only</strong> to read your own account data. No other personal data is sent.</li>
+<li>The App clears WebView cookies right after a successful login, and again on logout.</li>
+</ul>
+<ol>
+<li><strong>open.er-api.com (<a href="https://open.er-api.com/v6/latest/USD)">https://open.er-api.com/v6/latest/USD)</a></strong> — optional currency conversion.</li>
+</ol>
+<ul>
+<li>A plain GET request (cached for 6 hours) with only <code>User-Agent: GoGauge/1.0</code>. <strong>No cookie, account or usage data is sent.</strong></li>
+</ul>
+<ol>
+<li><strong>GitHub (api.github.com / github.com)</strong> — only when you tap "Check for updates" in Settings.</li>
+</ol>
+<ul>
+<li>Fetches the Releases list/feed of <code>w-PiaoPiao/opencode-go-gauge</code>. <strong>No cookie, account or usage data is sent.</strong></li>
+</ul>
+<p><strong>There is no third-party analytics, advertising or push SDK.</strong> The only third-party dependency is the HarmonyOS unit-test framework <code>@ohos/hypium</code>, which is used at development time and is not shipped inside the published app.</p>
+<h2>3. Device permissions</h2>
+<table><thead><tr><th>Permission</th><th>Type</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>ohos.permission.INTERNET</code></td><td>normal (granted at install)</td><td>Access opencode.ai for your quota/usage data; optional exchange-rate API; GitHub only when you check for updates</td></tr>
+</tbody></table>
+<p>The App does <strong>not</strong> request or use location, camera, microphone, contacts, photos, calendar, sensors, clipboard, notifications or any sensitive/restricted permission, and does not read device identifiers.</p>
+<h2>4. Storage and retention</h2>
+<ul>
+<li><strong>Location:</strong> on your HarmonyOS device only, in the app-private sandbox (<code>/data/app/el2/…/io.github.yphyphyph.gogauge</code>). We have no server.</li>
+<li><strong>Retention:</strong> until you delete the data or uninstall the App. There is no automatic expiry; you can delete records older than the configured sync range via Settings → "Purge by sync range".</li>
+<li><strong>Cross-border transfer:</strong> we do not transfer your personal data. However, your device connects directly to opencode.ai, open.er-api.com and GitHub, which may be located outside your country/region; network requests (including IP address) are handled by those providers.</li>
+</ul>
+<h2>5. How we protect your data</h2>
+<ul>
+<li>App data lives inside the HarmonyOS app sandbox, unreadable by other apps;</li>
+<li>The session cookie is stored only in the app-private database — never uploaded, never logged, never written to the clipboard;</li>
+<li>Release builds contain no debug tools or debug logging UI;</li>
+<li>All network traffic uses HTTPS.</li>
+</ul>
+<p>No internet transmission is completely secure. Please protect your opencode.ai account and revoke sessions on opencode.ai if you suspect misuse.</p>
+<h2>6. Sharing, transfer and disclosure</h2>
+<p>We do not sell, share or publicly disclose your personal data. Apart from the direct third-party connections described above, the App performs no data sharing. We have no server, so no server-side data transfer scenario currently exists.</p>
+<h2>7. Your rights</h2>
+<p>You have full control over the data stored on your device:</p>
+<ol>
+<li><strong>Access</strong> — view local usage data and account info on Home / Stats / Records / Settings;</li>
+<li><strong>Rectify</strong> — rename accounts or sign in again in Settings → Accounts;</li>
+<li><strong>Delete</strong> —</li>
+</ol>
+<ul>
+<li><strong>Log out</strong>: clears the current account's credential, its local usage data and sync state, and clears WebView cookies;</li>
+<li><strong>Delete account</strong>: removes the account entry and all its local usage data (irreversible);</li>
+<li><strong>Purge by sync range</strong>: deletes local records older than the selected range across all accounts;</li>
+<li><strong>Uninstall</strong>: removes all data stored by the App;</li>
+</ul>
+<ol>
+<li><strong>Withdraw consent</strong> — via the deletion paths above or by uninstalling; withdrawal does not affect prior local processing;</li>
+<li><strong>Complaints</strong> — contact us via the details below; we reply within 15 business days.</li>
+</ol>
+<blockquote><p>The App has no developer-side account system, so there is no "developer account" to cancel. Your opencode.ai account is managed by OpenCode; delete it on opencode.ai.</p></blockquote>
+<h2>8. Children</h2>
+<p>The App is a developer-oriented usage viewer and is not directed at children; we do not knowingly collect children's personal data. If you are under 14, please use the App under guardian supervision. Guardians may contact us to request deletion of locally processed children's data.</p>
+<h2>9. Changes to this policy</h2>
+<p>We may update this policy when features or regulations change. Updates will be announced in-app or via AppGallery release notes; material changes (e.g. new data collection) will require your consent again. The latest version is always available in-app / at the published URL.</p>
+<h2>10. Contact us</h2>
+<ul>
+<li>Developer/operator: Wang Yizhi (王逸之)</li>
+<li>Contact: GitHub Issues (<a href="https://github.com/w-PiaoPiao/opencode-go-gauge/issues">https://github.com/w-PiaoPiao/opencode-go-gauge/issues</a> , reply within 15 business days)</li>
+<li>Open-source repository (issues): <a href="https://github.com/w-PiaoPiao/opencode-go-gauge/issues">https://github.com/w-PiaoPiao/opencode-go-gauge/issues</a></li>
+<li>Upstream project: <a href="https://github.com/yphyphyph/opencode-go-gauge">https://github.com/yphyphyph/opencode-go-gauge</a></li>
+</ul>
+<p>We respond within 15 business days.</p>
+<h3>Appendix: data deletion quick reference</h3>
+<table><thead><tr><th>Data to delete</th><th>Path</th></tr></thead><tbody>
+<tr><td>Current account credential + its local usage</td><td>Settings → Accounts → current account "Log out"</td></tr>
+<tr><td>One account's local data (including the entry)</td><td>Settings → Accounts → "Delete" (double confirmation)</td></tr>
+<tr><td>Records older than the sync range (all accounts)</td><td>Settings → Sync → "Purge by sync range" (double confirmation)</td></tr>
+<tr><td>Everything</td><td>Uninstall the App (or system Settings → Apps → GoGauge → Storage → Clear data)</td></tr>
+</tbody></table>
+</main>
+</body>
+</html>

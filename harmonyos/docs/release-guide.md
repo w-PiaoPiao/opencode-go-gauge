@@ -412,7 +412,7 @@ cat entry/.test/default/intermediates/test/coverage_data/test_result.txt 2>/dev/
 | 5 | 审核测试账号 | 审核信息要求（需登录才可用的功能必须提供测试账号） | 提供一组可用的 OpenCode Go 测试账号/密码；无法提供时提交 `.mp4` 自测视频 | **用户自备（必须）** |
 
 补充说明：
-- 应用内隐私政策正文已内嵌为 `common/legal/PrivacyText.ets`（默认开发者身份 GoGauge（yphyphyph）、联系方式=开源仓库 Issues，无 `<待填>` 占位符）。**若 AGC 实名主体/联系方式不同，需同步替换该文件并重新构建**，并保证与 AGC 托管隐私政策内容一致。
+- 应用内隐私政策正文已内嵌为 `common/legal/PrivacyText.ets`（开发者身份=AGC 实名主体「王逸之」、联系方式=开源仓库 Issues，无 `<待填>` 占位符）。托管隐私政策 URL 使用仓库 `docs/privacy-policy-zh.html`（GitHub Pages），内容与本文件一致；若 AGC 实名主体变化，需同步替换该文件并重新构建。
 - **AGC 隐私政策 URL 仍需用户自行托管**（GitHub Pages / 个人站点 / 静态对象存储均可，HTTPS 公网可访问），并保证托管内容与应用内展示内容一致；只做应用内页面、不提供 AGC URL 无法通过审核。
 - 若 1/2 未完成，**不要提交审核**——这是隐私合规的高频驳回项。
 

@@ -1,10 +1,10 @@
 # GoGauge 隐私政策（中文）
 
 > 适用版本：GoGauge for HarmonyOS NEXT 1.0.0（`versionCode` 1000000，包名 `io.github.yphyphyph.gogauge`）
-> 生效日期：`<待填：生效日期，建议与 AGC 提交日期一致>`
-> 更新日期：`<待填：更新日期>`
+> 生效日期：`2026-11-04`
+> 更新日期：`2026-11-04`
 >
-> ⚠️ 提交 AGC 前必须替换本文件中所有 `<待填：…>` 占位符，且**开发者名称必须与 AGC 实名认证主体名称完全一致**（审核规则 7.1：隐私政策内开发者名称、应用名称须与提交信息一致）。
+> ⚠️ **开发者名称必须与 AGC 实名认证主体名称完全一致**（审核规则 7.1：隐私政策内开发者名称、应用名称须与提交信息一致）。当前填写：王逸之。
 >
 > 本文与代码实际行为逐条对应，来源：`entry/src/main/ets/common/auth/Login.ets`、`common/store/AppPrefs.ets`、`data/db/AppDb.ets`、`data/repository/DashboardRepository.ets`、`data/remote/{OpenCodeApi,ExchangeApi,UpdateApi}.ets`、`entry/src/main/module.json5`。
 
@@ -15,7 +15,7 @@
 
 ## 引言
 
-GoGauge（以下称“本应用”）是由 `<待填：开发者/运营者名称>`（以下称“我们”）开发的 **OpenCode Go 用量仪表盘**，用于在 HarmonyOS NEXT 设备上查看用户本人 OpenCode 账号的配额窗口、用量统计与请求明细。
+GoGauge（以下称“本应用”）是由 **王逸之**（以下称“我们”）开发的 **OpenCode Go 用量仪表盘**，用于在 HarmonyOS NEXT 设备上查看用户本人 OpenCode 账号的配额窗口、用量统计与请求明细。
 
 我们深知个人信息对您的重要性，并会尽力保护您的个人信息安全。**本应用不设开发者服务器，不向我们的服务器上传任何个人信息或用量数据**；所有数据仅保存在您的设备本地。请在使用本应用前仔细阅读并充分理解本政策。
 
@@ -111,9 +111,8 @@ GoGauge（以下称“本应用”）是由 `<待填：开发者/运营者名称
 
 ## 十、如何联系我们
 
-- 开发者/运营者：`<待填：开发者/运营者名称（须与 AGC 实名主体一致）>`
-- 联系邮箱：`<待填：邮箱>`
-- 联系地址：`<待填：联系地址（可选）>`
+- 开发者/运营者：王逸之
+- 联系方式：GitHub Issues（https://github.com/w-PiaoPiao/opencode-go-gauge/issues ，15 个工作日内答复）
 - 开源仓库（问题反馈）：https://github.com/w-PiaoPiao/opencode-go-gauge/issues
 - 原始项目：https://github.com/yphyphyph/opencode-go-gauge
 

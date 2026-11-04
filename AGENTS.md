@@ -27,6 +27,7 @@
 | 密钥库文件 | `/Users/yizhiwang/Desktop/opencode/gousage/harmonyRelease/gogauge-release.p12` |
 | 证书请求文件 CSR | `/Users/yizhiwang/Desktop/opencode/gousage/harmonyRelease/gogauge-release.csr` |
 | hvigor 签名材料目录 | `/Users/yizhiwang/Desktop/opencode/gousage/harmonyRelease/material/`（由 DevEco 生成，**必须与 p12 同目录**，勿删/勿动） |
+| 开发者/运营者（AGC 实名主体） | `王逸之`（隐私政策与应用内文案必须一致） |
 | 别名 alias | `gogauge` |
 | 签名算法 | `SHA256withECDSA`（DevEco 高级设置默认：ECC 256 位 / 有效期 25 年） |
 | 密钥库密码 / 密钥密码 | 用户自设（≥8 位，含字母+数字），仅存于密码管理器 |
@@ -51,6 +52,15 @@
 > 命令行替代方案：`scripts/gen-signing-material.js`（生成 hvigor 兼容 material + 加密密码）+ `scripts/inject-signing.sh`，
 > 详见 `harmonyos/docs/release-guide.md` §5 路径 C。
 
+## 2.2 隐私政策托管（AGC「隐私声明 → 自定义隐私政策」）
+
+- 源文件：`harmonyos/docs/release/privacy-policy-zh.md` / `privacy-policy-en.md`（开发者名称已填 AGC 实名主体「王逸之」）
+- 静态 HTML：`docs/privacy-policy-zh.html` / `docs/privacy-policy-en.html`（由 `harmonyos/docs/release/tools/render-policy-html.py` 从 Markdown 生成）
+- 托管：GitHub Pages（仓库 `main` 分支 `/docs` 目录），AGC 填写：
+  `https://w-piaopiao.github.io/opencode-go-gauge/privacy-policy-zh.html`
+- 应用内 `common/legal/PrivacyText.ets` 必须与该页面内容一致（当前开发者：王逸之 / Wang Yizhi；联系方式：GitHub Issues）
+- 用户协议：AGC 该字段无红星，可留空；如审核要求，再补一份静态 EULA 页面
+
 ## 3. AGC / 应用信息
 
 | 项 | 值 |
@@ -61,7 +71,7 @@
 | 上架设备 | 手机 + PC/2in1（v1.0 不提供平板独立截图，平板由手机兼容分发；包内 deviceTypes 仍含 tablet） |
 | 应用图标 | `harmonyos/docs/release/assets/icon-1024.png`（与包内 AppScope 分层图标逐像素一致） |
 | 商店截图 | `harmonyos/docs/release/screenshots-upload/phone/*.jpeg`（9 张 1080×1920）、`pc/*.jpeg`（4 张 1920×1080） |
-| 应用介绍/隐私政策 | `harmonyos/docs/release/app-intro-zh.md`、`privacy-policy-zh.md`（托管 URL 需用户提供，注意与应用内 `PrivacyText.ets` 一致） |
+| 应用介绍/隐私政策 | `harmonyos/docs/release/app-intro-zh.md`；隐私政策托管 URL：`https://w-piaopiao.github.io/opencode-go-gauge/privacy-policy-zh.html`（内容与应用内 `PrivacyText.ets` 一致） |
 
 ## 4. 已知限制 / 易踩坑
 
