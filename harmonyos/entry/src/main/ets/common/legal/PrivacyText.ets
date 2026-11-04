@@ -5,7 +5,7 @@
  * 需用户明确同意。实际行为见 common/auth/Login.ets、common/store/AppPrefs.ets、
  * data/db/AppDb.ets、data/repository/DashboardRepository.ets、data/remote/*。
  *
- * 开发者身份默认为 GoGauge（yphyphyph），联系方式 = 开源仓库 Issues；
+ * 开发者身份 = AGC 实名主体「王逸之」，联系方式 = 开源仓库 Issues；
  * 若上架主体不同，发布前需替换为 AGC 实名主体名称并重新构建（保持与托管隐私政策一致）。
  */
 
@@ -17,7 +17,7 @@ export interface PrivacySection {
 const ZH: PrivacySection[] = [
   {
     title: '引言',
-    body: 'GoGauge 是 OpenCode Go 用量仪表盘，由 GoGauge（yphyphyph）开发。本应用不设开发者服务器，不向开发者上传任何个人信息或用量数据；所有数据仅保存在您的设备本地。本应用为第三方非官方客户端，与 OpenCode / OpenCode Go 运营方无隶属或合作关系。',
+    body: 'GoGauge 是 OpenCode Go 用量仪表盘，由 王逸之 开发。本应用不设开发者服务器，不向开发者上传任何个人信息或用量数据；所有数据仅保存在您的设备本地。本应用为第三方非官方客户端，与 OpenCode / OpenCode Go 运营方无隶属或合作关系。',
   },
   {
     title: '一、我们如何处理您的信息',
@@ -57,14 +57,14 @@ const ZH: PrivacySection[] = [
   },
   {
     title: '十、如何联系我们',
-    body: '开发者/运营者：GoGauge（yphyphyph）\n联系方式：通过下方开源仓库的 Issues 反馈（15 个工作日内答复）\n开源仓库：https://github.com/w-PiaoPiao/opencode-go-gauge/issues\n原始项目：https://github.com/yphyphyph/opencode-go-gauge',
+    body: '开发者/运营者：王逸之\n联系方式：通过下方开源仓库的 Issues 反馈（15 个工作日内答复）\n开源仓库：https://github.com/w-PiaoPiao/opencode-go-gauge/issues\n原始项目：https://github.com/yphyphyph/opencode-go-gauge',
   },
 ]
 
 const EN: PrivacySection[] = [
   {
     title: 'Introduction',
-    body: 'GoGauge is a usage dashboard for OpenCode Go, developed by GoGauge (yphyphyph). The app has no developer-run server and uploads no personal information or usage data to the developer; all data stays on your device. This is an unofficial third-party client and is not affiliated with the OpenCode / OpenCode Go operators.',
+    body: 'GoGauge is a usage dashboard for OpenCode Go, developed by Wang Yizhi (王逸之). The app has no developer-run server and uploads no personal information or usage data to the developer; all data stays on your device. This is an unofficial third-party client and is not affiliated with the OpenCode / OpenCode Go operators.',
   },
   {
     title: '1. How we process your information',
@@ -104,7 +104,7 @@ const EN: PrivacySection[] = [
   },
   {
     title: '10. Contact us',
-    body: 'Developer/operator: GoGauge (yphyphyph)\nContact: via Issues in the open-source repository below (reply within 15 business days)\nIssues: https://github.com/w-PiaoPiao/opencode-go-gauge/issues\nUpstream: https://github.com/yphyphyph/opencode-go-gauge',
+    body: 'Developer/operator: Wang Yizhi (王逸之)\nContact: via Issues in the open-source repository below (reply within 15 business days)\nIssues: https://github.com/w-PiaoPiao/opencode-go-gauge/issues\nUpstream: https://github.com/yphyphyph/opencode-go-gauge',
   },
 ]
 

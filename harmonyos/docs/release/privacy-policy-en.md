@@ -1,10 +1,10 @@
 # GoGauge Privacy Policy (English)
 
 > Applies to: GoGauge for HarmonyOS NEXT 1.0.0 (`versionCode` 1000000, bundle name `io.github.yphyphyph.gogauge`)
-> Effective date: `<TBD: effective date>`
-> Last updated: `<TBD: last updated>`
+> Effective date: `2026-11-04`
+> Last updated: `2026-11-04`
 >
-> ⚠️ Before submitting to AppGallery, replace every `<TBD: …>` placeholder. The developer name below **must exactly match** the real-name entity of your Huawei developer account (AppGallery review rule 7.1).
+> ⚠️ The developer name below **must exactly match** the real-name entity of the Huawei developer account (AppGallery review rule 7.1). Current value: Wang Yizhi (王逸之).
 >
 > This policy mirrors the actual behavior of the code. Source files: `common/auth/Login.ets`, `common/store/AppPrefs.ets`, `data/db/AppDb.ets`, `data/repository/DashboardRepository.ets`, `data/remote/{OpenCodeApi,ExchangeApi,UpdateApi}.ets`, `entry/src/main/module.json5`.
 
@@ -15,7 +15,7 @@
 
 ## Introduction
 
-GoGauge ("the App") is an **OpenCode Go usage dashboard** for HarmonyOS NEXT developed by `<TBD: developer/operator name>` ("we", "us"). It lets you view the quota windows, usage statistics and request records of your own OpenCode account.
+GoGauge ("the App") is an **OpenCode Go usage dashboard** for HarmonyOS NEXT developed by **Wang Yizhi (王逸之)** ("we", "us"). It lets you view the quota windows, usage statistics and request records of your own OpenCode account.
 
 **The App has no backend server. We do not collect, receive or upload any personal data or usage data.** All data stays on your device. The App is an **unofficial third-party client** and is not affiliated with, endorsed by, or acting as an agent of OpenCode / OpenCode Go.
 
@@ -105,9 +105,8 @@ We may update this policy when features or regulations change. Updates will be a
 
 ## 10. Contact us
 
-- Developer/operator: `<TBD: developer/operator name — must match AGC real-name entity>`
-- Email: `<TBD: email>`
-- Address: `<TBD: address (optional)>`
+- Developer/operator: Wang Yizhi (王逸之)
+- Contact: GitHub Issues (https://github.com/w-PiaoPiao/opencode-go-gauge/issues , reply within 15 business days)
 - Open-source repository (issues): https://github.com/w-PiaoPiao/opencode-go-gauge/issues
 - Upstream project: https://github.com/yphyphyph/opencode-go-gauge
 
