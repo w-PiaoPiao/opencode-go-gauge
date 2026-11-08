@@ -18,6 +18,12 @@ export class AppPrefs {
   static readonly KEY_LANGUAGE: string = 'language'             // 'zh' | 'en'
   static readonly KEY_DARK_MODE: string = 'dark_mode'           // '0' | '1'
   static readonly KEY_CURRENCY: string = 'currency'             // 'USD' | 'CNY'
+  /**
+   * 图标风格 'blue' | 'terracotta'（与桌面/Android 同名同值契约）。
+   * ⚠️ HarmonyOS NEXT 没有运行时切换启动器应用图标的公开 API：AppScope/module 的
+   * 启动器图标固定为蓝色 H，本键只切换应用内品牌 Logo（顶栏 + 欢迎页）。
+   */
+  static readonly KEY_ICON_STYLE: string = 'icon_style'
   static readonly KEY_PRIVACY_ACCEPTED: string = 'privacy_accepted' // '0' | '1'（首次启动合规弹窗）
 
   private static store: preferences.Preferences | null = null
@@ -59,6 +65,22 @@ export class AppPrefs {
 
   static setDarkMode(dark: boolean): void {
     AppPrefs.put(AppPrefs.KEY_DARK_MODE, dark ? '1' : '0')
+  }
+
+  /**
+   * 应用内品牌 Logo 风格（读容错：非 'terracotta' 一律回落 blue）。
+   * 注意：不影响启动器图标（HarmonyOS 无运行时切换 API，固定蓝色 H）。
+   */
+  static getIconStyle(): string {
+    if (AppPrefs.store === null) {
+      return 'blue'
+    }
+    const v = AppPrefs.store.getSync(AppPrefs.KEY_ICON_STYLE, 'blue') as string
+    return v === 'terracotta' ? 'terracotta' : 'blue'
+  }
+
+  static setIconStyle(value: string): void {
+    AppPrefs.put(AppPrefs.KEY_ICON_STYLE, value === 'terracotta' ? 'terracotta' : 'blue')
   }
 
   static getCurrency(): string {

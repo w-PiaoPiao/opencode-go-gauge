@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- GoGauge 品牌标记：外环左上断口 + 平台字母 A（由 assets/generate_logo.py 生成） -->
+    <path android:pathData="M54.00,28.89 A25.11,25.11 0 0,1 79.11,54.00"
+        android:strokeColor="#1890FF"
+        android:strokeWidth="11.78"
+        android:fillColor="#00000000" />
+    <path android:pathData="M79.11,54.00 A25.11,25.11 0 0,1 28.89,54.00"
+        android:strokeColor="#1890FF"
+        android:strokeWidth="11.78"
+        android:fillColor="#00000000" />
+    <path android:pathData="M60.15,42.90 A12.69,12.69 0 0,1 66.69,54.00"
+        android:strokeColor="#06B6D4"
+        android:strokeWidth="9.43"
+        android:fillColor="#00000000" />
+    <path android:pathData="M66.69,54.00 A12.69,12.69 0 1,1 41.59,51.36"
+        android:strokeColor="#06B6D4"
+        android:strokeWidth="9.43"
+        android:fillColor="#00000000" />
+    <path android:pathData="M32.98,45.49 L38.48,31.48 L43.99,45.49"
+        android:strokeColor="#1890FF"
+        android:strokeWidth="1.83"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+    <path android:pathData="M35.07,40.30 L41.89,40.30"
+        android:strokeColor="#1890FF"
+        android:strokeWidth="1.83"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+</vector>

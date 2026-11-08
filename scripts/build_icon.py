@@ -1,6 +1,6 @@
 """生成 GoGauge Windows 应用图标（多尺寸 ICO）。
 
-品牌几何的唯一来源是 ``assets/generate_logo.py``（仪表盘外环左上角断口 + H 位于断口处）。
+品牌几何的唯一来源是 ``assets/generate_logo.py``（仪表盘外环左上角断口 + 平台字母 W 位于断口处）。
 本脚本只负责把它导出成 Windows .ico，避免与 macOS/鸿蒙图标出现两套设计。
 
 运行: python scripts/build_icon.py  ->  assets/GoGauge.ico

@@ -15,6 +15,7 @@ import io.github.yphyphyph.gogauge.data.remote.OpenCodeApi
 import io.github.yphyphyph.gogauge.data.remote.UpdateApi
 import io.github.yphyphyph.gogauge.data.repository.DashboardRepository
 import io.github.yphyphyph.gogauge.sync.SyncWorker
+import io.github.yphyphyph.gogauge.util.LauncherIcon
 import io.github.yphyphyph.gogauge.widget.Updaters
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +43,13 @@ class GoGaugeApp : Application() {
             updateApi = UpdateApi(),
         )
         appScope.launch { database.ensureSeedRows() }
+        // 启动时按持久化 icon_style 校正启动器图标 alias 状态 (防止外部漂移:
+        // 系统设置/adb/桌面缓存改动后, 以本地设置为准; 状态一致时是空操作)。
+        appScope.launch {
+            runCatching { database.settingsDao().getSettings().iconStyle }
+                .getOrNull()
+                ?.let { LauncherIcon.apply(this@GoGaugeApp, it) }
+        }
         scheduleBackgroundSync(this)
         // 配额快照落库 → 刷新三个进程外入口 (小组件/磁贴/常驻通知)
         repository.onSnapshotsChanged = { Updaters.dispatch(this) }

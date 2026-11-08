@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- GoGauge 品牌标记（与 assets/generate_logo.py 同一几何）：
+       外环左上留 90° 断口，断口处字母为该平台标记（macOS=M / Windows=W）。 -->
+  <g fill="none">
+    <circle cx="256" cy="256" r="138.5" stroke="#D97757" stroke-width="65"
+            stroke-dasharray="652.7 870.2" transform="rotate(-90 256 256)"/>
+    <circle cx="256" cy="256" r="70" stroke="#EDA58B" stroke-width="52"
+            stroke-dasharray="309.1 439.8" transform="rotate(299 256 256)"/>
+  </g>
+  <g>
+    <path d="M140.04,209.04 L140.04,131.76 L170.40,171.95 L200.76,131.76 L200.76,209.04" fill="none" stroke="#C05634" stroke-width="10.12" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

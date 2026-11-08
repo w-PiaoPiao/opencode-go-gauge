@@ -57,12 +57,28 @@ def _rec(usg_id: str, model: str, created_at: str, *, inp=100, out=10, cache_rea
 
 
 def _recent_weekday_hour(hour: int, weekday: int = 0) -> str:
-    """最近一个指定星期几 (0=周一) 的北京时间 hour 点, 保证落在统计窗口内."""
+    """最近一个指定星期几的北京时间 hour 点, 保证落在 7 天统计窗口内.
+
+    旧实现只做「未来则推一周」. 周日早上跑测试时「最近的周日 11 点」还在未来,
+    推一周后正好掉出 7 天窗口 (窗口 = 今天 + 前 6 天): 周末样本消失, 峰谷两条
+    只剩一条, 三处断言在周日 00:00-11:00 之间必红 (CI 会偶发假红). 这里补一个
+    「窗口内的同类日」回退 —— 峰谷分档只看工作日时段与周末, 同类日互换语义不变.
+    """
     now = datetime.now(BJ)
-    delta = (now.weekday() - weekday) % 7
-    day = (now - timedelta(days=delta)).replace(hour=hour, minute=0, second=0, microsecond=0)
+    day = (now - timedelta(days=(now.weekday() - weekday) % 7)).replace(
+        hour=hour, minute=0, second=0, microsecond=0)
     if day > now:  # 该时刻还没到 -> 往前推一周
         day -= timedelta(days=7)
+    # 7 天口径的窗口起点是「今天 - 6 天」的自然日 (db.model_daily_stats: local_date >= date)
+    window_start = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if day < window_start:  # 掉出统计窗口: 找最近一个仍在窗口内的同类日
+        weekend = day.weekday() >= 5
+        for back in range(0, 7):
+            cand = (now - timedelta(days=back)).replace(
+                hour=hour, minute=0, second=0, microsecond=0)
+            if window_start <= cand <= now and (cand.weekday() >= 5) == weekend:
+                day = cand
+                break
     return day.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 

@@ -14,7 +14,10 @@
 <!-- 顶栏 (标题栏 + 操作区) -->
 <header class="tb">
   <div class="tb-left">
-    <img src="logo-final.svg" class="tb-logo" alt="GoGauge">
+    <img class="tb-logo brand-logo logo-mac-blue" src="logo-blue-mac.svg" alt="GoGauge">
+    <img class="tb-logo brand-logo logo-mac-warm" src="logo-terracotta-mac.svg" alt="GoGauge">
+    <img class="tb-logo brand-logo logo-win-blue" src="logo-blue-win.svg" alt="GoGauge">
+    <img class="tb-logo brand-logo logo-win-warm" src="logo-terracotta-win.svg" alt="GoGauge">
     <span class="tb-title">GoGauge</span>
     <span class="tb-sub" id="tb-sync">—</span>
   </div>
@@ -66,6 +69,7 @@
     <!-- ============ 首页 ============ -->
     <section class="page" id="page-home">
       <div class="ph"><h2 class="ph-title" data-i18n="homeTitle">用量统计总览</h2><div class="ph-right"><div class="pill-row" id="home-pills"><button class="pill active" data-r="today" data-i18n="today">今天</button><button class="pill" data-r="7d" data-i18n="d7">近7天</button><button class="pill" data-r="30d" data-i18n="d30">近30天</button><button class="pill" data-r="month" data-i18n="month">本周期</button><button class="pill" data-r="all" data-i18n="all">全部</button></div></div></div>
+      <div class="sync-error-banner" id="sync-error-banner" hidden role="status"></div>
       <div class="usage-blocks" id="usage-blocks"></div>
       <div class="card overview">
         <div class="card-h"><h3 data-i18n="overviewTitle">用量概览</h3><span class="hint" data-i18n="followRange">数据跟随时间范围</span></div>
@@ -172,6 +176,7 @@
       <div class="card set">
         <div class="card-h"><h3 data-i18n="setAppearance">外观</h3></div>
         <div class="set-row"><div><div class="sl" data-i18n="theme">主题</div><div class="sd" data-i18n="themeDesc">亮色 / 深色，顶栏按钮快捷切换</div></div><div class="pill-row" id="set-theme-pills"><button class="pill" data-v="light" data-i18n="light">浅色</button><button class="pill" data-v="dark" data-i18n="dark">深色</button></div></div>
+        <div class="set-row"><div><div class="sl" data-i18n="iconStyle">图标风格</div><div class="sd" data-i18n="iconStyleDesc">Dock / 任务栏图标与应用内 Logo 风格；安装包内图标在构建时固定</div></div><div class="pill-row" id="set-icon-pills"><button class="pill" data-v="blue" data-i18n="iconBlue">蓝色</button><button class="pill" data-v="terracotta" data-i18n="iconTerracotta">陶土橙</button></div></div>
         <div class="set-row"><div><div class="sl" data-i18n="chartAnim">图表动画</div><div class="sd" data-i18n="chartAnimDesc">数据刷新时的过渡动画；低配设备建议关闭以减少卡顿</div></div><label class="sw"><input type="checkbox" id="set-chart-anim"><span class="slider"></span></label></div>
         <div class="set-row"><div><div class="sl" data-i18n="overviewPanel">账户总览面板</div><div class="sd" data-i18n="overviewPanelDesc">侧边栏显示多账户总览入口，聚合展示各账户配额与用量</div></div><label class="sw"><input type="checkbox" id="set-overview-panel"><span class="slider"></span></label></div>
         <div class="set-row"><div><div class="sl" data-i18n="currency">默认货币</div><div class="sd" data-i18n="currencyDesc">费用主显示货币（实时汇率）</div></div><div class="pill-row" id="set-currency-pills"><button class="pill active" data-v="CNY">¥ CNY</button><button class="pill" data-v="USD">$ USD</button></div></div>
@@ -231,7 +236,10 @@
     <!-- 登录引导 (欢迎页) -->
     <div class="login-overlay" id="login-overlay" hidden>
       <div class="login-card">
-        <img src="logo-final.svg" class="login-logo" alt="GoGauge">
+        <img class="login-logo brand-logo logo-mac-blue" src="logo-blue-mac.svg" alt="GoGauge">
+        <img class="login-logo brand-logo logo-mac-warm" src="logo-terracotta-mac.svg" alt="GoGauge">
+        <img class="login-logo brand-logo logo-win-blue" src="logo-blue-win.svg" alt="GoGauge">
+        <img class="login-logo brand-logo logo-win-warm" src="logo-terracotta-win.svg" alt="GoGauge">
         <h2>GoGauge</h2>
         <p class="login-sub" data-i18n="welcomeDesc">本地优先的 OpenCode Go 用量仪表盘 — 配额窗口、Token 构成、模型排行、使用记录，打开即见。</p>
         <ul class="login-feats">

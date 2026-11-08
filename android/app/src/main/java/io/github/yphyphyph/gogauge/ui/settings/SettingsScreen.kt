@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yphyphyph.gogauge.data.model.AccountInfo
+import io.github.yphyphyph.gogauge.data.model.IconStyle
 import io.github.yphyphyph.gogauge.data.repository.PrunePreview
 import io.github.yphyphyph.gogauge.BuildConfig
 import io.github.yphyphyph.gogauge.ui.MainViewModel
@@ -235,6 +236,25 @@ fun SettingsScreen(vm: MainViewModel = viewModel()) {
                         options = listOf("light" to s.light, "dark" to s.dark),
                         selected = if (vm.darkMode) "dark" else "light",
                         onSelect = { vm.changeDarkMode(it == "dark") },
+                    )
+                },
+            )
+            // 图标风格 (v2.2.2d): Android 独有 —— 保存即真正切换桌面启动器图标
+            // (两个 activity-alias 互斥启停, 见 util/LauncherIcon.kt); 桌面图标
+            // 短暂消失/重现属正常, 部分第三方桌面刷新会有延迟。
+            SetRow(
+                s.iconStyle, s.iconStyleDesc,
+                stacked = true,
+                trailing = {
+                    PillRow(
+                        options = listOf(
+                            IconStyle.BLUE to s.iconBlue,
+                            IconStyle.TERRACOTTA to s.iconTerracotta,
+                        ),
+                        selected = vm.settings.iconStyle,
+                        onSelect = { v ->
+                            vm.saveSettings(vm.settings.copy(iconStyle = v))
+                        },
                     )
                 },
             )

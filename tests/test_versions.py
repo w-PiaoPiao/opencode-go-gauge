@@ -2,9 +2,9 @@
 
 只读: 全部断言都用 subprocess 调脚本 + 临时目录夹具, **不修改仓库版本号**。
 覆盖:
-- 当前仓库的真实版本状态（desktop=2.2.2b / Android=2.2.2b 已对齐:
-  Android 侧适配桌面最新改动后与桌面同版本, 统一 release 会构建 APK；
-  "Android ≤ 桌面"的滞后状态同样合法, 那时统一 release 只是跳过 Android 构建）；
+- 当前仓库的真实版本状态（desktop=2.2.2e 领先 Android=2.2.2b 三个 hotfix 字母:
+  桌面侧认证失效提示修复 + 图标风格 + macOS 图标网格先发, Android 尚未跟版 ——
+  "Android ≤ 桌面"的滞后状态合法, 统一 release 只是跳过 Android 构建）；
 - tag 与平台版本的相等/不等语义（desktop / android / all 三种 --platform）；
 - 格式校验（版本号、tag、字母后缀排序）；
 - 文件缺失时的可读错误。

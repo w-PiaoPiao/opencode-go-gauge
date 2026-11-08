@@ -107,6 +107,23 @@ def test_settings_roundtrip(http):
     assert again["window_days"] == 90
 
 
+def test_settings_icon_style_roundtrip_and_validation(http):
+    """图标风格设置: 默认 blue, PUT terracotta 持久化, 非法值忽略 (不落脏值)."""
+    data, status = _get(f"{http}/api/settings")
+    assert status == 200
+    assert data["icon_style"] == "blue"
+
+    saved, status = _request(f"{http}/api/settings", "PUT", {"icon_style": "terracotta"})
+    assert status == 200
+    assert saved["icon_style"] == "terracotta"
+    again, _ = _get(f"{http}/api/settings")
+    assert again["icon_style"] == "terracotta"
+
+    bad, status = _request(f"{http}/api/settings", "PUT", {"icon_style": "rainbow"})
+    assert status == 200
+    assert bad["icon_style"] == "terracotta"  # 白名单外: 保持原值
+
+
 def test_settings_rejects_invalid_body(http):
     _, status = _request(f"{http}/api/settings", "PUT", None)
     assert status == 400
@@ -122,6 +139,54 @@ def test_accounts_list(http):
     assert status == 200
     assert data["ok"] is True
     assert len(data["accounts"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 认证失效标记: 首页/顶栏/账号菜单靠它引导「重新登录」而不是让用户反复刷新
+# ---------------------------------------------------------------------------
+
+
+def test_is_auth_error_recognizes_both_providers():
+    # 两个 provider 的 401 文案 (opencode / commandcode) 都算认证失效
+    assert server._is_auth_error("登录已过期，请重新登录")
+    assert server._is_auth_error("认证失败 (HTTP 401)，请重新登录")
+    assert server._is_auth_error("unauthorized")
+    # 网络/解析失败不能误判 (否则会把用户赶去白重登)
+    assert not server._is_auth_error("网络错误: timed out")
+    assert not server._is_auth_error("请求返回 HTTP 500")
+    assert not server._is_auth_error("")
+    assert not server._is_auth_error(None)
+
+
+def test_auth_error_flags_in_sync_and_accounts_payloads(http, monkeypatch):
+    """认证失效时 dashboard/state/accounts 三个入口都带 auth_error 标记."""
+    # dashboard 会触发配额后台刷新: 测试里禁掉, 免真实外网请求
+    monkeypatch.setattr(server, "_ensure_quota_async", lambda *a, **k: None)
+    aid = db.add_account("tok-auth", "wrk_auth", switch=True, provider=db.PROVIDER_OPENCODE)
+    db.update_sync_state("error", "登录已过期，请重新登录", 0, aid)
+
+    dash, status = _get(f"{http}/api/dashboard?range=today")
+    assert status == 200
+    assert dash["sync"]["auth_error"] is True
+    assert dash["sync"]["last_sync_error"] == "登录已过期，请重新登录"
+
+    state, status = _get(f"{http}/api/state")
+    assert status == 200
+    assert state["sync"]["auth_error"] is True
+    rows = {a["id"]: a for a in state["accounts"]}
+    assert rows[aid]["auth_error"] is True
+
+    accounts, status = _get(f"{http}/api/accounts")
+    assert status == 200
+    rows = {a["id"]: a for a in accounts["accounts"]}
+    assert rows[aid]["auth_error"] is True
+    assert rows[aid]["last_sync_status"] == "error"
+
+    # 换成非认证错误: 标记必须消失 (前端回到「重试」文案)
+    db.update_sync_state("error", "网络错误: timed out", 0, aid)
+    accounts, _ = _get(f"{http}/api/accounts")
+    rows = {a["id"]: a for a in accounts["accounts"]}
+    assert rows[aid]["auth_error"] is False
 
 
 def test_static_index_served(http):

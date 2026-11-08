@@ -342,6 +342,77 @@ def _app_icon_path() -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# 图标风格 (设置页「蓝色 / 陶土橙」) → macOS Dock / Windows 任务栏图标
+# ---------------------------------------------------------------------------
+# 注意边界:
+# - macOS Dock 图标可以运行时改 (NSApplication.applicationIconImage); Finder 里
+#   的 .app 图标来自包内 icns, 属于安装包, 运行时改不了.
+# - Windows 任务栏/窗口图标可以运行时改 (WM_SETICON); exe 文件图标属于安装包.
+# - 两个平台的安装包图标在构建时都固定为蓝色 (见 assets/generate_logo.py).
+_ICON_STYLE_ASSETS = {
+    # macOS Dock 图标要满幅不透明底 (透明 Logo 会让停靠栏图标"悬空"), 因此用 1024
+    # 应用图标版; Windows 用多尺寸 ico. 包内 .app/.exe 图标固定为 blue 版.
+    "blue": {"mac": "appicon-blue-mac.png", "win": "GoGauge.ico"},
+    "terracotta": {"mac": "appicon-warm-mac.png", "win": "appicon-warm-win.ico"},
+}
+
+
+def _icon_style_asset(style: str) -> str:
+    """图标风格 → 当前平台的图标文件路径 (缺失时回退默认应用图标)."""
+    normalized = "terracotta" if style == "terracotta" else "blue"
+    name = _ICON_STYLE_ASSETS[normalized]["mac" if _IS_MAC else "win"]
+    path = _asset_path(name)
+    if os.path.isfile(path):
+        return path
+    return _app_icon_path()
+
+
+def _apply_app_icon_style(style: str = "blue") -> bool:
+    """把「图标风格」应用到系统层图标; 非 UI 线程调用会被 dispatch 到主线程."""
+    path = _icon_style_asset(style)
+    if not path:
+        return False
+    try:
+        if _IS_MAC:
+            def _set_dock_icon() -> None:
+                try:
+                    import AppKit  # pyobjc (pywebview 在 mac 下自带)
+
+                    image = AppKit.NSImage.alloc().initWithContentsOfFile_(path)
+                    if image is not None:
+                        AppKit.NSApplication.sharedApplication().setApplicationIconImage_(image)
+                except Exception as exc:  # noqa: BLE001
+                    _mlog(f"[icon] macOS dock icon error: {exc}")
+
+            try:  # AppKit 必须在主线程调用; js_api 在 HTTP 线程里执行
+                from PyObjCTools import AppHelper
+
+                AppHelper.callAfter(_set_dock_icon)
+            except Exception:  # noqa: BLE001 PyObjCTools 不可用: 直接尝试 (启动线程中通常已就绪)
+                _set_dock_icon()
+            return True
+        if _IS_WIN:
+            import ctypes
+
+            win = _main_win_ref.get("win")
+            native = getattr(win, "native", None)
+            handle = native.Handle.ToInt32() if native is not None else 0
+            if not handle:
+                return False
+            WM_SETICON, IMAGE_ICON, LR_LOADFROMFILE = 0x0080, 1, 0x00000010
+            user32 = ctypes.windll.user32
+            hicon = user32.LoadImageW(0, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
+            if not hicon:
+                return False
+            # wParam 0=ICON_SMALL(标题栏/任务栏), 1=ICON_BIG(Alt+Tab)
+            user32.SendMessageW(int(handle), WM_SETICON, 0, hicon)
+            user32.SendMessageW(int(handle), WM_SETICON, 1, hicon)
+            return True
+    except Exception as exc:  # noqa: BLE001 系统图标切换失败不影响应用内 Logo
+        _mlog(f"[icon] apply icon style error ({style}): {exc}")
+    return False
+
 
 def _arm_quit_fallback(timeout: float = 3.0) -> None:
     """退出兜底: 若 destroy 全部窗口后事件循环未在限时内退出, 强制结束进程.
@@ -798,6 +869,14 @@ class WindowApi:
         交给外部站点. 未设置 token (dev/浏览器模式) 返回空串.
         """
         return _auth_token_ref.get("token", "")
+
+    def apply_icon_style(self, style: str = "blue") -> bool:
+        """设置页「图标风格」→ 切换系统层图标 (macOS Dock / Windows 任务栏).
+
+        应用内 Logo 由前端 CSS 即时切换, 这里只负责 WebView 之外的系统图标;
+        .app/.exe 安装包图标在构建时固定为蓝色, 运行时无法修改.
+        """
+        return _apply_app_icon_style(style)
 
     def open_login(self, mode: str = "relogin", provider: str = "opencode") -> bool:
         """前端登录入口: 弹出独立登录窗口. mode: "add"=添加新用户 / "relogin"=重登当前用户."""
@@ -1657,8 +1736,15 @@ def main() -> None:
     # pywebview closing 事件语义 (两平台一致): handler 返回 False 即取消关闭
     main_win.events.closing += on_closing
 
+    # 图标路径: 托盘用菜单栏小图标 (透明底 Logo), 窗口/Dock 用满幅应用图标.
+    # pywebview 在 mac 上会用 create_window 的 icon 覆盖 NSApplication 图标, 所以
+    # 启动参数必须给**满幅不透明**的应用图标 (透明 Logo 会让 Dock 图标悬空);
+    # 具体风格在 GUI 启动后由 _startup_apply_icon_style 按设置覆盖.
+    tray_icon_path = _app_icon_path()
+    icon_path = _icon_style_asset("blue")
+
     # 系统托盘 (Windows) / 菜单栏图标 (macOS)
-    tray = TrayIcon(_app_icon_path())
+    tray = TrayIcon(tray_icon_path)
     tray.bind_window(lambda: main_win if main_win in webview.windows else None)
     tray.start()
 
@@ -1666,9 +1752,20 @@ def main() -> None:
     # 补齐 Dock 点击恢复窗口 与 退出放行 (必须在 webview.start() 之前).
     _install_macos_app_delegate()
 
-    # 窗口/Dock 图标: 按平台选择 (Win=ico, macOS 用 png 生成 dock icon 由 .app 提供)
-    icon_path = _app_icon_path()
-    webview.start(icon=icon_path if icon_path else None, user_agent=_mac_safari_user_agent())
+    def _startup_apply_icon_style() -> None:
+        """GUI 事件循环起来后, 按持久化的「图标风格」应用系统图标 (Dock/任务栏).
+
+        webview.start(func) 的 func 在独立线程里跑, 此时主线程事件循环已就绪,
+        macOS 侧通过 AppHelper.callAfter 回到主线程设置 NSApplication 图标.
+        """
+        try:
+            style = db.get_settings().get("icon_style", "blue")
+        except Exception:  # noqa: BLE001 设置读取失败用默认蓝色
+            style = "blue"
+        _apply_app_icon_style(style)
+
+    webview.start(_startup_apply_icon_style, icon=icon_path if icon_path else None,
+                  user_agent=_mac_safari_user_agent())
 
     if not _quitting:
         tray.stop()

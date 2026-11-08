@@ -23,6 +23,7 @@ import io.github.yphyphyph.gogauge.data.repository.PrunePreview
 import io.github.yphyphyph.gogauge.data.remote.OpenCodeApiException
 import io.github.yphyphyph.gogauge.data.remote.UpdateDownloader
 import io.github.yphyphyph.gogauge.data.remote.UpdateInfo
+import io.github.yphyphyph.gogauge.util.LauncherIcon
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -751,7 +752,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun saveSettings(patch: AppSettings) {
         // 乐观更新: 开关立即响应; 连续快速切换两个开关时, 后一次修改基于已含前
         // 一次改动的 settings 构造, 不会被在途写库的旧值覆盖 (此前会静默回滚)
+        val previous = settings
         settings = patch
+        // 图标风格: 立即互斥切换启动器图标 alias (Android 独有的真实图标切换;
+        // 写库失败会在下方回滚并恢复旧风格的 alias 状态)
+        if (patch.iconStyle != previous.iconStyle) {
+            LauncherIcon.apply(getApplication(), patch.iconStyle)
+        }
         scope.launch {
             settingsMutex.withLock {
                 try {
@@ -761,6 +768,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (e: Exception) {
                     android.util.Log.e("GoGauge", "saveSettings failed", e)
                     settings = repo.settings() // 写库失败: 回滚为库中实际值
+                    LauncherIcon.apply(getApplication(), settings.iconStyle)
                 }
             }
             restartAutoSync()

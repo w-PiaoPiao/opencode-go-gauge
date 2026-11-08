@@ -47,6 +47,8 @@ export struct SettingsPage {
   @State private lang: string = 'zh'
   @State private dark: boolean = false
   @State private currency: string = 'USD'
+  /** 应用内 Logo 图标风格 'blue' | 'terracotta'（启动器图标固定蓝色，见 AppPrefs 注释）。 */
+  @State private iconStyle: string = 'blue'
   @State private renamingId: number = -1
   @State private renameText: string = ''
   @State private updateMsg: string = ''
@@ -62,7 +64,7 @@ export struct SettingsPage {
   /** 账号胶囊点击：打开壳层的账号切换 Sheet（宽屏/手机一致）。 */
   onOpenAccountSwitcher: () => void = () => {
   }
-  /** 主题/语言切换后通知壳层立即重建（顶栏/底部 Tab 即时刷新，无需重启）。 */
+  /** 外观（主题/语言/货币/图标风格）切换后通知壳层立即重建（顶栏/底部 Tab/应用内 Logo 即时刷新，无需重启）。 */
   onAppearanceChanged: () => void = () => {
   }
 
@@ -82,6 +84,7 @@ export struct SettingsPage {
     this.lang = AppPrefs.getLanguage()
     this.dark = AppPrefs.isDarkMode()
     this.currency = AppPrefs.getCurrency()
+    this.iconStyle = AppPrefs.getIconStyle()
     try {
       const repo = Repo.get()
       this.accounts = await repo.accounts()
@@ -109,8 +112,9 @@ export struct SettingsPage {
     AppPrefs.setLanguage(this.lang)
     AppPrefs.setDarkMode(this.dark)
     AppPrefs.setCurrency(this.currency)
+    AppPrefs.setIconStyle(this.iconStyle)
     this.refreshWindowChrome()
-    // 通知 AppRoot 重建壳层与当前页（顶栏/底部 Tab 文案、配色、页面内容即时刷新）
+    // 通知 AppRoot 重建壳层与当前页（顶栏/底部 Tab 文案、配色、应用内 Logo 即时刷新）
     this.onAppearanceChanged()
   }
 
@@ -389,6 +393,19 @@ export struct SettingsPage {
       { value: 'zh', label: '中文' },
       { value: 'en', label: 'English' },
     ]
+  }
+
+  /** 图标风格选项：与桌面/Android 契约同值（blue / terracotta）。 */
+  private iconStyleOptions(): Option[] {
+    return [
+      { value: 'blue', label: I18n.t('iconBlue') },
+      { value: 'terracotta', label: I18n.t('iconTerracotta') },
+    ]
+  }
+
+  /** 当前图标风格对应的应用内 Logo 资源（设置行内预览；手机无顶栏时也能看到切换效果）。 */
+  private iconPreview(): Resource {
+    return this.iconStyle === 'terracotta' ? $r('app.media.icon_warm') : $r('app.media.icon')
   }
 
   private currencyOptions(): Option[] {
@@ -875,6 +892,33 @@ export struct SettingsPage {
           })
         }
         .width('100%')
+        .padding({ top: ROW_PAD_V, bottom: ROW_PAD_V })
+
+        this.rowDivider()
+
+        Column({ space: 8 }) {
+          this.stackLabel(I18n.t('iconStyle'), I18n.t('iconStyleDesc'))
+          Row({ space: 10 }) {
+            SegButtons({
+              options: this.iconStyleOptions(),
+              selected: this.iconStyle,
+              onSelect: (v: string) => {
+                this.iconStyle = v === 'terracotta' ? 'terracotta' : 'blue'
+                this.saveAppearance()
+              },
+            })
+            Blank()
+            Image(this.iconPreview())
+              .width(28)
+              .height(28)
+              .borderRadius(8)
+              .objectFit(ImageFit.Cover)
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
         .padding({ top: ROW_PAD_V, bottom: ROW_PAD_V })
 
         this.rowDivider()

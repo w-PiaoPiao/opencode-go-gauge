@@ -2217,6 +2217,10 @@ _DEFAULT_SETTINGS = {
     "show_accounts_panel": False,  # 账户总览面板开关 (侧边栏入口显隐)
     "chart_animation": False,  # 图表动画开关 (默认关闭: 低配设备上每次刷新重建动画是掉帧大头)
     "ds_peak_split": False,  # 统计页把 DeepSeek flash 拆成「峰」「谷」两条 (纯展示, 不动数据)
+    # 图标风格: blue=深蓝底品牌蓝环; terracotta=陶土橙底暖色环 (对齐 Android 暖纸面主题).
+    # 支持运行时切系统图标的平台 (macOS Dock / Windows 任务栏) 会同步切换;
+    # .app/.exe 包内图标在构建时固定为 blue (系统不允许改安装包图标).
+    "icon_style": "blue",
 }
 
 
@@ -2533,6 +2537,9 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
                     out[key] = default
         elif isinstance(default, bool):
             out[key] = _coerce_bool(value, default)
+        elif key == "icon_style":
+            # 白名单枚举: 脏值/旧版本缺失一律回落默认, 前端只认这两个值
+            out[key] = value if value in ("blue", "terracotta") else default
         else:
             out[key] = value
     return out
@@ -2584,6 +2591,10 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 elif isinstance(_DEFAULT_SETTINGS[key], bool):
                     # 显式解析而不是 bool(): bool("false") == True 会把"关"变成"开"
                     current[key] = _coerce_bool(payload[key], bool(_DEFAULT_SETTINGS[key]))
+                elif key == "icon_style":
+                    # 只接受白名单值; 非法值保持原值 (同 sync_interval_sec 的容错语义)
+                    if payload[key] in ("blue", "terracotta"):
+                        current[key] = payload[key]
                 else:
                     current[key] = payload[key]
         # 写回时保留非白名单键 (key_names / active_account_id / local_date_tz 等),

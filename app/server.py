@@ -64,7 +64,7 @@ _sync_state: dict[str, Any] = {
     "mode": "",
     "page": 0,
     "inserted": 0,
-    "phase": "idle",  # idle | quota | usage | done | error
+    "phase": "idle",  # idle | quota | usage | done | partial | error
     "message": "",
     "account": "",  # 当前正在同步的账号名 (多账号顺序轮询)
 }
@@ -126,6 +126,55 @@ def _set_phase(phase: str, message: str = "") -> None:
     with _sync_lock:
         _sync_state["phase"] = phase
         _sync_state["message"] = message
+
+
+# ---------------------------------------------------------------------------
+# 认证失效识别 (同步状态只落错误文案, 接口层补结构化标记给前端引导重新登录)
+# ---------------------------------------------------------------------------
+
+# 两个 provider 的 401/403 文案: opencode "登录已过期，请重新登录" /
+# commandcode "认证失败 (HTTP 401)，请重新登录" (见各自 *_api.py 的 AuthError).
+_AUTH_ERROR_MARKERS = (
+    "登录已过期",
+    "重新登录",
+    "认证失败",
+    "HTTP 401",
+    "HTTP 403",
+    "Unauthorized",
+    "unauthorized",
+)
+
+
+def _is_auth_error(message: Any) -> bool:
+    """错误文案是否表示登录凭证失效 (这类失败重试无意义, 必须重新登录)."""
+    text = str(message or "")
+    return any(marker in text for marker in _AUTH_ERROR_MARKERS)
+
+
+def _sync_state_payload(account_id: Optional[int] = None) -> dict[str, Any]:
+    """同步状态 + auth_error 标记.
+
+    ``last_sync_error`` 是库里唯一跨重启保留的失败原因; 首页错误条、顶栏状态、
+    账号菜单的「登录已过期」标记都依赖它, 因此在此统一贴一个结构化布尔值,
+    避免前端各调用点各自写正则 (文案随 provider/语言变化时会漏).
+    """
+    state = db.get_sync_state(account_id)
+    if not state:
+        return {}
+    enriched = dict(state)
+    enriched["auth_error"] = _is_auth_error(enriched.get("last_sync_error"))
+    return enriched
+
+
+def _accounts_payload() -> list[dict[str, Any]]:
+    """账号列表 + 每账号的同步认证失效标记 (用户菜单/设置页显示「登录已过期」)."""
+    accounts = db.list_accounts()
+    for acc in accounts:
+        sync_state = _sync_state_payload(acc.get("id")) if acc.get("has_token") else {}
+        acc["last_sync_status"] = sync_state.get("last_sync_status")
+        acc["last_sync_error"] = sync_state.get("last_sync_error")
+        acc["auth_error"] = bool(sync_state.get("auth_error"))
+    return accounts
 
 
 # ---------------------------------------------------------------------------
@@ -786,7 +835,9 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
             return {"ok": False, "error": any_error, "partial_inserted": total_inserted}
         if partial or errors:
             msg = "部分账号同步异常" if errors else "完成, 但部分页面拉取失败"
-            _set_phase("done", msg)
+            # phase=partial 而不是 done: 前端据此在同步结束的 toast 里给出警告,
+            # 与成功一视同仁会继续"看起来什么都没发生" (旧版正是这样静默的).
+            _set_phase("partial", msg)
             # 失败账号的半截落库同样要失效 (成功账号已在 _finish_sync 里 bump 过)
             bump_data_generation()
             return {
@@ -1223,14 +1274,14 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
 
     if route == "/api/state" and method == "GET":
         account = db.get_account()
-        sync = db.get_sync_state()
+        sync = _sync_state_payload()
         _json_response(
             handler,
             {
                 "ok": True,
                 "logged_in": bool(db.count_logged_in_accounts()),
                 "account": account,
-                "accounts": db.list_accounts(),
+                "accounts": _accounts_payload(),
                 "accounts_total": db.count_accounts(),
                 "accounts_logged_in": db.count_logged_in_accounts(),
                 "sync": sync,
@@ -1349,7 +1400,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
                 "quota": _attach_forecast(quota),
                 **agg,
                 "excluded_models": exclude_models,  # 回显生效的排除项
-                "sync": db.get_sync_state(active_id),
+                "sync": _sync_state_payload(active_id),
                 "progress": _sync_progress_snapshot(),
                 "range": range_param,
                 "exchange_rate": {"usd_cny": _fetch_usd_cny(), "currency": "CNY"},
@@ -1387,7 +1438,7 @@ def _handle_api(handler: BaseHTTPRequestHandler, path: str, query: dict[str, lis
             handler,
             {
                 "ok": True,
-                "accounts": db.list_accounts(),
+                "accounts": _accounts_payload(),
                 "active_id": db.get_active_account_id(),
             },
         )

@@ -107,6 +107,9 @@ def test_incremental_continues_after_account_failure(two_accounts, monkeypatch):
     assert result["partial"] is True
     assert result["inserted"] == 1
     assert len(result["errors"]) == 1
+    # 轮次 phase 要能区分 partial: 前端据此在同步结束 toast 里给警告 (旧版是 done,
+    # 首页看起来像"什么都没发生")
+    assert server._sync_state["phase"] == "partial"
 
 
 def test_incremental_all_accounts_failing_reports_error(two_accounts, monkeypatch):
@@ -122,6 +125,7 @@ def test_incremental_all_accounts_failing_reports_error(two_accounts, monkeypatc
 
     assert result["ok"] is False
     assert "401" in result["error"]
+    assert server._sync_state["phase"] == "error"
 
 
 def test_full_mode_targets_only_active_account(two_accounts, monkeypatch):

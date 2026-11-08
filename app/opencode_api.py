@@ -114,6 +114,10 @@ class QuotaResult:
     period_end: Optional[str] = None    # ISO, 订阅计费周期终点 (access.endsAt)
     windows: list[QuotaWindow] = field(default_factory=list)
     error: Optional[str] = None
+    # 认证过期/无效 (HTTP 401/403): 前端据此在配额卡上引导「重新登录」, 而不是
+    # 「刷新重试」(同一份失效凭证重试多少次都不会恢复). 只对认证错误置位,
+    # 网络/解析等其它失败仍走普通重试文案.
+    auth_error: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -122,6 +126,8 @@ class QuotaResult:
             "success": self.success,
             "updated_at": self.updated_at,
         }
+        if self.auth_error:
+            payload["auth_error"] = True
         if self.plan:
             payload["plan"] = self.plan
         if self.period_start:
@@ -531,6 +537,9 @@ def fetch_quota(token: str, workspace_hint: str = "Default") -> QuotaResult:
         return QuotaResult(
             name=name, workspace_id=hint, success=False,
             updated_at=updated_at, error=str(exc),
+            # 401/403 映射为 AuthError (见 _fetch): 只有认证失败才值得引导重新登录,
+            # 网络/404/解析失败给「重试」即可.
+            auth_error=isinstance(exc, AuthError),
         )
 
 

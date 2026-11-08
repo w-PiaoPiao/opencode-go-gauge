@@ -51,11 +51,15 @@ export struct AppRoot {
   @State private showSwitcher: boolean = false
   /** 主题/语言切换后壳层重建计数（设置页通过 AppStorage 递增，壳层 @StorageLink 监听）。 */
   @State private chromeToken: number = 0
+  /** 应用内品牌 Logo 风格 'blue' | 'terracotta'（启动器图标固定蓝色，见 AppPrefs 注释）。 */
+  @State private iconStyle: string = 'blue'
   /** 登录态失效/主动退出时回调 Index。 */
   onLogout: () => void = () => {
   }
 
   aboutToAppear(): void {
+    // 启动即按持久化的外观设置渲染（应用内 Logo 风格与主题/语言同源）
+    this.iconStyle = AppPrefs.getIconStyle()
     // 启动页参数仅 debug 构建生效（release 始终从首页进入）
     const p = this.initialTab.length > 0 ? this.initialTab : (BuildProfile.DEBUG ? LaunchParams.page : '')
     if (p === 'stats' || p === 'records' || p === 'settings') {
@@ -252,7 +256,9 @@ export struct AppRoot {
             this.showSwitcher = true
           },
           onAppearanceChanged: () => {
-            // 主题/语言切换后立即重建壳层 + 当前页
+            // 外观（主题/语言/图标风格）切换后立即重建壳层 + 当前页；
+            // 顶栏 Logo 不是 pageSlot 子树，需同步刷新 @State iconStyle 才即时生效。
+            this.iconStyle = AppPrefs.getIconStyle()
             this.chromeToken++
             this.refreshToken++
           },
@@ -286,10 +292,18 @@ export struct AppRoot {
       .objectFit(ImageFit.Contain)
   }
 
+  /**
+   * 应用内品牌 Logo 资源：图标风格 = terracotta 时用 icon_warm，否则默认蓝色 icon。
+   * 只影响应用内展示；HarmonyOS 启动器图标无运行时切换 API，固定蓝色 H。
+   */
+  private appIcon(): Resource {
+    return this.iconStyle === 'terracotta' ? $r('app.media.icon_warm') : $r('app.media.icon')
+  }
+
   @Builder
   topBar() {
     Row({ space: 10 }) {
-      Image($r('app.media.icon'))
+      Image(this.appIcon())
         .width(24)
         .height(24)
         .borderRadius(7)
