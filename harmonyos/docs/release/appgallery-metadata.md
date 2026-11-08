@@ -295,7 +295,7 @@ cd /Users/yizhiwang/Desktop/opencode/gousage/opencode-go-gauge
 | `release/assets/icon-512.png` | 512×512 | 备用（部分后台位会要求 512） |
 | `release/assets/icon-1024-package-match.png` | 1024×1024 | **仅兜底**：若最终 HAP 仍使用旧的 512 占位图标（`scripts/gen_icons.py` 产物），用这张保证「与包内图标一致」；正常情况下不需要 |
 
-规格：PNG ≤3MB、正方形（216×216 或 1024×1024 均可）。图标均由 `release/assets/generate-assets.py` 复现（源图：`assets/GoGauge.icns` 1024 品牌标识）。
+规格：PNG ≤3MB、正方形（216×216 或 1024×1024 均可）。图标均由 `release/assets/generate-assets.py` 复现（源图：`assets/GoGauge-harmony.png` 1024 品牌标识，平台字母 H；不要用桌面端带 M/W 字母的图标）。
 
 **一致性要求**：AGC 审核会做「应用名称/图标一致性检测」——商店图标必须与安装后桌面图标一致。若包内图标最终未替换为品牌图标，请改传 `icon-1024-package-match.png`，不要混用。
 

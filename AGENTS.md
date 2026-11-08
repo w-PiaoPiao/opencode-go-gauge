@@ -80,4 +80,10 @@
 - `@Builder` 方法**不能**作为 `@BuilderParam` 传值（this 绑定会失效导致 jscrash），统一用尾随闭包。
 - release 构建启动参数（`--ps demo/lang/theme/page`）被 `BuildProfile.DEBUG` 守卫，release 下无效；隐私政策首启弹窗不可绕过。
 - 改包名/版本号需同步：`harmonyos/AppScope/app.json5`、`android/app/build.gradle.kts`、`harmonyos/entry/src/main/ets/common/BackgroundSync.ets`、隐私政策与文档中的包名引用。
-- 桌面图标品牌几何唯一来源：`assets/generate_logo.py`；`scripts/build_icon.py` / `build_macos_icon.py` 只是导出器。
+- 图标品牌几何唯一来源：`assets/generate_logo.py`；`scripts/build_icon.py` / `build_macos_icon.py` 只是导出器。
+  - 断口字母按平台区分：Android=A / macOS=M / Windows=W / HarmonyOS=H；README/文档用无字母的 `assets/GoGauge-logo.svg`。
+  - 两种配色风格：`blue`（深蓝底品牌蓝）与 `terracotta`（陶土橙底暖色），设置项 `icon_style`（默认 blue）。
+  - macOS 应用图标带 Big Sur+ 图标网格（1024 画布 + 824 连续曲率 squircle tile + 安全边距）；运行时
+    `setApplicationIconImage` 的 Dock 图标不会被系统自动遮罩，必须直接给这张网格图，否则显示为硬边正方形。
+  - 运行时切换边界：macOS 可换 Dock 图标、Windows 可换任务栏图标（`.app`/`.exe` 安装包图标构建时固定蓝）；
+    Android 用 activity-alias 真正切换启动器图标；HarmonyOS 无启动器图标切换 API（固定蓝 H），只切应用内 Logo。

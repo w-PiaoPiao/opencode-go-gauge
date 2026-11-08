@@ -318,6 +318,9 @@ def fetch_quota(token: str) -> QuotaResult:
         return QuotaResult(
             name="Default", workspace_id="commandcode", success=False,
             updated_at=updated_at, error=str(exc),
+            # 401/403 映射为 AuthError (见 _fetch): 前端据此引导重新登录,
+            # 其它失败 (网络/解析) 仍走普通重试文案.
+            auth_error=isinstance(exc, AuthError),
         )
 
 

@@ -1,7 +1,7 @@
 # GoGauge — OpenCode Go / Command Code GOAT 用量仪表盘
 
 <p align="center">
-  <img src="assets/GoGauge.ico" width="64" alt="GoGauge">
+  <img src="assets/GoGauge-logo.svg" width="64" alt="GoGauge">
 </p>
 
 <p align="center">

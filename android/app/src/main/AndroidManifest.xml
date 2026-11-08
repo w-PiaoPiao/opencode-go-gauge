@@ -11,21 +11,51 @@
     <application
         android:name=".GoGaugeApp"
         android:allowBackup="false"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/ic_launcher_blue"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.GoGauge">
 
+        <!-- 真正的入口 Activity: 不直接挂 LAUNCHER, 由下方两个 activity-alias 承载
+             启动器入口。alias 图标随设置「图标风格」互斥启停 (见 util/LauncherIcon.kt)，
+             这样同一时间桌面只出现一个图标。
+             exported 保持 true: 桌面通过 alias 拉起时部分 ROM 会按 targetActivity 的
+             exported 做二次校验 (此前本 Activity 就带 LAUNCHER 且 exported=true,
+             收紧为 false 无收益且有启动失败风险)。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 启动器图标 alias — 品牌蓝 (默认启用)。
+             注意: targetActivity 必须在本文件更早处声明。 -->
+        <activity-alias
+            android:name=".LauncherBlue"
+            android:exported="true"
+            android:enabled="true"
+            android:icon="@mipmap/ic_launcher_blue"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <!-- 启动器图标 alias — 陶土橙 (默认禁用; 选「陶土橙」时与蓝色 alias 互斥切换) -->
+        <activity-alias
+            android:name=".LauncherTerracotta"
+            android:exported="true"
+            android:enabled="false"
+            android:icon="@mipmap/ic_launcher_terracotta"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <!-- 配额小组件 (v2.2.0b) -->
         <receiver

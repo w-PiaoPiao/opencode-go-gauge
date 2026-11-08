@@ -1,6 +1,21 @@
 /* GoGauge - 4 页 (首页/用量统计/设置/关于) + 双主题 + 中英国际化 */
 "use strict";
 const $ = (id) => document.getElementById(id);
+/* 平台/图标风格根类尽早写入: 顶栏与登录页的品牌 Logo 由 CSS 按
+   (平台 os-mac/os-win × 图标风格 data-icon) 从 4 个候选里择一显示.
+   本脚本位于 </body> 前且在首帧绘制前执行, 因此不会先闪出错误平台的字母.
+   设置值来自 localStorage 镜像 (服务端真值在 /api/settings 返回后覆盖). */
+(function bootBrandClasses() {
+  const mac = isMac();
+  const root = document.documentElement;
+  root.classList.toggle("os-mac", mac);
+  root.classList.toggle("os-win", !mac);
+  let style = "blue";
+  try {
+    style = localStorage.getItem("gousage-icon-style") === "terracotta" ? "terracotta" : "blue";
+  } catch (e) { /* localStorage 不可用时用默认 blue */ }
+  root.dataset.icon = style;
+})();
 /* ================= 国际化 ================= */
 const I18N = {
   zh: {
@@ -117,7 +132,15 @@ const I18N = {
     themeTip: "切换主题", winMinimize: "最小化", winClose: "关闭",
     colCacheWrite: "缓存写", cacheWriteDesc: "新写入缓存",
     syncOk: "同步成功", syncError: "同步失败", syncPartial: "部分成功",
-    saveFailed: "保存失败，请重试", syncFailed: "同步失败",   },
+    saveFailed: "保存失败，请重试", syncFailed: "同步失败",
+    loginExpired: "登录已过期",
+    loginExpiredDesc: "登录凭据已失效，配额与用量同步都已暂停；重新登录后自动恢复。",
+    iconStyle: "图标风格", iconStyleDesc: "Dock / 任务栏图标与应用内 Logo 风格；安装包内图标在构建时固定",
+    iconBlue: "蓝色", iconTerracotta: "陶土橙", iconStyleSet: "图标风格已切换",
+    loginExpiredBadge: "登录已过期",
+    reloginLater: "稍后",
+    retry: "重试",
+    dismiss: "忽略",   },
   en: {
     syncing: "Syncing", themeDark: "Dark", themeLight: "Light", refresh: "Refresh",
     homeTitle: "Usage Overview", today: "Today", d7: "7 Days", d30: "30 Days", month: "This Cycle", all: "All",
@@ -230,7 +253,15 @@ const I18N = {
     themeTip: "Toggle theme", winMinimize: "Minimize", winClose: "Close",
     colCacheWrite: "Cache Write", cacheWriteDesc: "new cache writes",
     syncOk: "Synced", syncError: "Sync failed", syncPartial: "Partially synced",
-    saveFailed: "Failed to save, please retry", syncFailed: "Sync failed",   },
+    saveFailed: "Failed to save, please retry", syncFailed: "Sync failed",
+    loginExpired: "Login expired",
+    loginExpiredDesc: "Your credentials have expired. Quota and usage sync are paused until you sign in again.",
+    iconStyle: "Icon Style", iconStyleDesc: "Dock / taskbar icon and in-app logo style; the installed package icon is fixed at build time",
+    iconBlue: "Blue", iconTerracotta: "Terracotta", iconStyleSet: "Icon style updated",
+    loginExpiredBadge: "Login expired",
+    reloginLater: "Later",
+    retry: "Retry",
+    dismiss: "Dismiss",   },
 };
 let lang = "zh";
 function t(key) { return (I18N[lang] && I18N[lang][key]) || I18N.zh[key] || key; }
@@ -253,9 +284,14 @@ let state = {
   excludedModels: new Set(),
   records: { page: 1, total: 0, model: "" },
   sessions: { page: 1, total: 0 },
-  settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true },
+  settings: { sync_interval_sec: 300, window_days: 60, auto_sync: true, icon_style: "blue" },
+  iconStyle: "blue",  // 当前图标风格 (blue / terracotta); 根元素 data-icon 由它驱动
   // I4: 从 URL fragment 读取的本地 HTTP token (仅驻内存; 所有 /api 请求带 X-GoGauge-Token)
   authToken: "",
+  // 登录失效引导: 每次账号变化/手动重试后只自动弹一次, 防自动同步每轮弹窗
+  reloginPrompted: false,
+  // 首页同步错误条「忽略」对应的时间戳: 下一次同步 (last_sync_at 变化) 后重新出现
+  syncErrorDismissedFor: "",
 };
 /* 分页大小单一来源: 请求 page_size / totalPages / 补空行都用它, 避免 7 这个魔法数漂移 */
 const PAGE_SIZE = 7;
@@ -507,6 +543,7 @@ function adaptTitlebar() {
   const mac = isMac();
   ["tb-min", "tb-close", "tb-sep"].forEach((id) => { const el = $(id); if (el) el.hidden = mac; });
   document.documentElement.classList.toggle("os-mac", mac);
+  document.documentElement.classList.toggle("os-win", !mac);
 }
 function bindTitlebar() {
   adaptTitlebar();
@@ -554,6 +591,38 @@ function bindTitlebar() {
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     flushDrag();  // 释放残留增量, 避免窗口停在半路
   });
+}
+/* ---------------- 图标风格 (蓝色 / 陶土橙) ---------------- */
+/* 本地生效 (根元素 data-icon → CSS 切换 4 个 Logo 候选 + 设置页选中态) */
+function setIconStyleLocal(style) {
+  const normalized = style === "terracotta" ? "terracotta" : "blue";
+  state.iconStyle = normalized;
+  document.documentElement.dataset.icon = normalized;
+  try { localStorage.setItem("gousage-icon-style", normalized); } catch (e) { /* ignore */ }
+  document.querySelectorAll("#set-icon-pills .pill").forEach((b) => {
+    b.classList.toggle("active", b.dataset.v === normalized);
+  });
+}
+/* 应用图标风格. persist=true 时写服务端设置 (设置页点击);
+   persist=false 用于初始化/设置页重渲染 (服务端值已存在, 不重复写).
+   系统层图标 (macOS Dock / Windows 任务栏) 通过主进程 js_api 同步切换;
+   浏览器/其它环境没有该 API 时静默跳过. 返回是否成功 (失败已 toast). */
+async function applyIconStyle(style, { persist = false } = {}) {
+  setIconStyleLocal(style);
+  state.settings = { ...state.settings, icon_style: state.iconStyle };
+  if (persist) {
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ icon_style: state.iconStyle }) });
+    } catch (e) {
+      toast(e.message || t("saveFailed"), "err");
+      return false;
+    }
+  }
+  try {
+    const a = await pywebviewApi();
+    if (a && typeof a.apply_icon_style === "function") a.apply_icon_style(state.iconStyle);
+  } catch (e) { /* 非桌面环境/旧后端: 仅应用内 Logo 生效 */ }
+  return true;
 }
 /* ---------------- 主题 / 货币 ---------------- */
 function applyDarkMode(on) {
@@ -685,13 +754,54 @@ async function loadDashboard(quiet = false, force = false) {
   }
 }
 function showLoading(show) { $("top-loading").hidden = !show; }
+/* ---------------- 认证失效 / 重新登录引导 ---------------- */
+/* 两个 provider 的认证失败文案 (见 app/opencode_api.py 与 app/commandcode_api.py):
+   服务端已尽量给 auth_error 结构化标记, 这里兜底旧服务端/文案透传场景. */
+function isAuthErrorMessage(msg) {
+  return /(登录已过期|重新登录|认证失败|HTTP 40[13]|Unauthorized)/i.test(String(msg || ""));
+}
+/* 当前活跃账号的数据源: 决定「重新登录」打开哪个登录页. */
+function activeProvider() {
+  const p = (state.data && state.data.account && state.data.account.provider) || "";
+  return p === "commandcode" ? "commandcode" : "opencode";
+}
+/* 需要重新登录时的唯一引导入口: 先弹确认框, 用户点「重新登录」再开登录窗.
+   每个会话只自动弹一次 (手动点刷新会重置), 否则自动同步每轮失败都会弹窗. */
+function promptRelogin(reason) {
+  if (state.reloginPrompted) return;
+  if (!state.data || state.data.logged_in === false) return;
+  if (!$("modal-overlay").hidden) return;  // 已有弹窗/登录对话框: 不打断
+  state.reloginPrompted = true;
+  const detail = reason
+    ? `<br><span class="modal-detail">${escapeHtml(String(reason).slice(0, 160))}</span>` : "";
+  showModal({
+    title: t("loginExpired"),
+    message: `${escapeHtml(t("loginExpiredDesc"))}${detail}`,
+    okText: t("relogin"),
+    cancelText: t("reloginLater"),
+    onOk: () => { startLogin("relogin", activeProvider()); },
+  });
+}
 /* ---------------- 首页: 用量块 ---------------- */
 function renderUsageBlocks(quota) {
   const row = $("usage-blocks");
   if (!quota || !quota.success) {
     if (quota && !quota.success) {
       clearTimeout(state.quotaRetryTimer);
-      row.innerHTML = `<div class="ub ub-error">${t("quotaFail")}：${escapeHtml(quota.error || "?")}，${t("retryTip")}</div>`;
+      // 认证失效: 刷新只会拿同一份失效凭证重试, 文案和执行入口都改为「重新登录」
+      const auth = quota.auth_error === true || isAuthErrorMessage(quota.error);
+      const reloginBtn = auth
+        ? `<button class="btn btn-sm btn-primary" id="quota-relogin">${t("relogin")}</button>` : "";
+      const retryHint = auth ? "" : `，${t("retryTip")}`;
+      row.innerHTML = `<div class="ub ub-error">`
+        + `<span class="ub-error-text">${t("quotaFail")}：${escapeHtml(quota.error || "?")}${retryHint}</span>`
+        + reloginBtn
+        + `</div>`;
+      if (auth) {
+        const relogin = $("quota-relogin");
+        if (relogin) relogin.addEventListener("click", () => startLogin("relogin", activeProvider()));
+        promptRelogin(quota.error);
+      }
       return;
     }
     if (state.quotaRetryTimer) clearTimeout(state.quotaRetryTimer);
@@ -1295,6 +1405,7 @@ function renderAll(data) {
   state.data = data;
   if (data.exchange_rate?.usd_cny) state.exchangeRate = data.exchange_rate.usd_cny;
   renderUsageBlocks(data.quota);
+  renderSyncErrorBanner(data);
   renderOverview(data.totals);
   const homeVisible = !document.getElementById("page-home").hidden;
   const statsVisible = !document.getElementById("page-stats").hidden;
@@ -1311,7 +1422,19 @@ function renderAll(data) {
   const syncCountText = sync.provider === "commandcode" && sync.chart_requests
     ? t("ccSyncCounts").replace("{m}", fmtInt(sync.chart_requests)).replace("{n}", fmtInt(sync.total_records || 0))
     : `${fmtInt(sync.total_records || 0)} ${t("records")}`;
-  $("tb-sync").textContent = data.logged_in ? `${t("lastSync")} ${fmtRelative(sync.last_sync_at)} · ${syncCountText}` : t("notLoggedIn");
+  // 上次同步时间在失败时也是「刚刚」: 必须带上成功/失败状态, 否则看起来像同步成功
+  const syncStatus = String(sync.last_sync_status || "");
+  const syncAbnormal = data.logged_in && (syncStatus === "error" || syncStatus === "partial");
+  let tbSyncText = data.logged_in
+    ? `${t("lastSync")} ${fmtRelative(sync.last_sync_at)} · ${syncCountText}`
+    : t("notLoggedIn");
+  if (syncAbnormal) {
+    tbSyncText += ` · ${syncStatus === "partial" ? t("syncPartial") : t("syncError")}`;
+  }
+  $("tb-sync").textContent = tbSyncText;
+  $("tb-sync").classList.toggle("err", syncAbnormal && syncStatus === "error");
+  $("tb-sync").classList.toggle("warn", syncAbnormal && syncStatus === "partial");
+  $("tb-sync").title = syncAbnormal && sync.last_sync_error ? String(sync.last_sync_error) : "";
   const accLabel = data.account_name || maskWs(data);
   $("tb-login").innerHTML = data.logged_in ? `<b>${t("loggedIn")}</b> · ${escapeHtml(accLabel)}` : t("notLoggedIn");
   $("tb-login").style.color = data.logged_in ? "" : "var(--red)";
@@ -1332,7 +1455,45 @@ function maskWs(data) {
   return ws.length > 12 ? ws.slice(0, 8) + "…" : ws;
 }
 /* ---------------- 同步 ---------------- */
-async function startSync(mode) {
+/* 首页「同步失败」持久错误条: dashboard.sync 每次请求都会返回, 因此在页面上常驻,
+   而不只在同步结束那一刻的 toast 里 (用户切页/重开窗口也能看到).
+   认证失效且配额块已经单独提示时不再重复, 避免上下两条一模一样的「登录已过期」. */
+function renderSyncErrorBanner(data) {
+  const el = $("sync-error-banner");
+  if (!el) return;
+  const sync = data.sync || {};
+  const status = String(sync.last_sync_status || "");
+  const msg = String(sync.last_sync_error || "");
+  const authErr = sync.auth_error === true || isAuthErrorMessage(msg);
+  const quotaAuthErr = !!(data.quota && data.quota.success === false
+    && (data.quota.auth_error === true || isAuthErrorMessage(data.quota.error)));
+  const dismissed = !!state.syncErrorDismissedFor
+    && state.syncErrorDismissedFor === String(sync.last_sync_at || "");
+  const show = !!data.logged_in && (status === "error" || status === "partial")
+    && !dismissed && !(authErr && quotaAuthErr);
+  const sig = [sync.last_sync_at, status, msg, authErr, show].join("|");
+  if (el.dataset.sig !== sig) {
+    el.dataset.sig = sig;
+    const label = status === "partial" ? t("syncPartial") : t("syncError");
+    const detail = msg ? `：${escapeHtml(msg.slice(0, 200))}` : "";
+    el.className = "sync-error-banner " + (status === "partial" ? "warn" : "err");
+    el.innerHTML = `<span class="sb-text"><b>${label}</b>${detail}</span>`
+      + (authErr ? `<button class="btn btn-sm btn-primary" id="sb-relogin">${t("relogin")}</button>` : "")
+      + `<button class="btn btn-sm" id="sb-retry">${t("retry")}</button>`
+      + `<button class="btn btn-sm btn-ghost sb-dismiss" id="sb-dismiss" title="${t("dismiss")}">✕</button>`;
+    if (authErr) {
+      $("sb-relogin").addEventListener("click", () => startLogin("relogin", activeProvider()));
+    }
+    $("sb-retry").addEventListener("click", () => startSync("incremental", { manual: true }));
+    $("sb-dismiss").addEventListener("click", () => {
+      state.syncErrorDismissedFor = String(sync.last_sync_at || "");
+      el.hidden = true;
+    });
+  }
+  el.hidden = !show;
+}
+async function startSync(mode, opts = {}) {
+  if (opts.manual) state.reloginPrompted = false;  // 用户主动重试: 允许再次弹出登录失效引导
   $("tb-refresh").disabled = true;
   $("btn-full-sync").disabled = true;
   try {
@@ -1356,6 +1517,16 @@ function pollUntilIdle() {
         clearInterval(state.syncTimer); state.syncTimer = null;
         $("tb-refresh").disabled = false;
         $("btn-full-sync").disabled = false;
+        // 同步失败必须给用户可见反馈: 旧实现只在结束时静默重拉数据, 首页看起来
+        // 像「点了刷新没反应」(失败原因只写进库, 仅设置页可见). 认证失效额外引导重新登录.
+        const prog = st.progress || {};
+        const detail = String(prog.message || "").slice(0, 200);
+        if (prog.phase === "error") {
+          toast(`${t("syncFailed")}${detail ? "：" + detail : ""}`, "err");
+          if (isAuthErrorMessage(detail)) promptRelogin(detail);
+        } else if (prog.phase === "partial") {
+          toast(`${t("syncPartial")}${detail ? "：" + detail : ""}`, "warn");
+        }
         // 同步刚结束: 数据必然已变, 刷新**当前页**所有数据源 (含 records/热力图/模型趋势),
         // 否则在记录页点"刷新"会看起来毫无反应 (P2-12)
         await refreshCurrentPage({ force: true });
@@ -1553,6 +1724,7 @@ async function renderSettings() {
     const settings = await api("/api/settings");
     state.settings = settings;
     syncSettingsPills();
+    setIconStyleLocal(settings.icon_style || "blue");
   $("set-auto-sync").checked = settings.auto_sync !== false;
   // 开机自启仅 mac 打包版展示 (LaunchAgent 实现)
   const macApp = isMac() && window.pywebview !== undefined;
@@ -1740,6 +1912,9 @@ function onAccountChanged() {
   dashCache.clear();
   dashRendered = { page: "", key: "", gen: -1 };
   renderGen += 1;
+  // 账号变化/登录成功: 重新允许登录失效引导, 旧的「忽略同步错误」也一并复位
+  state.reloginPrompted = false;
+  state.syncErrorDismissedFor = "";
   renderHeatmap();  // heatmapDays 已清空 → 占位"暂无历史数据", 不残留旧账号格子
   refreshCurrentPage({ force: true });
 }
@@ -1770,7 +1945,7 @@ function renderUserMenu(accounts, activeId) {
     <button type="button" class="um-item" data-id="${a.id}">
       <span class="um-check">${a.id === activeId ? "✓" : ""}</span>
       <span class="um-meta">
-        <span class="um-name">${escapeHtml(a.name)} <span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span></span>
+        <span class="um-name">${escapeHtml(a.name)} <span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span>${a.auth_error ? `<span class="prov-badge expired">${t("loginExpiredBadge")}</span>` : ""}</span>
         <span class="um-ws">${a.provider === "commandcode" ? escapeHtml(provLabel(a)) : escapeHtml(a.workspace_id || "—")}${a.has_token ? "" : " · " + t("notLoggedIn")}</span>
       </span>
     </button>`).join("") : `<div class="um-item um-empty">${t("noUsers")}</div>`) +
@@ -1805,18 +1980,21 @@ function renderUsersList(accounts, activeId) {
   }
   box.innerHTML = users.map((a) => {
     const isActive = a.id === activeId;
+    // 非活跃且凭证过期: 也给「重新登录」入口 (点击后先切换再打开登录窗, 见
+    // onUserRowAction —— open_login 的重登目标固定是活跃账号)
     const actions = isActive
       ? `<button class="btn" data-act="relogin">${t("relogin")}</button>
          <button class="btn" data-act="rename">${t("renameBtn")}</button>
          <button class="btn btn-danger" data-act="logout">${t("logout")}</button>`
       : `<button class="btn" data-act="switch">${t("switchTo")}</button>
+         ${a.auth_error ? `<button class="btn" data-act="relogin">${t("relogin")}</button>` : ""}
          <button class="btn" data-act="rename">${t("renameBtn")}</button>
          <button class="btn btn-danger" data-act="delete">${t("deleteUser")}</button>`;
     return `
     <div class="user-row${isActive ? " active" : ""}" data-id="${a.id}">
       <div class="ur-meta">
-        <div class="ur-name">${escapeHtml(a.name)}<span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span>${isActive ? `<span class="badge ok ur-badge">${t("currentUserBadge")}</span>` : ""}</div>
-        <div class="ur-ws">${a.provider === "commandcode" ? escapeHtml(provLabel(a)) : escapeHtml(a.workspace_id || "—")} · ${t("loggedIn")}</div>
+        <div class="ur-name">${escapeHtml(a.name)}<span class="prov-badge ${a.provider === "commandcode" ? "goat" : ""}">${provTag(a)}</span>${isActive ? `<span class="badge ok ur-badge">${t("currentUserBadge")}</span>` : ""}${a.auth_error ? `<span class="prov-badge expired">${t("loginExpiredBadge")}</span>` : ""}</div>
+        <div class="ur-ws${a.auth_error ? " err" : ""}">${a.provider === "commandcode" ? escapeHtml(provLabel(a)) : escapeHtml(a.workspace_id || "—")} · ${a.auth_error ? t("loginExpired") : t("loggedIn")}</div>
       </div>
       <div class="ur-actions">${actions}</div>
     </div>`;
@@ -1833,9 +2011,20 @@ async function onUserRowAction(id, act) {
   }
   if (act === "relogin") {
     startLoginWatch();
-    const accs = (await api("/api/accounts").catch(() => ({ accounts: [] }))).accounts || [];
-    const acc = accs.find((x) => x.id === id);
+    const r = await api("/api/accounts").catch(() => ({ accounts: [], active_id: null }));
+    const acc = (r.accounts || []).find((x) => x.id === id);
     const prov = (acc && acc.provider === "commandcode") ? "commandcode" : "opencode";
+    // open_login("relogin") 写回的是**活跃账号**: 重登非活跃账号时必须先切过去,
+    // 否则会弹登录窗但目标仍是另一个账号 (凭证会落到错误的账号上).
+    if (r.active_id != null && r.active_id !== id) {
+      try {
+        await api("/api/accounts/switch", { method: "POST", body: JSON.stringify({ id }) });
+        onAccountChanged();  // 切号统一失效点 (P2-12)
+      } catch (e) {
+        toast(e.message || t("loadFailed"), "err");
+        return;
+      }
+    }
     const a = await pywebviewApi();
     if (a && a.open_login) { a.open_login("relogin", prov); return; }
     try {  // 浏览器兜底
@@ -2036,9 +2225,9 @@ function bindEvents() {
       onAccountChanged();  // 导入可能新建账号/写明细: 走账号变化统一失效点 (P2-12)
     } catch (e) { toast(e.message || t("exportFailed"), "err"); }
   });
-  $("tb-refresh").addEventListener("click", () => startSync("incremental"));
+  $("tb-refresh").addEventListener("click", () => startSync("incremental", { manual: true }));
   $("btn-full-sync").addEventListener("click", () => {
-    showModal({ title: t("fullSync"), message: t("fullSyncConfirm"), okText: t("startSync"), onOk: () => startSync("full") });
+    showModal({ title: t("fullSync"), message: t("fullSyncConfirm"), okText: t("startSync"), onOk: () => startSync("full", { manual: true }) });
   });
   // 「按同步范围清理」: 唯一会删除本地存量的入口 (先预演, 再二次确认)
   $("btn-prune").addEventListener("click", async () => {
@@ -2158,6 +2347,11 @@ function bindEvents() {
     } catch (e) { toast(e.message || t("saveFailed"), "err"); }
   }));
   document.querySelectorAll("#set-theme-pills .pill").forEach((b) => b.addEventListener("click", () => applyDarkMode(b.dataset.v === "dark")));
+  $("set-icon-pills").addEventListener("click", async (e) => {
+    const b = e.target.closest("button");
+    if (!b || b.dataset.v === state.iconStyle) return;
+    if (await applyIconStyle(b.dataset.v, { persist: true })) toast(t("iconStyleSet"));
+  });
   document.querySelectorAll("#set-currency-pills .pill").forEach((b) => b.addEventListener("click", () => applyCurrency(b.dataset.v)));
   document.querySelectorAll("#set-lang-pills .pill").forEach((b) => b.addEventListener("click", () => applyLang(b.dataset.v)));
   $("set-auto-sync").addEventListener("change", async (e) => {
@@ -2378,6 +2572,7 @@ async function init() {
   bindEvents();
   try { state.settings = await api("/api/settings"); } catch (e) { /* ignore */ }
   syncSettingsPills();
+  applyIconStyle(state.settings.icon_style || "blue").catch(() => {});
   $("set-auto-sync").checked = state.settings.auto_sync !== false;
   $("set-overview-panel").checked = state.settings.show_accounts_panel === true;
   $("set-chart-anim").checked = state.settings.chart_animation === true;

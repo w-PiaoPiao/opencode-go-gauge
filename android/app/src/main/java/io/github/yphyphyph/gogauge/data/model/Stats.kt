@@ -107,6 +107,22 @@ data class SyncProgress(
     val account: String = "",
 )
 
+/**
+ * 启动器图标风格 (v2.2.2d, 跨端共享契约): settings JSON 键 `icon_style`,
+ * 取值 [BLUE] / [TERRACOTTA], 默认 [BLUE]; 桌面端 / HarmonyOS 同名同值。
+ *
+ * Android 是唯一能在运行时真正切换启动器图标的一端: 通过 AndroidManifest 里
+ * 两个 activity-alias 的互斥启停实现 (见 util/LauncherIcon.kt)。
+ */
+object IconStyle {
+    const val BLUE = "blue"
+    const val TERRACOTTA = "terracotta"
+    const val DEFAULT = BLUE
+
+    /** 容错归一化: 只认精确的 "terracotta"; null / 空 / 其他脏值一律回落 blue。 */
+    fun normalize(raw: String?): String = if (raw == TERRACOTTA) TERRACOTTA else BLUE
+}
+
 /** App settings — mirrors db._DEFAULT_SETTINGS (desktop) + Android 专属键. */
 data class AppSettings(
     val syncIntervalSec: Int = 300,   // 1/5/15/30 min
@@ -122,6 +138,11 @@ data class AppSettings(
      * flash 拆成「峰」「谷」两条; 只改统计口径, 不动同步数据。
      */
     val dsPeakSplit: Boolean = false,
+    /**
+     * 启动器图标风格 (v2.2.2d, 跨端契约 key `icon_style`): [IconStyle.BLUE] /
+     * [IconStyle.TERRACOTTA], 默认 blue; Android 保存后立即切换启动器图标。
+     */
+    val iconStyle: String = IconStyle.DEFAULT,
 )
 
 /** Dashboard bundle — mirrors GET /api/dashboard (desktop). */

@@ -34,6 +34,8 @@ struct Index {
   @State private rootWidth: number = 0
   @State private entered: number = 0
   @State private demoRunning: boolean = false
+  /** 应用内品牌 Logo 风格 'blue' | 'terracotta'（启动器图标固定蓝色，HarmonyOS 无切换 API）。 */
+  @State private iconStyle: string = 'blue'
   private syncTimer: number = -1
   /** 页面已隐藏标记：定时器创建是 async 的，期间可能已 onPageHide。 */
   private pageHidden: boolean = false
@@ -112,6 +114,7 @@ struct Index {
       }
     }
     this.privacyAgreed = AppPrefs.isPrivacyAccepted()
+    this.iconStyle = AppPrefs.getIconStyle()
     this.initialized = true
     await this.refresh()
     animateTo({ duration: 260, curve: Curve.EaseOut }, () => {
@@ -127,6 +130,7 @@ struct Index {
       return
     }
     this.privacyAgreed = AppPrefs.isPrivacyAccepted()
+    this.iconStyle = AppPrefs.getIconStyle()
     try {
       const acct: AccountInfo | null = await Repo.get().account()
       this.loggedIn = acct !== null && acct.hasToken
@@ -215,6 +219,14 @@ struct Index {
     }
   }
 
+  /**
+   * 应用内品牌 Logo 资源：图标风格 = terracotta 时用 icon_warm，否则默认蓝色 icon。
+   * 只影响应用内展示；HarmonyOS 启动器图标无运行时切换 API，固定蓝色 H。
+   */
+  private appIcon(): Resource {
+    return this.iconStyle === 'terracotta' ? $r('app.media.icon_warm') : $r('app.media.icon')
+  }
+
   @Builder
   featureRow(text: string) {
     Row({ space: 8 }) {
@@ -236,7 +248,7 @@ struct Index {
       Blank()
       Column({ space: 16 }) {
         Column({ space: 8 }) {
-          Image($r('app.media.icon'))
+          Image(this.appIcon())
             .width(84)
             .height(84)
             .borderRadius(20)
@@ -363,6 +375,8 @@ struct Index {
       AppRoot({
         initialTab: LaunchParams.page.length > 0 ? LaunchParams.page : 'home',
         onLogout: () => {
+          // 退出登录回欢迎页：按最新持久化设置渲染应用内 Logo（设置页可能刚改过图标风格）
+          this.iconStyle = AppPrefs.getIconStyle()
           this.loggedIn = false
           this.stopForegroundSync()
         },

@@ -62,8 +62,23 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .tb { display: flex; align-items: center; justify-content: space-between; height: 48px; background: var(--titlebar); border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; }
 .tb-left { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .tb-logo { width: 24px; height: 24px; flex-shrink: 0; }
+/* 品牌 Logo 共 4 个候选（平台 os-mac/os-win × 图标风格 data-icon）：CSS 择一显示，
+   JS 在首帧前写好根类，既避免闪错平台字母，也支持设置页即时切换. */
+.brand-logo { display: none; }
+html.os-mac[data-icon="blue"] .logo-mac-blue,
+html.os-mac[data-icon="terracotta"] .logo-mac-warm,
+html.os-win[data-icon="blue"] .logo-win-blue,
+html.os-win[data-icon="terracotta"] .logo-win-warm { display: inline-block; }
+/* 欢迎页大 Logo 需要 block 才能 margin:auto 居中（display 由上面的选择器决定） */
+html.os-mac[data-icon="blue"] .login-logo.logo-mac-blue,
+html.os-mac[data-icon="terracotta"] .login-logo.logo-mac-warm,
+html.os-win[data-icon="blue"] .login-logo.logo-win-blue,
+html.os-win[data-icon="terracotta"] .login-logo.logo-win-warm { display: block; }
 .tb-title { font-weight: 700; font-size: 14px; }
 .tb-sub { font-size: 12px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 上次同步失败/部分成功: 顶栏不能再是中性灰 (失败时时间同样显示「刚刚」, 会误以为成功) */
+.tb-sub.err { color: var(--red); }
+.tb-sub.warn { color: var(--amber); }
 .tb-right { display: flex; align-items: center; gap: 7px; }
 .tb-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
 .sync-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); background: var(--primary-soft); padding: 3px 10px; border-radius: 99px; }
@@ -212,6 +227,21 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .ub.c-week .ub-fc { color: #4f8ef7; }
 .ub.c-month .ub-fc { color: #d97706; }
 .ub-error { font-size: 12px; color: var(--red); padding: 12px 14px; }
+/* 用量块行内的错误条仍占满整行: 配额失败时 3 列网格里只塞 1 列会显得像某张卡没加载 */
+.usage-blocks > .ub-error { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ub-error-text { flex: 1 1 auto; min-width: 200px; }
+/* ---------- 首页「同步失败」持久错误条 ---------- */
+.sync-error-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 10px 14px; font-size: 12.5px; line-height: 1.5;
+  background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--red);
+  border-radius: var(--radius); box-shadow: var(--shadow); color: var(--text2);
+}
+.sync-error-banner.warn { border-left-color: var(--amber); }
+.sync-error-banner b { color: var(--red); font-weight: 600; }
+.sync-error-banner.warn b { color: var(--amber); }
+.sync-error-banner .sb-text { flex: 1 1 auto; min-width: 220px; word-break: break-word; }
+.sync-error-banner .sb-dismiss { color: var(--text3); }
 
 /* ---------- KPI / 用量概览 (6 格 2×3) ---------- */
 .kpi-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px; }
@@ -342,6 +372,8 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
   background: #e8f0fe; color: #1a56db;
 }
 .prov-badge.goat { background: #f3e8ff; color: #7e22ce; }
+/* 凭证过期标记 (用户菜单/设置页): 提醒这个账号需要重新登录, 否则同步永远失败 */
+.prov-badge.expired { background: var(--danger-soft); color: var(--red); }
 .h-btns { display: flex; align-items: center; gap: 8px; }
 .sw { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
 .sw input { opacity: 0; width: 0; height: 0; }
@@ -373,11 +405,12 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .btn-danger:hover { background: var(--red); color: #fff; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn-lg { padding: 12px 44px; font-size: 15px; border-radius: 12px; }
+.btn-sm { padding: 3px 10px; font-size: 12px; border-radius: 7px; }
 
 /* ---------- 登录引导 (欢迎页) ---------- */
 .login-overlay { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .login-card { background: var(--card); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow); padding: 40px 48px; text-align: center; max-width: 440px; width: 90vw; }
-.login-logo { width: 56px; height: 56px; margin: 0 auto 12px; display: block; }
+.login-logo { width: 56px; height: 56px; margin: 0 auto 12px; }
 .login-card h2 { font-size: 22px; margin-bottom: 8px; }
 .login-sub { color: var(--text2); font-size: 13px; line-height: 1.7; margin-bottom: 16px; }
 .login-feats { list-style: none; text-align: left; margin: 0 auto 22px; padding: 0; max-width: 320px; }
@@ -395,6 +428,7 @@ html[data-theme="dark"] .skeleton::after { background: linear-gradient(90deg, tr
 .modal-icon.danger { background: var(--danger-soft); color: var(--danger); }
 .modal-card h3 { font-size: 16px; margin-bottom: 8px; }
 .modal-card p { font-size: 13px; color: var(--text2); line-height: 1.7; margin-bottom: 20px; }
+.modal-detail { display: block; margin-top: 6px; font-size: 12px; color: var(--text3); }
 .modal-actions { display: flex; gap: 10px; justify-content: center; }
 .modal-actions .btn { min-width: 96px; padding: 8px 20px; }
 .toast-wrap { position: fixed; top: 56px; right: 16px; z-index: 120; display: flex; flex-direction: column; gap: 8px; }
@@ -456,6 +490,7 @@ a:focus-visible {
 .ur-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; line-height: 1.35; }
 .ur-badge { margin-left: 8px; padding: 1px 8px; font-size: 10.5px; }
 .ur-ws { font-size: 11.5px; color: var(--text3); margin-top: 0; word-break: break-all; line-height: 1.35; }
+.ur-ws.err { color: var(--red); }
 .ur-actions { display: flex; gap: 6px; flex-shrink: 0; }
 #rename-input { width: 100%; margin-top: 4px; }
 

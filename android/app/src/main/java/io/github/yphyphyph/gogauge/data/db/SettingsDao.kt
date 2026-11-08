@@ -3,6 +3,7 @@ package io.github.yphyphyph.gogauge.data.db
 import androidx.room.Dao
 import androidx.room.Query
 import io.github.yphyphyph.gogauge.data.model.AppSettings
+import io.github.yphyphyph.gogauge.data.model.IconStyle
 import io.github.yphyphyph.gogauge.util.parseIsoInstant
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -45,6 +46,9 @@ abstract class SettingsDao {
                     ?.toBooleanStrictOrNull() ?: defaults().persistentNotification,
                 dsPeakSplit = obj["ds_peak_split"]?.jsonPrimitive?.contentOrNull()
                     ?.toBooleanStrictOrNull() ?: defaults().dsPeakSplit,
+                // 跨端契约: 仅 "terracotta" 生效, 缺失/脏值回落默认 "blue"
+                // (不能直接透传, 否则外部写入的非法值会让设置页 PillRow 无选中项)
+                iconStyle = IconStyle.normalize(obj["icon_style"]?.jsonPrimitive?.contentOrNull()),
             )
         } catch (e: Exception) {
             defaults()
@@ -60,6 +64,7 @@ abstract class SettingsDao {
             chartAnimation = patch.chartAnimation,
             persistentNotification = patch.persistentNotification,
             dsPeakSplit = patch.dsPeakSplit,
+            iconStyle = IconStyle.normalize(patch.iconStyle),
         )
         // 保存时在既有 payload 上合并覆盖 (与桌面 db.save_settings 的整行 JSON 覆盖不同,
         // 安卓端 settings 行还承载 active_account_id 等运行时键, 不能整包丢弃)
@@ -79,6 +84,7 @@ abstract class SettingsDao {
                 put("chart_animation", JsonPrimitive(merged.chartAnimation))
                 put("persistent_notification", JsonPrimitive(merged.persistentNotification))
                 put("ds_peak_split", JsonPrimitive(merged.dsPeakSplit))
+                put("icon_style", JsonPrimitive(merged.iconStyle))
                 put("key_names", buildJsonObject { for ((k, v) in keyNames) put(k, JsonPrimitive(v)) })
             }.toString()
             savePayload(payload, java.time.Instant.now().toString())

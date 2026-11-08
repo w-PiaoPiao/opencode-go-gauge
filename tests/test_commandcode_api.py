@@ -334,3 +334,30 @@ def test_client_maps_oversized_response_to_domain_error(monkeypatch):
         lambda *_a, **_k: _Resp({"Content-Length": str(ccapi.MAX_BODY_BYTES + 1)}, b""))
     with pytest.raises(CommandCodeAPIError, match="响应过大"):
         ccapi._get("/usage", "token")
+
+
+# ---------------------------------------------------------------------------
+# fetch_quota: 认证失败带结构化 auth_error (前端引导重新登录)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_quota_marks_auth_error(monkeypatch):
+    def _get(*_a, **_k):
+        raise ccapi.AuthError("认证失败 (HTTP 401)，请重新登录")
+
+    monkeypatch.setattr(ccapi, "_get", _get)
+    result = ccapi.fetch_quota("__Secure-commandcode_prod_.session_token=x")
+    assert result.success is False
+    assert result.auth_error is True
+    assert result.to_dict()["auth_error"] is True
+
+
+def test_fetch_quota_non_auth_error_has_no_flag(monkeypatch):
+    def _get(*_a, **_k):
+        raise ccapi.CommandCodeAPIError("网络错误: timed out")
+
+    monkeypatch.setattr(ccapi, "_get", _get)
+    result = ccapi.fetch_quota("cookie")
+    assert result.success is False
+    assert result.auth_error is False
+    assert "auth_error" not in result.to_dict()

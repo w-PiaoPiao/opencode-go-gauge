@@ -438,3 +438,45 @@ def test_opencode_maps_oversized_response_to_domain_error(monkeypatch):
             {"Content-Length": str(api.MAX_BODY_BYTES + 1)}, b""))
     with pytest.raises(api.OpenCodeAPIError, match="响应过大"):
         api._api_get("/request-logs", "token", org_id="wrk_x")
+
+
+# ---------------------------------------------------------------------------
+# fetch_quota: 认证失败要带结构化 auth_error (前端据此引导重新登录而非重试)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_quota_marks_auth_error(monkeypatch):
+    monkeypatch.setattr(api, "_resolve_workspace", lambda hint, token: ("wrk_x", "Default"))
+
+    def _api_get(*_a, **_k):
+        raise api.AuthError("登录已过期，请重新登录")
+
+    monkeypatch.setattr(api, "_api_get", _api_get)
+    result = api.fetch_quota("__Host-console_session=st_expired")
+    assert result.success is False
+    assert result.auth_error is True
+    assert result.to_dict()["auth_error"] is True
+
+
+def test_fetch_quota_non_auth_error_has_no_flag(monkeypatch):
+    """网络/接口失败仍走「重试」语义: 不能误标成登录过期 (会引导用户白重登)."""
+    monkeypatch.setattr(api, "_resolve_workspace", lambda hint, token: ("wrk_x", "Default"))
+
+    def _api_get(*_a, **_k):
+        raise api.OpenCodeAPIError("网络错误: timed out")
+
+    monkeypatch.setattr(api, "_api_get", _api_get)
+    result = api.fetch_quota("token")
+    assert result.success is False
+    assert result.auth_error is False
+    assert "auth_error" not in result.to_dict()
+
+
+def test_fetch_quota_workspace_resolve_auth_error(monkeypatch):
+    """工作区解析阶段的 401 同样算认证失败 (sync 走同一分支)."""
+    def _resolve(*_a, **_k):
+        raise api.AuthError("登录已过期，请重新登录")
+
+    monkeypatch.setattr(api, "_resolve_workspace", _resolve)
+    result = api.fetch_quota("token")
+    assert result.success is False and result.auth_error is True

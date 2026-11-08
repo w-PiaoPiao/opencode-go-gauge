@@ -2,7 +2,9 @@
 """生成 GoGauge AppGallery 上架用图标与宣传图（纯 PIL，可重复执行）。
 
 输入（只读，不修改）：
-- 品牌标识：仓库根 ``assets/GoGauge.icns``（1024x1024，优先）或 ``assets/GoGauge.png``（512x512）
+- 品牌标识：仓库根 ``assets/GoGauge-harmony.png``（1024 透明底，平台字母 H）。
+  注意不能用桌面端的 ``assets/GoGauge.icns`` —— 自 v2.2.2d 起桌面图标是平台字母
+  M/W，HarmonyOS 素材必须用 H 版，否则商店宣传图会显示错误平台的字母。
 - 当前工程图标：``harmonyos/entry/src/main/resources/base/media/icon.png``（仅用于对比/参考）
 
 输出（本目录）：
@@ -108,7 +110,10 @@ def trim_alpha(img: Image.Image) -> Image.Image:
 
 
 def load_brand() -> Image.Image:
-    """品牌 Logo（最高可用分辨率，透明底）。"""
+    """品牌 Logo（HarmonyOS 的 H 字母版，透明底）。"""
+    harmony_png = os.path.join(REPO, "assets", "GoGauge-harmony.png")
+    if os.path.exists(harmony_png):
+        return trim_alpha(Image.open(harmony_png).convert("RGBA"))
     icns = os.path.join(REPO, "assets", "GoGauge.icns")
     if os.path.exists(icns):
         try:

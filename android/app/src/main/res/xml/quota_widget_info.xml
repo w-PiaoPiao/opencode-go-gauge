@@ -10,4 +10,4 @@
     android:resizeMode="horizontal|vertical"
     android:widgetCategory="home_screen"
     android:description="@string/tile_label"
-    android:previewImage="@mipmap/ic_launcher" />
+    android:previewImage="@mipmap/ic_launcher_blue" />
