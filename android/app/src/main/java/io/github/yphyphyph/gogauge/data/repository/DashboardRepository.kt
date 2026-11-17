@@ -138,14 +138,24 @@ class DashboardRepository(
         // ---- 同步引擎参数 (desktop server.py 常量 parity) ----
         /** /request-logs 单页条数上限. */
         private const val OPENCODE_PAGE_LIMIT = 100
-        /** 增量同步最多翻页数 (10*100=1000 条). */
-        private const val SYNC_INCREMENTAL_PAGES = 10
+        /**
+         * 增量同步最多翻页数 — 增量的**自然停止点**是 since 边界/游标耗尽, 页数上限
+         * 只防病态服务端。旧值 10 页 (1000 条) 会在"休眠几天后追平缺口"时静默截断:
+         * 剩下的旧端缺口因游标已前移而永远不会被增量补上, 只能手动全量同步
+         * (用户实测"趋势图两天为 0"的根因)。与全量上限同值 (desktop INCREMENTAL_PAGES)。
+         */
+        private const val SYNC_INCREMENTAL_PAGES = 1000
         /** 全量同步翻页上限, 防失控 (服务端仅保留 30 天明细). */
         private const val SYNC_MAX_FULL_PAGES = 1000
         /** 单页失败重试次数 (深页偶尔慢/连接被重置). */
         private const val OPENCODE_PAGE_RETRIES = 2
         /** 增量同步回溯 1 小时, 防边界漏记. */
         private const val INCREMENTAL_OVERLAP_MS = 3600_000L
+        /**
+         * 每账号自动全量校准周期 (天) — 旧版本遗留的缺口 / 服务端迟到记录 / 失败页
+         * 残留, 靠定期 full 重扫自愈 (desktop AUTO_FULL_SYNC_DAYS parity)。
+         */
+        private const val AUTO_FULL_SYNC_DAYS = 7
 
         /** 一次性维护标记: 旧版 local_date=NULL 回填已完成 (见 backfillLegacyLocalDatesIfNeeded)。 */
         private const val FLAG_LOCAL_DATE_BACKFILL = "maintenance_local_date_backfill_v1"
@@ -672,7 +682,20 @@ class DashboardRepository(
             var anyRetryable = false
             for ((aid, name) in targets) {
                 setProgress { it.copy(account = name) }
-                val result = syncOneAccount(aid, name, mode, windowDays)
+                // 自动全量校准 (sync-fix 设计规范 §1 E): 增量轮询里距上次成功全量
+                // 超过 AUTO_FULL_SYNC_DAYS (或从未全量成功) 的账号, 本轮改跑 full 重扫,
+                // 用历史缺口自愈兜底 (旧版本静默截断/失败页残留只有 full 能补回)。
+                // 只升级"本轮该账号的执行模式", 对外 mode 取值/进度/结果结构均不变;
+                // 用户显式点「全量同步」时 mode 已是 full, 语义不受影响。
+                val fullSyncDue = mode != "full" &&
+                    db.settingsDao().fullSyncDue(aid, AUTO_FULL_SYNC_DAYS)
+                val runMode = SyncPaging.effectiveMode(mode, fullSyncDue)
+                val result = syncOneAccount(aid, name, runMode, windowDays)
+                // 只有全量完整成功 (ok 且非 partial) 才算一次校准完成, 记下时间供
+                // AUTO_FULL_SYNC_DAYS 节流; partial/error 不记, 下一轮继续全量补拉。
+                if (runMode == "full" && result.ok && !result.partial) {
+                    markFullSyncDoneQuietly(aid)
+                }
                 totalInserted += result.inserted
                 pages += result.pages
                 if (!result.ok) {
@@ -742,28 +765,33 @@ class DashboardRepository(
                 }
             } catch (e: AuthException) {
                 val msg = "工作区解析失败: ${e.message}"
-                syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
+                syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0, advanceNewest = false)
                 setProgress { it.copy(phase = "error", message = msg) }
                 // 鉴权失效: 重试不会自愈, 需用户重新登录
                 return SyncResult(ok = false, error = e.message, retryable = false)
             } catch (e: OpenCodeApiException) {
                 val msg = "工作区解析失败: ${e.message}"
-                syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
+                syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0, advanceNewest = false)
                 setProgress { it.copy(phase = "error", message = msg) }
                 return SyncResult(ok = false, error = e.message)
             }
 
             // 新接口 /console/api/request-logs 为游标分页 (按时间倒序), 无法并发跳页,
-            // 改为顺序翻页: 每页 100 条, 直到游标耗尽 / 触达同步范围边界 / 连续空页
+            // 改为顺序翻页: 每页 100 条, 直到游标耗尽 / 触达同步范围边界 /
+            // 触达增量 since 边界 (since 未知时才回退"连续空批"兜底)
             var totalInserted = 0
             val maxPages = if (mode == "full") SYNC_MAX_FULL_PAGES else SYNC_INCREMENTAL_PAGES
             var page = 0
             var cursor: String? = null
             var emptyPages = 0
+            // 连续「整页无记录」计数: 防御「游标还在但服务端持续返回空页」把 1000 页
+            // 预算跑满后被误判成 truncated (desktop empty_record_pages / HarmonyOS 对齐)
+            var emptyRecordPages = 0
             var failedPages = 0
             var pageRetries = 0
             var windowBoundaryReached = false
             var exhausted = false // 游标耗尽 (真正到底), 用于区分"页数上限截断"
+            var reachedSince = false // 增量窗口已从最新连续翻到 since 边界 (正确停止点)
 
             // 增量同步: 只取最新记录之后的一段时间 (重叠 1 小时防边界漏记),
             // 命中不到旧数据就不会去翻历史页, 既快又少请求
@@ -787,14 +815,14 @@ class DashboardRepository(
                     throw e
                 } catch (e: AuthException) {
                     val msg = "[$name] ${e.message}"
-                    syncDao.updateSyncStateAndTotals(accountId, "error", msg, totalInserted)
+                    syncDao.updateSyncStateAndTotals(accountId, "error", msg, totalInserted, advanceNewest = false)
                     setProgress { it.copy(phase = "error", message = msg) }
                     return SyncResult(ok = false, error = e.message, retryable = false)
                 } catch (e: Exception) {
                     // 首页即失败 -> 整体报错; 翻页中途失败 -> 同一游标重试, 仍失败保留已入库数据
                     if (page == 0) {
                         val msg = "[$name] ${e.message}"
-                        syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0)
+                        syncDao.updateSyncStateAndTotals(accountId, "error", msg, 0, advanceNewest = false)
                         setProgress { it.copy(phase = "error", message = msg) }
                         return SyncResult(ok = false, error = e.message)
                     }
@@ -810,8 +838,10 @@ class DashboardRepository(
                 page++
                 pageRetries = 0
                 val records = usagePage.records
+                var inserted = 0
 
                 if (records.isNotEmpty()) {
+                    emptyRecordPages = 0
                     // 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 -> 该页保留后停止
                     if (mode == "full" && windowDays != null) {
                         val earliest = records.minOfOrNull { it.createdAt } ?: ""
@@ -823,17 +853,40 @@ class DashboardRepository(
                             }
                         }
                     }
+                    // 增量正确停止点: 已从最新连续翻到 since 边界 (本页最早记录 <= since)。
+                    // 在此之前即使整页都是已入库记录 (inserted==0) 也必须继续翻 ——
+                    // 本地中间的缺口正是靠这段连续翻页补上的。
+                    if (SyncPaging.reachedSince(mode, sinceMs, SyncPaging.oldestMillis(records.map { it.createdAt }))) {
+                        reachedSince = true
+                    }
                     val nowIso = Instant.now().toString()
-                    val inserted = usageDao.insertUsageRecords(
+                    inserted = usageDao.insertUsageRecords(
                         records.map { it.toEntity(nowIso).copy(accountId = accountId) },
                         accountId,
                     )
                     totalInserted += inserted
                     setProgress { it.copy(inserted = totalInserted) }
-                    emptyPages = if (inserted == 0) emptyPages + 1 else 0
                 } else {
-                    emptyPages++
+                    // 防御「游标还在但服务端持续返回空页」(desktop empty_record_pages /
+                    // HarmonyOS 同构): 连续两页整页无记录即视为数据到底, 正常 exhausted
+                    // 收尾。放在游标/窗口/since 边界判定**之前** —— 否则 since 已知时
+                    // 病态空页会把 1000 页预算跑满, 被误判成 truncated (误报 partial 且
+                    // 游标不前进)。这是对齐桌面既有语义: 旧实现本就按"两批空即追平"收尾,
+                    // 此处不引入新的静默行为。
+                    emptyRecordPages++
+                    if (emptyRecordPages >= 2) {
+                        exhausted = true
+                        break
+                    }
                 }
+
+                // 「连续两批 0 新增即停」兜底只在 since 未知 (账号还没有游标) 时使用;
+                // since 已知时它会在"已知数据段"被提前触发, 越过缺口后游标前移 ——
+                // 这正是自动增量同步漏数据的放大器, 必须让位给 since 边界判定。
+                if (mode == "incremental" && sinceMs == null) {
+                    emptyPages = SyncPaging.updateEmptyBatches(inserted, emptyPages)
+                }
+                val stopOnEmpty = SyncPaging.stopOnEmptyBatches(mode, sinceMs, emptyPages)
 
                 cursor = usagePage.nextCursor
                 if (cursor == null) {
@@ -841,14 +894,19 @@ class DashboardRepository(
                     break // 已到最早一条
                 }
                 if (windowBoundaryReached) break
-                // 增量模式: 连续两页没有新数据 -> 停止
-                if (mode == "incremental" && emptyPages >= 2) break
+                if (reachedSince) break
+                if (stopOnEmpty) {
+                    exhausted = true // 无游标回退路径已追平, 正常终止
+                    break
+                }
             }
 
-            // 页数上限截断: 循环因 maxPages 退出且游标未耗尽 —— 更早的记录没拉到.
-            // 必须显式标记 partial: 静默写 "ok" 会更新增量游标 (newest_record_at),
-            // 缺口永远不会被增量补上, 只有手动全量才能恢复
-            val truncated = page >= maxPages && !exhausted && !windowBoundaryReached
+            // 页数上限截断: 循环因 maxPages 退出, 且游标未耗尽 / 未到窗口 / 未到 since
+            // 边界 —— 更早的记录没拉到。必须显式标记 partial 且**不推进**增量游标:
+            // 静默写 "ok" 会让下一轮 since 直接越过缺口, 缺口只能手动全量同步才补得回。
+            val truncated = SyncPaging.truncated(
+                page, maxPages, exhausted, windowBoundaryReached, reachedSince,
+            )
 
             // 同步只按范围取数, 不裁剪本地存量: window_days 是取数范围, 不是保留期
             // (desktop 6995669 同语义: 过期数据由设置页「按同步范围清理」显式删除).
@@ -876,21 +934,27 @@ class DashboardRepository(
             }
 
             if (failedPages > 0) {
-                val msg = "完成, 但翻页中断 (数据不完整, 可再次全量同步补全)"
-                syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
+                // 翻页中断: 明细不完整 -> partial, 且不推进 newest 游标
+                // (下一轮从同一 since 窗口继续补拉, 而不是越过没拉到的那段)
+                val msg = SyncPaging.FAILED_PAGES_MESSAGE
+                syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted, advanceNewest = false)
                 return SyncResult(ok = true, partial = true, failedPages = failedPages, inserted = totalInserted, pages = page)
             }
             if (truncated) {
-                val msg = "完成, 但达到单轮翻页上限 (更早记录未拉全, 可再次全量同步补全)"
-                syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
+                // 页数预算耗尽: 数据不完整 -> partial + 统一文案, 游标不推进
+                // (旧实现写 ok 并前移游标, 缺口从此只能手动全量同步补回)
+                syncDao.updateSyncStateAndTotals(
+                    accountId, "partial", SyncPaging.TRUNCATED_MESSAGE, totalInserted, advanceNewest = false,
+                )
                 return SyncResult(ok = true, partial = true, inserted = totalInserted, pages = page)
             }
+            // ok: 数据完整 (自然停止点到底), 游标可以安全前移
             syncDao.updateSyncStateAndTotals(accountId, "ok", null, totalInserted)
             return SyncResult(ok = true, inserted = totalInserted, pages = page)
         } catch (e: CancellationException) {
             throw e // 协程取消穿透 (WorkManager 停止 / 页面销毁), 不写成 error 同步状态
         } catch (e: Exception) {
-            syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0)
+            syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0, advanceNewest = false)
             return SyncResult(ok = false, error = e.message)
         }
     }
@@ -910,6 +974,23 @@ class DashboardRepository(
 
     private suspend fun failSync(phaseMsg: String, errMsg: String?) {
         setProgress { it.copy(phase = "error", message = phaseMsg) }
+    }
+
+    /**
+     * 全量同步**完整成功**后记录自动校准时刻 (sync-fix 设计规范 §1 E):
+     * settings payload 键 `last_full_sync_at:<aid>`, 供 [AUTO_FULL_SYNC_DAYS] 节流。
+     *
+     * 写入失败不能反过来把已成功的同步报成失败 (数据已经落库), 只记日志;
+     * 标记没写上最多导致下一轮再跑一次全量, 无害。
+     */
+    private suspend fun markFullSyncDoneQuietly(accountId: Int) {
+        try {
+            db.settingsDao().markFullSyncDone(accountId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("GoGauge", "markFullSyncDone failed", e)
+        }
     }
 
     /**
@@ -944,7 +1025,7 @@ class DashboardRepository(
                 } catch (e: Exception) {
                     if (mode == "incremental") {
                         val msg = "[$name] 第 ${pages + 1} 页拉取失败: ${e.message}"
-                        syncDao.updateSyncStateAndTotals(accountId, "error", msg, totalInserted)
+                        syncDao.updateSyncStateAndTotals(accountId, "error", msg, totalInserted, advanceNewest = false)
                         setProgress { it.copy(phase = "error", message = msg) }
                         // 鉴权类失败重试无意义 (需重新登录); 其余按可恢复处理
                         return SyncResult(
@@ -986,22 +1067,24 @@ class DashboardRepository(
                     exhausted = true
                     break // 游标翻页: 无 next_cursor 即到底
                 }
-                // 增量模式: 连续两批 0 新增 (全是旧数据) → 停止
-                if (mode == "incremental" && inserted == 0) {
-                    emptyBatches++
-                    if (emptyBatches >= 2) {
+                // 增量模式: 连续两批 0 新增 (全是旧数据) → 停止。CC 明细接口没有
+                // since/游标窗口参数 (本身只有最近 24h/100 条), 等价于 opencode 的
+                // 「since 未知」回退路径 —— 两批空即追平, 计入 exhausted。
+                if (mode == "incremental") {
+                    emptyBatches = SyncPaging.updateEmptyBatches(inserted, emptyBatches)
+                    if (SyncPaging.stopOnEmptyBatches(mode, null, emptyBatches)) {
                         exhausted = true // 增量抓到重叠区: 正常终止
                         break
                     }
-                } else {
-                    emptyBatches = 0
                 }
                 cursor = nextCursor
             }
 
             // 页数上限截断: 游标未耗尽就停在上限 —— 更早记录未拉全, 静默写 "ok" 会
-            // 前移增量游标使缺口永不再补 (与 opencode 分支同一处理)
-            val truncated = pages >= maxPages && !exhausted && !windowBoundaryReached && !failed
+            // 前移增量游标使缺口永不再补 (与 opencode 分支同一判定, full/增量都做)
+            val truncated = SyncPaging.truncated(
+                pages, maxPages, exhausted, windowBoundaryReached, reachedSince = false,
+            )
 
             // 同步只按范围取数, 不裁剪本地存量 (同 opencode 分支, desktop parity)
 
@@ -1042,11 +1125,18 @@ class DashboardRepository(
 
             if (failed || !chartsOk || truncated) {
                 val msg = when {
-                    failed -> "完成, 但部分页拉取失败 (数据不完整, 可再次全量同步补全)"
-                    truncated -> "完成, 但达到单轮翻页上限 (更早记录未拉全, 可再次全量同步补全)"
+                    // 桌面 _finish_sync 两种 provider 共用同一措辞, 这里与之一致
+                    failed -> SyncPaging.FAILED_PAGES_MESSAGE
+                    truncated -> SyncPaging.TRUNCATED_MESSAGE
                     else -> "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
                 }
-                syncDao.updateSyncStateAndTotals(accountId, "partial", msg, totalInserted)
+                // 游标安全 (sync-fix 设计规范 §1 C/D): charts 失败时明细是完整的,
+                // 游标照常推进; failed/truncated 明细不完整 -> 保留旧 newest, 下一轮
+                // 从同一窗口继续补拉 (旧实现一律前移, 缺口从此只能手动全量补回)。
+                syncDao.updateSyncStateAndTotals(
+                    accountId, "partial", msg, totalInserted,
+                    advanceNewest = !failed && !truncated,
+                )
                 return SyncResult(ok = true, partial = true, inserted = totalInserted, pages = pages)
             }
             syncDao.updateSyncStateAndTotals(accountId, "ok", null, totalInserted)
@@ -1054,7 +1144,7 @@ class DashboardRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0)
+            syncDao.updateSyncStateAndTotals(accountId, "error", e.message, 0, advanceNewest = false)
             return SyncResult(ok = false, error = e.message)
         }
     }

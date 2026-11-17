@@ -12,6 +12,7 @@ import { UsagePage } from '../remote/UsageParser'
 import { ExchangeApi } from '../remote/ExchangeApi'
 import { MonthlyCycle } from '../../common/util/MonthlyCycle'
 import { Fmt } from '../../common/util/Fmt'
+import { SyncPaging } from '../../common/util/SyncPaging'
 import { AppPrefs } from '../../common/store/AppPrefs'
 import {
   AccountInfo, AppSettings, DashboardData, DailyStat, HourStat, ModelDailyRow, ModelStat, ModelTrendData,
@@ -431,7 +432,16 @@ export class DashboardRepository {
         const aid = target[0]
         const name = target[1]
         this.updateProgress((p) => { p.account = name })
-        const result = await this.syncOneAccount(aid, name, mode, windowDays)
+        // 自动全量校准 (desktop sync_usage full_sync_due parity): 账号距上次全量成功
+        // 超过 AUTO_FULL_SYNC_DAYS (或从未成功全量) 时, 本轮对「该账号」改跑 full,
+        // 自愈长期积压/历史遗留缺口; 对外 mode 枚举/进度结构保持不变。
+        let accountMode = mode
+        if (mode !== 'full') {
+          if (await AppDb.settingsDao().fullSyncDue(aid, SyncPaging.AUTO_FULL_SYNC_DAYS)) {
+            accountMode = 'full'
+          }
+        }
+        const result = await this.syncOneAccount(aid, name, accountMode, windowDays)
         totalInserted += result.inserted
         pages += result.pages
         if (!result.ok) {
@@ -465,10 +475,22 @@ export class DashboardRepository {
   }
 
   /**
+   * 统一收尾写同步状态: 按状态决定是否推进 newest_record_at 游标
+   * (partial/error 一律不推进, 见 SyncPaging.advancesCursor)。
+   */
+  private async finishSync(
+    accountId: number, status: string, error: string | null, inserted: number,
+  ): Promise<void> {
+    await this.syncDao.updateSyncStateAndTotals(
+      accountId, status, error, inserted, SyncPaging.advancesCursor(status))
+  }
+
+  /**
    * 同步单个账号的用量记录 (desktop server._sync_one_account parity)。
    *
    * /console/api/request-logs 为游标分页 (按时间倒序, 无法并发跳页): 顺序翻页,
-   * 直到游标耗尽 / 触达同步范围边界 / 增量追平 (连续两批 0 新增)。
+   * 直到游标耗尽 / 触达同步范围边界 / 增量翻到 since 边界; 页数预算只防病态。
+   * 预算用完还没到自然停止点即视为截断 -> partial 且不推进游标 (见 SyncPaging)。
    * 旧实现的页码并发跳页 (fetchBatch) 是 /_server 时代的形态, 随 2026-09 改版下线。
    */
   private async syncOneAccount(
@@ -490,34 +512,31 @@ export class DashboardRepository {
         }
       } catch (e) {
         const msg = `工作区解析失败: ${(e as Error).message}`
-        await this.syncDao.updateSyncStateAndTotals(accountId, 'error', msg, 0)
+        await this.finishSync(accountId, 'error', msg, 0)
         this.updateProgress((p) => { p.phase = 'error'; p.message = msg })
         return { ok: false, error: (e as Error).message, inserted: 0, pages: 0, partial: false, failedPages: 0 }
       }
 
       let totalInserted = 0
-      // 页数上限对齐桌面 (_max_pages_for: full 1000 / incremental 10; 此前 2000/5 漂移)
-      const maxPages = mode === 'full' ? 1000 : 10
+      // 页数预算: full 与 incremental 同为 1000。此前增量只有 10 页 (1000 条),
+      // 休眠几天后追平缺口时会在预算处静默截断, 游标却照旧前移 -> 缺口永久漏掉。
+      // 增量的自然停止点是 since 边界/游标耗尽, 页数上限只防病态数据。
+      const maxPages = SyncPaging.maxPagesFor(mode)
       let page = 0
       let cursor: string | null = null
       let emptyPages = 0
+      // 连续「整页无记录」计数: 防御「游标还在但服务端持续返回空页」把 1000 页预算跑满
+      let emptyRecordPages = 0
       let failedPages = 0
       let windowBoundaryReached = false
+      let exhausted = false
+      let reachedSince = false
 
       // 增量同步: 只取最新记录之后的一段时间 (重叠 1 小时防边界漏记),
       // 命中不到旧数据就不会去翻历史页, 既快又少请求
       let sinceMs: number | null = null
       if (mode !== 'full') {
-        const newest = (await this.syncDao.getSyncStateFor(accountId)).newestRecordAt
-        if (newest !== null && newest.length > 0) {
-          const stamp = Date.parse(newest)
-          if (!Number.isNaN(stamp)) {
-            const overlap = stamp - 3600 * 1000
-            if (overlap > 0) {
-              sinceMs = overlap
-            }
-          }
-        }
+        sinceMs = SyncPaging.sinceMsFromNewest((await this.syncDao.getSyncStateFor(accountId)).newestRecordAt)
       }
 
       while (page < maxPages) {
@@ -530,7 +549,7 @@ export class DashboardRepository {
           // (深页偶尔慢/连接被重置; 桌面同语义, 无游标重试路径)
           if (page === 0) {
             const msg = `[${name}] ${(e as Error).message}`
-            await this.syncDao.updateSyncStateAndTotals(accountId, 'error', msg, 0)
+            await this.finishSync(accountId, 'error', msg, 0)
             this.updateProgress((p) => { p.phase = 'error'; p.message = msg })
             return { ok: false, error: (e as Error).message, inserted: 0, pages: 0, partial: false, failedPages: 0 }
           }
@@ -540,46 +559,64 @@ export class DashboardRepository {
         page += 1
         const records = usagePage.records
         let inserted = 0
+        let pageOldestIso: string | null = null
         if (records.length > 0) {
+          emptyRecordPages = 0
+          pageOldestIso = SyncPaging.oldestIso(records.map((r: UsageRecord): string => r.createdAt))
           // 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 -> 该页保留后停止
-          if (mode === 'full' && windowDays !== null) {
-            let earliest = ''
-            for (const r of records) {
-              if (earliest.length === 0 || r.createdAt < earliest) {
-                earliest = r.createdAt
-              }
-            }
-            if (earliest.length > 0) {
-              const et = Date.parse(earliest)
-              const boundary = Date.now() - windowDays * 24 * 3600 * 1000
-              if (!Number.isNaN(et) && et < boundary) {
-                windowBoundaryReached = true
-              }
-            }
+          if (mode === 'full' && SyncPaging.beforeWindowBoundary(pageOldestIso, Date.now(), windowDays)) {
+            windowBoundaryReached = true
           }
           const syncedAt = new Date().toISOString()
           const entities: UsageRecordEntity[] = records.map((r) => toEntity(r, syncedAt, accountId))
           inserted = await this.usageDao.insertUsageRecords(entities, accountId)
           totalInserted += inserted
           this.updateProgress((p) => { p.inserted = totalInserted })
-        }
-        // 增量停止判定: 连续两批 0 新增 (空页同计) 即追平 (desktop _incremental_done parity)
-        if (mode === 'incremental' && inserted === 0) {
-          emptyPages += 1
-          if (emptyPages >= 2) {
+        } else {
+          // 整页无记录 (游标却还在): 连续两批视为服务端数据到底 (desktop empty_record_pages
+          // parity)。先于游标/边界判定 —— 避免 since 已知时异常持续空页把预算跑满。
+          emptyRecordPages += 1
+          if (emptyRecordPages >= 2) {
+            exhausted = true
             break
           }
-        } else {
-          emptyPages = 0
         }
         cursor = usagePage.nextCursor
+        // 停止规则按序判定 (desktop _sync_one_account parity):
+        // 0) 连续两页整页空 = 数据到底 (上方已处理);
+        // 1) 游标耗尽 = 真正到底; 2) 全量撞窗口边界; 3) 增量已翻到 since 边界;
+        // 4) 增量 since 未知时回退「连续两批 0 新增即追平」; 5) 否则继续翻。
         if (cursor === null) {
+          exhausted = true
           break // 已到最早一条
         }
         if (windowBoundaryReached) {
           break
         }
+        if (mode !== 'full') {
+          if (sinceMs !== null) {
+            // since 已知: 只有翻到 since 边界才算追平。中间命中已入库旧数据
+            // (inserted == 0) 绝对不能停 —— 那会停在已知数据段, 越不过本地缺口
+            // (本次「自动同步漏数据」的直接放大器)。
+            if (SyncPaging.reachedSince(SyncPaging.isoToMs(pageOldestIso), sinceMs)) {
+              reachedSince = true
+              break
+            }
+          } else if (inserted === 0) {
+            emptyPages += 1
+            if (emptyPages >= 2) {
+              exhausted = true // since 未知的类全量回退: 两批空 = 追平
+              break
+            }
+          } else {
+            emptyPages = 0
+          }
+        }
       }
+
+      // 页数上限截断: 循环因 maxPages 退出, 而游标未耗尽/未达 since 边界/未撞窗口边界。
+      // 此前不看退出原因, 截断后照样写 ok 并推进游标 -> 缺口从此只能手动全量补回。
+      const truncated = SyncPaging.isTruncated(page, maxPages, exhausted, windowBoundaryReached, reachedSince)
 
       // 同步只按范围取数, 不裁剪本地存量: window_days 是取数范围, 不是保留期
       // (desktop 6995669 同语义: 过期数据由设置页「按同步范围清理」显式删除)
@@ -599,15 +636,29 @@ export class DashboardRepository {
       }
 
       if (failedPages > 0) {
-        const msg = '完成, 但翻页中断 (数据不完整, 可再次全量同步补全)'
-        await this.syncDao.updateSyncStateAndTotals(accountId, 'partial', msg, totalInserted)
+        const msg = '完成, 但翻页中断 (数据不完整, 下次同步自动继续补拉; 如持续出现可手动全量同步)'
+        await this.finishSync(accountId, 'partial', msg, totalInserted)
         return { ok: true, error: null, inserted: totalInserted, pages: page, partial: true, failedPages: failedPages }
       }
-      await this.syncDao.updateSyncStateAndTotals(accountId, 'ok', null, totalInserted)
+      if (truncated) {
+        // 截断绝不写 ok: 明确告知数据不完整, 下轮增量会继续补拉
+        const msg = '达到单轮翻页上限 (数据不完整, 下次同步继续补拉; 如持续出现可手动全量同步)'
+        await this.finishSync(accountId, 'partial', msg, totalInserted)
+        return { ok: true, error: null, inserted: totalInserted, pages: page, partial: true, failedPages: 0 }
+      }
+      await this.finishSync(accountId, 'ok', null, totalInserted)
+      if (mode === 'full') {
+        // 只有全量「成功」才记录校准时间: 截断/失败不记录, 下轮仍判 due 并自动重试
+        try {
+          await AppDb.settingsDao().markFullSyncDone(accountId)
+        } catch (e) {
+          // 标记失败不影响同步结果: 下轮判 due 会再跑一次 full (幂等)
+        }
+      }
       return { ok: true, error: null, inserted: totalInserted, pages: page, partial: false, failedPages: 0 }
     } catch (e) {
       const errMsg = (e as Error).message !== undefined ? (e as Error).message : '同步失败'
-      await this.syncDao.updateSyncStateAndTotals(accountId, 'error', errMsg, 0)
+      await this.finishSync(accountId, 'error', errMsg, 0)
       return { ok: false, error: errMsg, inserted: 0, pages: 0, partial: false, failedPages: 0 }
     }
   }

@@ -12,7 +12,7 @@
 | 鸿蒙 NEXT | `harmonyos/` | ArkTS + ArkUI（Stage 模型） | `cd harmonyos && ./scripts/build.sh {test,hap,app}` |
 
 - Python 测试：`.venv/bin/python -m pytest -q`（当前全绿）。
-- 鸿蒙单测：`./scripts/build.sh test`（当前 **35/35**）。
+- 鸿蒙单测：`./scripts/build.sh test`（当前 **42/42**，含同步引擎用例）。
 - 鸿蒙 debug HAP：`./scripts/build.sh hap` → `harmonyos/entry/build/default/outputs/default/entry-default-unsigned.hap`。
 - 鸿蒙 Release App Pack：`./scripts/build.sh app` → `harmonyos/build/outputs/default/harmonyos-default-{signed|unsigned}.app`。
 - ⚠️ `assembleApp` 会把同路径 debug HAP 覆盖成 release 版；之后需重新 `./scripts/build.sh hap`。
@@ -87,3 +87,19 @@
     `setApplicationIconImage` 的 Dock 图标不会被系统自动遮罩，必须直接给这张网格图，否则显示为硬边正方形。
   - 运行时切换边界：macOS 可换 Dock 图标、Windows 可换任务栏图标（`.app`/`.exe` 安装包图标构建时固定蓝）；
     Android 用 activity-alias 真正切换启动器图标；HarmonyOS 无启动器图标切换 API（固定蓝 H），只切应用内 Logo。
+
+## 5. 同步引擎不变量（三端同构，改动必须三端同改）
+
+- 增量游标是 `usage_sync_state.newest_record_at`（下一轮 `since = newest - 1h` 重叠窗口）。
+  **只有完整收尾（ok）才允许前移**；partial/error 一律 `advance_cursor=False`（保留旧游标，旧值为
+  NULL 时才回填），否则下一轮 since 会越过未拉全的缺口，缺口只能手动全量同步补回。
+- 增量停止点：游标耗尽 / since 边界（本页最早记录 ≤ since）/ full 窗口边界 / 页数预算耗尽。
+  **since 已知时禁用「连续两批 0 新增即停」**（会停在已知数据段、越不过缺口）；页数预算耗尽必须
+  收尾为 partial（三端文案逐字一致：`达到单轮翻页上限 (数据不完整, 下次同步继续补拉; …)`），
+  不得静默写 ok。页数预算增量/全量同为 1000 页。
+- 每账号每 7 天自动全量校准：settings payload 键 `last_full_sync_at:<aid>`，仅「full 且 ok」时写入；
+  自愈旧版本遗留缺口、服务端迟到记录、失败页残留。不新增数据库列/迁移（三端 payload JSON 同键）。
+- 桌面端启动时若上次同步已过期会立即补一轮（`server.startup_sync_needed`）；是否升级为全量校准由
+  `sync_usage` 的 per-account due 判定决定。
+- 回归用例：桌面 `tests/test_sync_gap_repair.py`；Android `SyncPagingTest` / `FullSyncCadenceTest`；
+  HarmonyOS `GgTest.ets` 的 `SyncPagingTest`。改动同步引擎后三端都要跑对应测试。

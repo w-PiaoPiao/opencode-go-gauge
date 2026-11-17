@@ -1763,14 +1763,14 @@ def delete_account(account_id: int) -> int:
 
 
 def _drop_account_period_keys(account_id: int) -> None:
-    """清掉账号的周期/月度重置键 (凭证重置/登出/删号后, 键已失效或无主)."""
+    """清掉账号的周期/月度重置/全量校准键 (凭证重置/登出/删号后, 键已失效或无主)."""
     conn = get_db()
     with _payload_lock:
         data = _raw_payload(conn)
         orphan_keys = [
             k for k in data
             if k in (f"period_start:{account_id}", f"period_end:{account_id}",
-                     f"monthly_reset:{account_id}")
+                     f"monthly_reset:{account_id}", f"last_full_sync_at:{account_id}")
         ]
         if orphan_keys:
             for k in orphan_keys:
@@ -2172,7 +2172,17 @@ def update_sync_state(
     error: Optional[str] = None,
     inserted: int = 0,
     account_id: Optional[int] = None,
+    *,
+    advance_cursor: bool = True,
 ) -> None:
+    """写同步状态 + 刷新该账号的 total/oldest/newest 聚合.
+
+    ``advance_cursor=False``: 本轮数据**不完整** (截断/翻页中断/报错) 时必须用它.
+    ``newest_record_at`` 是增量同步的游标 (下一轮 ``since = newest - 1h``): 数据不完整
+    却把游标前移到"已拉到的最新一条", 下一轮就会越过尚未拉取的旧端缺口, 缺口从此
+    只能手动全量同步补回 —— 这是"自动同步漏数据"的根因之一。保留旧游标后, 下一轮
+    从同一窗口继续补拉, 直到完整收尾 (ok) 才前移。
+    """
     aid = _resolve_account_id(account_id)
     if not aid:
         return
@@ -2188,21 +2198,98 @@ def update_sync_state(
            WHERE account_id = ?""",
         (_now_iso(), status, error, int(inserted or 0), aid),
     )
-    _refresh_sync_totals(conn, aid)
+    _refresh_sync_totals(conn, aid, advance_cursor=advance_cursor)
     conn.commit()
 
 
-def _refresh_sync_totals(conn: sqlite3.Connection, account_id: int) -> None:
+def _refresh_sync_totals(
+    conn: sqlite3.Connection, account_id: int, *, advance_cursor: bool = True
+) -> None:
     row = conn.execute(
         "SELECT COUNT(*) AS total, MIN(created_at) AS oldest, MAX(created_at) AS newest"
         " FROM usage_records WHERE account_id = ?",
         (account_id,),
     ).fetchone()
+    if advance_cursor:
+        conn.execute(
+            "UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?,"
+            " newest_record_at = ? WHERE account_id = ?",
+            (row["total"], row["oldest"], row["newest"], account_id),
+        )
+        return
+    # 不完整的一轮: total/oldest 照常刷新 (统计口径), 但游标保留旧值;
+    # 旧值为 NULL (新账号首次同步就失败) 时仍写入, 否则会退回"无游标=类全量"路径.
     conn.execute(
-        "UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?, newest_record_at = ?"
-        " WHERE account_id = ?",
+        "UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?,"
+        " newest_record_at = COALESCE(newest_record_at, ?) WHERE account_id = ?",
         (row["total"], row["oldest"], row["newest"], account_id),
     )
+
+
+# ---------------------------------------------------------------------------
+# 自动全量校准 (last_full_sync_at)
+#
+# 明细接口只保留 30 天, 且增量同步的 since 窗口会随游标前移: 历史缺口 / 服务端迟到
+# (回填时间戳) 的记录 / 翻页失败残留, 增量都无法自愈。策略: 每个账号距上次**成功的
+# 全量同步**超过 AUTO_FULL_SYNC_DAYS 天时, 本轮增量轮询自动改用 full 模式重扫一遍,
+# 修掉存量缺口。状态存在 settings payload (JSON) 里, 三端同一键, 不需要数据库迁移。
+# ---------------------------------------------------------------------------
+
+FULL_SYNC_MAX_AGE_DAYS = 7
+
+
+def _full_sync_key(account_id: int) -> str:
+    return f"last_full_sync_at:{int(account_id)}"
+
+
+def get_last_full_sync_at(account_id: Optional[int] = None) -> Optional[str]:
+    """读取账号上次**成功**全量同步时刻 (ISO-8601 UTC); 从未全量返回 None."""
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return None
+    raw = _raw_payload(get_db()).get(_full_sync_key(aid))
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def mark_full_sync_done(account_id: Optional[int] = None) -> None:
+    """记录账号刚完成一次成功的全量同步 (供 full_sync_due 节流)."""
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return
+    conn = get_db()
+    with _payload_lock:
+        data = _raw_payload(conn)
+        data[_full_sync_key(aid)] = _now_iso()
+        _write_payload(conn, data)
+        conn.commit()
+
+
+def full_sync_due(
+    account_id: Optional[int] = None, max_age_days: int = FULL_SYNC_MAX_AGE_DAYS
+) -> bool:
+    """该账号是否需要一轮自动全量校准 (从未全量 / 超过 max_age_days / 时间戳坏).
+
+    时间戳解析失败按"需要校准"处理: 宁可多扫一轮, 也不能让缺口长期滞留。
+    """
+    aid = _resolve_account_id(account_id)
+    if not aid:
+        return False
+    last = get_last_full_sync_at(aid)
+    if not last:
+        return True
+    try:
+        stamp = datetime.fromisoformat(last.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return True
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    try:
+        days = max(1, int(max_age_days))
+    except (TypeError, ValueError):
+        days = FULL_SYNC_MAX_AGE_DAYS
+    return datetime.now(timezone.utc) - stamp > timedelta(days=days)
 
 
 # ---------------------------------------------------------------------------

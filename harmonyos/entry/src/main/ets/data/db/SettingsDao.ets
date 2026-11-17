@@ -8,6 +8,7 @@
 import { AppDb } from './AppDb'
 import { RowReader } from './RowReader'
 import { AppSettings, defaultSettings } from '../../common/model/Models'
+import { SyncPaging } from '../../common/util/SyncPaging'
 
 export interface PayloadData {
   syncIntervalSec: number
@@ -232,13 +233,56 @@ export class SettingsDao {
   }
 
   /**
+   * settings payload 键: 账号上次全量同步成功时间 (ISO-8601 UTC)。
+   * 与 monthly_reset 一样放整包 JSON, 不新增数据库列/迁移。
+   */
+  private static lastFullSyncKey(accountId: number): string {
+    return `last_full_sync_at:${accountId}`
+  }
+
+  /** 上次全量同步成功时间; 键缺失/坏值返回 null。 */
+  async getLastFullSyncAt(accountId: number): Promise<string | null> {
+    const obj = SettingsDao.parsePayload(await this.rawPayload())
+    const v: Object | null | undefined = obj[SettingsDao.lastFullSyncKey(accountId)]
+    return typeof v === 'string' && v.length > 0 ? v : null
+  }
+
+  /** 全量同步成功 (ok) 后记录时间 —— 下一轮增量据此判断是否需要自动全量校准。 */
+  async markFullSyncDone(accountId: number): Promise<void> {
+    const key = SettingsDao.lastFullSyncKey(accountId)
+    const nowIso = new Date().toISOString()
+    await this.enqueueWrite(async () => {
+      const raw = await this.rawPayload()
+      const parsed = SettingsDao.parsePayload(raw)
+      const current = SettingsDao.decode(raw)
+      const extra: Record<string, Object | null> = {}
+      extra[key] = nowIso
+      const payload = SettingsDao.buildPayload(
+        parsed, null, current.keyNames, current.activeAccountId, extra)
+      await this.writePayload(payload)
+    })
+  }
+
+  /**
+   * 是否需要对该账号自动跑一次全量同步 (历史缺口自愈兜底):
+   * 键缺失 / 解析失败 / 距上次全量成功超过 days 天 → true。
+   * 判定本身是纯函数 (SyncPaging.fullSyncDueAt), 便于单测。
+   */
+  async fullSyncDue(accountId: number, days: number = SyncPaging.AUTO_FULL_SYNC_DAYS): Promise<boolean> {
+    const last = await this.getLastFullSyncAt(accountId)
+    return SyncPaging.fullSyncDueAt(last, Date.now(), days)
+  }
+
+  /**
    * 清理某账号遗留的周期/月度重置键 (账号删除时调用)。
    *
    * desktop db.delete_account 会显式清掉 period_start/period_end/monthly_reset
    * 这些无主键; 此前 HarmonyOS 删除账号后这些键会永远留在 settings payload 里。
+   * last_full_sync_at 同样按账号归属: 删号/登出后必须清掉, 否则同 id 复用时
+   * 会被旧的全量时间误判为「无需校准」。
    */
   async dropAccountKeys(accountId: number): Promise<void> {
-    const suffixes: string[] = ['period_start', 'period_end', 'monthly_reset']
+    const suffixes: string[] = ['period_start', 'period_end', 'monthly_reset', 'last_full_sync_at']
     await this.enqueueWrite(async () => {
       const raw = await this.rawPayload()
       const parsed = SettingsDao.parsePayload(raw)

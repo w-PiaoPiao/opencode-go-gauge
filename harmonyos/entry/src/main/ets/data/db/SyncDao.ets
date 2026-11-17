@@ -389,21 +389,41 @@ export class SyncDao {
     return out
   }
 
-  /** 持久化同步结果并刷新 totals —— db.update_sync_state + _refresh_sync_totals。 */
-  async updateSyncStateAndTotals(accountId: number, status: string, error: string | null, inserted: number): Promise<void> {
+  /**
+   * 持久化同步结果并刷新 totals —— db.update_sync_state + _refresh_sync_totals。
+   *
+   * advanceNewest=false 用于 partial/error 收尾: total_records/oldest 照常刷新,
+   * 但 newest_record_at (增量 since 的唯一来源) 保留旧游标; 旧值为 NULL 时才写入
+   * 本次算出的值 (保证新账号能拿到游标)。数据不完整时推进游标 = 宣布缺口已补,
+   * 下一轮 since 会越过缺口, 从此只能手动全量同步才补得回来。
+   */
+  async updateSyncStateAndTotals(
+    accountId: number, status: string, error: string | null, inserted: number, advanceNewest: boolean = true,
+  ): Promise<void> {
     await this.ensureStateRow(accountId)
     await this.bumpSyncState(accountId, status, error, inserted, new Date().toISOString())
-    await this.refreshSyncTotals(accountId)
+    await this.refreshSyncTotals(accountId, advanceNewest)
   }
 
   /**
    * 只刷新账号的 total_records/oldest/newest, 不碰 last_sync_at/status 等字段
    * (desktop _refresh_sync_totals parity; 「按同步范围清理」删数据后调用)。
+   *
+   * advanceNewest=false: newest_record_at 用 COALESCE 保留旧值 (仅 NULL 时回填)。
    */
-  async refreshSyncTotals(accountId: number): Promise<void> {
+  async refreshSyncTotals(accountId: number, advanceNewest: boolean = true): Promise<void> {
     const b = await this.recordBounds(accountId)
+    if (advanceNewest) {
+      await AppDb.store().executeSql(
+        'UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?, newest_record_at = ? WHERE account_id = ?',
+        [b[0].toString(), b[1], b[2], accountId.toString()],
+      )
+      return
+    }
     await AppDb.store().executeSql(
-      'UPDATE usage_sync_state SET total_records = ?, oldest_record_at = ?, newest_record_at = ? WHERE account_id = ?',
+      `UPDATE usage_sync_state
+       SET total_records = ?, oldest_record_at = ?, newest_record_at = COALESCE(newest_record_at, ?)
+       WHERE account_id = ?`,
       [b[0].toString(), b[1], b[2], accountId.toString()],
     )
   }
