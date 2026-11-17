@@ -38,10 +38,15 @@ from .opencode_api import (
 PAGE_SIZE = 50  # commandcode 明细单页条数
 QUOTA_CACHE_TTL = 30.0
 PAGE_LIMIT = 100  # opencode /request-logs 单页条数上限
-INCREMENTAL_PAGES = 10  # 增量同步最多翻页数 (10*100=1000 条)
+# 增量/全量同步的翻页预算。增量的**自然停止点**是 since 边界或游标耗尽, 页数上限只防
+# 病态服务端 —— 旧值 10 页 (1000 条) 会在"休眠几天后追平缺口"时静默截断: 剩下的旧端
+# 缺口因游标已前移而永远不会被增量补上, 只能手动全量同步 (用户实测丢数据的根因)。
+INCREMENTAL_PAGES = 1000
 MAX_FULL_PAGES = 1000  # 全量同步翻页上限, 防失控 (服务端仅保留 30 天明细)
 PAGE_RETRIES = 2  # 单页失败重试次数 (深页偶尔慢/连接被重置)
 INCREMENTAL_OVERLAP_MS = 3600_000  # 增量同步回溯 1 小时, 防边界漏记
+# 每账号自动全量校准周期: 旧版本遗留的缺口 / 服务端迟到记录 / 失败页残留, 靠它兜底自愈。
+AUTO_FULL_SYNC_DAYS = 7
 KEY_NAMES_REFRESH_SEC = 24 * 3600  # key 名称缓存刷新周期 (变化极少, 无需每轮同步都拉)
 _key_names_fetched_at: dict[int, float] = {}  # {account_id: 上次成功拉取时刻}
 
@@ -537,14 +542,42 @@ def _window_boundary_hit(records: Any, mode: str, window_days: Optional[int]) ->
 
 
 def _incremental_done(inserted: int, empty_batches: int, mode: str) -> tuple[bool, int]:
-    """增量模式的停止判定: 连续两批 0 新增 (全是旧数据) 即认为已追平.
+    """增量模式「两批 0 新增即追平」判定 —— **仅用于 since 未知的回退路径**
+    (账号还没有游标) 与 commandcode 分支.
 
-    Returns: (是否停止, 更新后的 empty_batches 计数)
+    since 已知时不能再用这条: 本地数据中间若存在缺口, 翻到已知数据段就会连出两批
+    0 新增而提前停, 越不过缺口 —— 正是本次"自动同步漏数据"的直接放大器。已知 since
+    时改为翻到 since 边界为止 (`_oldest_record_ms` <= since)。
     """
     if mode == "incremental" and inserted == 0:
         empty_batches += 1
         return empty_batches >= 2, empty_batches
     return False, 0
+
+
+def _oldest_record_ms(records: Any) -> Optional[int]:
+    """本页最早记录的毫秒时间戳 (解析失败/空页返回 None)."""
+    oldest = ""
+    for r in records:
+        created = getattr(r, "created_at", "") or ""
+        if created and (not oldest or created < oldest):
+            oldest = created
+    if not oldest:
+        return None
+    stamp = iso_to_ms(oldest)
+    return stamp if stamp > 0 else None
+
+
+def _reached_since_boundary(records: Any, since_ms: Optional[int]) -> bool:
+    """增量窗口是否已从最新记录连续翻到 since 边界 (本页最早记录已不晚于 since).
+
+    这是增量同步的正确停止点: 只要还没越过 since, 中间哪怕命中已入库的旧数据
+    (inserted==0) 也必须继续翻 —— 否则本地缺口永远补不上。
+    """
+    if since_ms is None or since_ms <= 0:
+        return False
+    oldest_ms = _oldest_record_ms(records)
+    return oldest_ms is not None and oldest_ms <= since_ms
 
 
 def _finish_sync(
@@ -555,27 +588,48 @@ def _finish_sync(
     failed_pages: int = 0,
     charts_ok: bool = True,
     retention_days: Optional[int] = None,
+    truncated: bool = False,
+    full_mode: bool = False,
 ) -> dict[str, Any]:
     """两种 provider 共用的收尾: 按失败维度写状态并构造返回体.
 
     统一 partial 语义 (此前 opencode 报 partial, commandcode 分支另有措辞,
     且失败信息不一致), 保证前端看到同一种状态形状. retention_days 是
     opencode 控制台接口上报的明细保留天数 (commandcode 无此概念, 传 None).
+
+    ``truncated``: 本轮因**页数预算耗尽**提前结束 (游标未到底/未到 since 边界),
+    数据不完整. 必须记 partial 而不是 ok —— 旧实现把它当成功, 而收尾会刷新游标,
+    下一轮 since 直接越过未拉的区域, 缺口只能手动全量同步才补得回来.
+
+    数据不完整的收尾 (failed_pages/truncated) 一律 ``advance_cursor=False``:
+    保留旧游标, 下一轮从同一窗口继续补拉, 直到补齐后再由 ok 收尾前移游标.
     """
     # 本节已写入 usage 明细/聚合 (含按窗口裁剪): 聚合缓存必须失效, 否则同步
-    # 完成后 dashboard 仍是同步前的旧数. 三种收尾 (ok/partial/failed_pages) 都要失效,
+    # 完成后 dashboard 仍是同步前的旧数. 所有收尾 (ok/partial/失败) 都要失效,
     # 所以放在最前面按账号 bump 一次.
     bump_data_generation(account_id)
     if failed_pages:
-        msg = "完成, 但翻页中断 (数据不完整, 可再次全量同步补全)"
-        db.update_sync_state("partial", msg, total_inserted, account_id)
+        msg = "完成, 但翻页中断 (数据不完整, 下次同步自动继续补拉; 如持续出现可手动全量同步)"
+        db.update_sync_state("partial", msg, total_inserted, account_id,
+                             advance_cursor=False)
         return {"ok": True, "partial": True, "failed_pages": failed_pages,
+                "message": msg, "inserted": total_inserted, "pages": pages}
+    if truncated:
+        msg = "达到单轮翻页上限 (数据不完整, 下次同步继续补拉; 如持续出现可手动全量同步)"
+        db.update_sync_state("partial", msg, total_inserted, account_id,
+                             advance_cursor=False)
+        return {"ok": True, "partial": True, "truncated": True, "message": msg,
                 "inserted": total_inserted, "pages": pages}
     if not charts_ok:
+        # 明细已完整, 只是聚合快照缺失: 游标照常推进 (游标语义只约束明细).
         msg = "完成, 但聚合数据拉取失败 (统计暂缺全周期数据, 下次同步自动重试)"
         db.update_sync_state("partial", msg, total_inserted, account_id)
-        return {"ok": True, "partial": True, "inserted": total_inserted, "pages": pages}
+        return {"ok": True, "partial": True, "message": msg,
+                "inserted": total_inserted, "pages": pages}
     db.update_sync_state("ok", None, total_inserted, account_id)
+    if full_mode:
+        # 全量跑完 (含历史缺口修复) 才算一次"校准完成", 供 AUTO_FULL_SYNC_DAYS 节流
+        db.mark_full_sync_done(account_id)
     return {"ok": True, "inserted": total_inserted, "pages": pages,
             "retention_days": retention_days}
 
@@ -607,7 +661,7 @@ def _sync_one_account(
                 db.save_resolved_workspace(resolved, account_id)
         except (AuthError, OpenCodeAPIError) as exc:
             _set_phase("error", f"[{name}] 工作区解析失败: {exc}")
-            db.update_sync_state("error", str(exc), 0, account_id)
+            db.update_sync_state("error", str(exc), 0, account_id, advance_cursor=False)
             return {"ok": False, "error": str(exc)}
 
         total_inserted = 0
@@ -615,9 +669,12 @@ def _sync_one_account(
         page = 0
         cursor: Optional[str] = None
         empty_pages = 0
+        empty_record_pages = 0
         failed_pages = 0
         page_retries = 0
         window_boundary_reached = False
+        reached_since = False
+        exhausted = False
         retention_days: Optional[int] = None
 
         # 增量同步: 只取最新记录之后的一段时间 (重叠 1 小时防边界漏记),
@@ -639,13 +696,15 @@ def _sync_one_account(
                 )
             except AuthError as exc:
                 _set_phase("error", f"[{name}] {exc}")
-                db.update_sync_state("error", str(exc), total_inserted, account_id)
+                db.update_sync_state("error", str(exc), total_inserted, account_id,
+                                     advance_cursor=False)
                 return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
             except OpenCodeAPIError as exc:
                 # 首页即失败 -> 整体报错; 翻页中途失败 -> 同一游标重试, 仍失败则保留已入库数据
                 if page == 0:
                     _set_phase("error", f"[{name}] {exc}")
-                    db.update_sync_state("error", str(exc), 0, account_id)
+                    db.update_sync_state("error", str(exc), 0, account_id,
+                                         advance_cursor=False)
                     return {"ok": False, "error": str(exc)}
                 if page_retries < PAGE_RETRIES:
                     page_retries += 1
@@ -662,26 +721,57 @@ def _sync_one_account(
 
             inserted = 0
             if records:
+                empty_record_pages = 0
                 # 同步范围: 全量拉取时, 若本页最早记录早于窗口边界 -> 该页保留后停止
                 # (与 commandcode 分支共用同一判定, 此前这里内联了一份等价逻辑)
                 if _window_boundary_hit(records, mode, window_days):
                     window_boundary_reached = True
+                # 增量正确停止点: 已从最新连续翻到 since 边界 (本页最早记录 <= since).
+                # 在此之前, 即使本页全是已入库记录 (inserted==0) 也必须继续翻 ——
+                # 本地中间的缺口正是靠这段连续翻页补上的.
+                if mode != "full" and _reached_since_boundary(records, since_ms):
+                    reached_since = True
                 inserted = db.insert_usage_records(
                     [r.to_db_dict() for r in records], account_id
                 )
                 total_inserted += inserted
                 with _sync_lock:
                     _sync_state["inserted"] = total_inserted
-            # 增量停止判定与 commandcode 同一实现: 连续两批 0 新增 (空页同计) 即追平
-            stop, empty_pages = _incremental_done(inserted, empty_pages, mode)
+            else:
+                # 一页记录都没有: 连续两批视为服务端数据到底 (防御「有游标却持续空页」)
+                empty_record_pages += 1
+                if empty_record_pages >= 2:
+                    exhausted = True
+                    break
+            # 「连续两批 0 新增」兜底只在 since 未知 (账号还没有游标) 时使用;
+            # since 已知时它会被「已知数据段」提前触发, 越过缺口后游标前移 ——
+            # 这正是自动增量同步漏数据的放大器, 必须让位给 since 边界判定.
+            if mode == "incremental" and since_ms is None:
+                stop, empty_pages = _incremental_done(inserted, empty_pages, mode)
+            else:
+                stop = False
 
             cursor = usage_page.next_cursor
             if not cursor:
+                exhausted = True
                 break  # 已到最早一条
             if window_boundary_reached:
                 break
-            if stop:
+            if reached_since:
                 break
+            if stop:
+                exhausted = True
+                break
+
+        # 因页数预算耗尽提前结束 (游标没到底 / 没到窗口或 since 边界) = 本轮数据不完整.
+        # 旧实现静默写 ok 并前移游标, 缺口从此只能手动全量同步补回 —— 必须显式 partial,
+        # 且收尾不推进游标, 让下一轮从同一窗口继续补拉.
+        truncated = (
+            page >= max_pages
+            and not exhausted
+            and not window_boundary_reached
+            and not reached_since
+        )
 
         # 同步只按范围取数, 不裁剪本地存量: window_days 是取数范围, 不是保留期.
         # 过期数据只能由设置页「按同步范围清理」显式删除 (删除不可恢复).
@@ -702,9 +792,10 @@ def _sync_one_account(
                 pass
 
         return _finish_sync(account_id, total_inserted, page,
-                            failed_pages=failed_pages, retention_days=retention_days)
+                            failed_pages=failed_pages, retention_days=retention_days,
+                            truncated=truncated, full_mode=(mode == "full"))
     except Exception as exc:  # noqa: BLE001
-        db.update_sync_state("error", str(exc), 0, account_id)
+        db.update_sync_state("error", str(exc), 0, account_id, advance_cursor=False)
         return {"ok": False, "error": str(exc)}
 
 
@@ -718,6 +809,7 @@ def _sync_one_cc_account(
     empty_batches = 0
     failed_pages = 0
     window_boundary_reached = False
+    exhausted = False
 
     max_pages = _max_pages_for(mode)
     try:
@@ -729,11 +821,13 @@ def _sync_one_cc_account(
             except (CCAuthError, CommandCodeAPIError) as exc:
                 if mode == "incremental":
                     _set_phase("error", f"[{name}] 第 {pages + 1} 页拉取失败: {exc}")
-                    db.update_sync_state("error", str(exc), total_inserted, account_id)
+                    db.update_sync_state("error", str(exc), total_inserted, account_id,
+                                         advance_cursor=False)
                     return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
                 failed_pages += 1
                 break
             if not records:
+                exhausted = True
                 break  # 没有更多数据
 
             if _window_boundary_hit(records, mode, window_days):
@@ -751,11 +845,16 @@ def _sync_one_cc_account(
                 break
             # 游标翻页: 无 next_cursor 即到底
             if not next_cursor:
+                exhausted = True
                 break
             stop, empty_batches = _incremental_done(inserted, empty_batches, mode)
             if stop:
+                exhausted = True
                 break
             cursor = next_cursor
+
+        # 页数预算耗尽且游标没到底/没到窗口边界 = 本轮明细不完整 (同 opencode 分支)
+        truncated = pages >= max_pages and not exhausted and not window_boundary_reached
 
         # 同步只按范围取数, 不裁剪本地存量 (同 opencode 分支)
 
@@ -774,9 +873,11 @@ def _sync_one_cc_account(
         return _finish_sync(
             account_id, total_inserted, pages,
             failed_pages=failed_pages, charts_ok=charts_ok,
+            truncated=truncated, full_mode=(mode == "full"),
         )
     except Exception as exc:  # noqa: BLE001
-        db.update_sync_state("error", str(exc), total_inserted, account_id)
+        db.update_sync_state("error", str(exc), total_inserted, account_id,
+                             advance_cursor=False)
         return {"ok": False, "error": str(exc), "partial_inserted": total_inserted}
 
 
@@ -813,17 +914,30 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
         total_inserted = 0
         errors: list[str] = []
         partial = False
+        partial_messages: list[str] = []
         pages = 0
+        calibrated = 0
         # 单账号失败不中断整轮同步: 此前 incremental 直接 return, 导致首个
         # token 过期的账号会永久阻塞其后所有账号的自动同步 (定时器每轮撞同一处).
         for aid, name in targets:
-            result = _sync_one_account(aid, name, mode, window_days)
+            # 自动全量校准: 该账号距上次成功全量已超过 AUTO_FULL_SYNC_DAYS (或从未全量)
+            # 时, 本轮用 full 模式重扫 —— 修掉旧版本遗留的缺口、服务端迟到记录与失败页
+            # 残留。只在 incremental 轮询里做: 用户手动点「全量同步」语义不变。
+            run_mode = mode
+            if mode == "incremental" and db.full_sync_due(aid, AUTO_FULL_SYNC_DAYS):
+                run_mode = "full"
+                calibrated += 1
+                _set_phase("usage", f"[{name}] 自动全量校准中…")
+            result = _sync_one_account(aid, name, run_mode, window_days)
             total_inserted += int(result.get("inserted") or 0)
             pages += int(result.get("pages") or 0)
             if not result.get("ok"):
                 errors.append(f"[{name}] {result.get('error') or '同步失败'}")
             if result.get("partial"):
                 partial = True
+                detail = str(result.get("message") or "").strip()
+                if detail:
+                    partial_messages.append(f"[{name}] {detail}")
 
         any_error = "; ".join(errors)
         # 全部账号都失败才算整轮失败; 任一成功即为 partial (前端展示警告但不报错)
@@ -834,7 +948,13 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
             bump_data_generation()
             return {"ok": False, "error": any_error, "partial_inserted": total_inserted}
         if partial or errors:
-            msg = "部分账号同步异常" if errors else "完成, 但部分页面拉取失败"
+            if errors:
+                msg = "部分账号同步异常"
+            elif partial_messages:
+                # 透出具体原因 (翻页上限/聚合失败), 前端 partial toast 与错误条都能看到
+                msg = partial_messages[0]
+            else:
+                msg = "完成, 但部分页面拉取失败"
             # phase=partial 而不是 done: 前端据此在同步结束的 toast 里给出警告,
             # 与成功一视同仁会继续"看起来什么都没发生" (旧版正是这样静默的).
             _set_phase("partial", msg)
@@ -844,7 +964,10 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
                 "ok": True, "partial": True, "inserted": total_inserted,
                 "pages": pages, "errors": errors,
             }
-        _set_phase("done", f"同步完成, 新增 {total_inserted} 条")
+        done_msg = f"同步完成, 新增 {total_inserted} 条"
+        if calibrated:
+            done_msg += f" (含 {calibrated} 个账号自动全量校准)"
+        _set_phase("done", done_msg)
         return {"ok": True, "inserted": total_inserted, "pages": pages}
     except Exception as exc:  # noqa: BLE001
         _set_phase("error", str(exc))
@@ -858,6 +981,37 @@ def sync_usage(mode: str = "incremental") -> dict[str, Any]:
         bump_data_generation()
         with _sync_lock:
             _sync_state["running"] = False
+
+
+def startup_sync_needed() -> bool:
+    """启动时是否应立即补一轮同步 (上次同步已过期 / 从未同步 / 上次失败).
+
+    自动同步的周期驱动来自前端的 WebView setInterval: 应用关窗、隐藏到托盘或机器
+    休眠期间定时器不跑, 重开后要等一个间隔才补数据 —— 而"长时间没跑"正是缺口
+    最大的时候。启动即补一轮能显著缩短这段窗口; 是否进一步升级为全量校准由
+    ``sync_usage`` 里的 per-account due 策略决定。
+    """
+    if not db.get_token():
+        return False
+    settings = db.get_settings()
+    if settings.get("auto_sync") is False:
+        return False
+    aid = db.get_active_account_id()
+    if not aid:
+        return False
+    state = db.get_sync_state(aid) or {}
+    last = state.get("last_sync_at")
+    if not last:
+        return True
+    stamp = iso_to_ms(str(last))
+    if stamp <= 0:
+        return True
+    try:
+        interval = int(settings.get("sync_interval_sec") or 300)
+    except (TypeError, ValueError):
+        interval = 300
+    # 至少 60s 才补: 刚同步完立刻重开窗口时不再打一次多余请求
+    return (time.time() * 1000 - stamp) > max(60, interval) * 1000
 
 
 def sync_all_async(mode: str) -> None:

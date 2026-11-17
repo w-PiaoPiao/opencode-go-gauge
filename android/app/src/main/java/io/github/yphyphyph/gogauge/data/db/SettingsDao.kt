@@ -229,6 +229,71 @@ abstract class SettingsDao {
             savePayload(merged.toString(), java.time.Instant.now().toString())
         }
     }
+
+    // ------------------------------------------------------------------
+    // 自动全量校准 (sync-fix 设计规范 §1 E)
+    //
+    // settings payload 键 `last_full_sync_at:<account_id>` (ISO-8601 UTC): 增量轮次里
+    // 距上次成功全量超过 AUTO_FULL_SYNC_DAYS 的账号改跑 full, 用定期全量兜底自愈
+    // 旧版本遗留的缺口/失败页残留。放 JSON payload 而非 Room 列 —— 不新增表/列,
+    // 避免数据库迁移 (§1 G)。
+    // ------------------------------------------------------------------
+
+    /** 读取账号上次全量同步**成功**时刻 (ISO-8601 UTC); 键缺失返回 null。 */
+    suspend fun getLastFullSyncAt(accountId: Int): String? {
+        val raw = payload() ?: return null
+        return try {
+            json.parseToJsonElement(raw).jsonObject["last_full_sync_at:$accountId"]
+                ?.let { (it as? JsonPrimitive)?.content }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 记录该账号一次全量同步成功 (ok) 的完成时刻。 */
+    suspend fun markFullSyncDone(accountId: Int) {
+        savePayloadKey("last_full_sync_at:$accountId", java.time.Instant.now().toString())
+    }
+
+    /**
+     * 该账号本轮是否该跑自动全量校准: 键缺失 / 解析失败 / 距上次成功全量
+     * ≥ [days] 天 → true。判定逻辑在纯函数 [FullSyncCadence.isDue], JVM 单测覆盖。
+     */
+    suspend fun fullSyncDue(
+        accountId: Int,
+        days: Int = FullSyncCadence.AUTO_FULL_SYNC_DAYS,
+    ): Boolean = FullSyncCadence.isDue(getLastFullSyncAt(accountId), System.currentTimeMillis(), days)
+}
+
+/**
+ * 自动全量校准到期判定 — 纯函数 (JVM 单测覆盖, 见 FullSyncCadenceTest)。
+ *
+ * 与 desktop `db.full_sync_due` (`now - last > timedelta(days)`) /
+ * HarmonyOS `SyncPaging.fullSyncDueAt` (`last < now - days`) 同语义
+ * (sync-fix 设计规范 §1 E):
+ * - 键缺失 (账号从未成功全量, 含新账号) → true;
+ * - 时间串无法解析 (脏数据/旧格式) → true (宁可多跑一次全量, 不可漏校准);
+ * - 距上次成功全量**超过** [AUTO_FULL_SYNC_DAYS] 天 (严格早于 now-days) → true;
+ *   恰好 days 天仍视为新鲜 (与两端边界口径一致)。
+ */
+object FullSyncCadence {
+
+    /** 自动全量校准周期 (天) — 三端同值 (desktop AUTO_FULL_SYNC_DAYS)。 */
+    const val AUTO_FULL_SYNC_DAYS = 7
+
+    private const val DAY_MS = 24L * 3600L * 1000L
+
+    /**
+     * @param lastFullSyncAt 上次全量成功时刻 (ISO-8601 UTC, 可带偏移); null/空白 = 从未全量
+     * @param nowMs 当前毫秒时间戳 (显式传入便于测试)
+     * @param days 校准周期天数 (<=0 时恒到期)
+     */
+    fun isDue(lastFullSyncAt: String?, nowMs: Long, days: Int = AUTO_FULL_SYNC_DAYS): Boolean {
+        if (days <= 0) return true
+        if (lastFullSyncAt.isNullOrBlank()) return true
+        val last = parseIsoInstant(lastFullSyncAt) ?: return true
+        return last.toEpochMilli() < nowMs - days.toLong() * DAY_MS
+    }
 }
 
 /**

@@ -1697,9 +1697,15 @@ def main() -> None:
     api.set_login_callback(open_login)
     server.set_login_callback(open_login)  # /api/relogin 兼容 (浏览器环境/兜底)
 
-    # 首次启动未登录: 主窗口欢迎页; 已登录但数据库为空: 自动全量同步
-    if db.get_token() and not db.get_sync_state().get("total_records"):
-        server.sync_all_async("full")
+    # 首次启动未登录: 主窗口欢迎页; 已登录但数据库为空: 自动全量同步.
+    # 已登录且已有数据: 上次同步早已过期时立即补一轮 —— 自动同步的周期驱动在前端
+    # WebView 定时器上, 关窗/休眠期间不跑, 启动即补能显著缩小"落后几天"的窗口
+    # (长时间没跑正是缺口最大的时候; 需要时会由 sync_usage 升级为全量校准).
+    if db.get_token():
+        if not db.get_sync_state().get("total_records"):
+            server.sync_all_async("full")
+        elif server.startup_sync_needed():
+            server.sync_all_async("incremental")
 
     def on_window_closed() -> None:
         w = watcher.get("ref")

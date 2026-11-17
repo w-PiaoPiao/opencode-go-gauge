@@ -6,12 +6,14 @@ import { describe, it, expect } from '@ohos/hypium'
 import { QuotaParser } from '../main/ets/data/remote/QuotaParser'
 import { UsageParser } from '../main/ets/data/remote/UsageParser'
 import { Fmt } from '../main/ets/common/util/Fmt'
+import { SyncPaging } from '../main/ets/common/util/SyncPaging'
 import { SyncDao } from '../main/ets/data/db/SyncDao'
 import { Login } from '../main/ets/common/auth/Login'
 import { UpdateApi } from '../main/ets/data/remote/UpdateApi'
 import { OpenCodeApi } from '../main/ets/data/remote/OpenCodeApi'
 
 const NOW_MS = 1752000000000
+const DAY_MS = 24 * 3600 * 1000
 
 // ArkTS 禁止无类型对象字面量, fixture 一律拼 JSON 文本 (与线上响应体同构)
 const GO_STATUS_JSON = '{"access":{"startsAt":"2025-07-08T00:00:00Z","endsAt":"2025-09-01T00:00:00Z",' +
@@ -303,6 +305,89 @@ export default function ggTest() {
     it('rejects_malformed_versions', 0, () => {
       expect(UpdateApi.parseVersion('not-a-version') === null).assertTrue()
       expect(UpdateApi.parseVersion('v2.1-harmony') === null).assertTrue()
+    })
+  })
+
+  /**
+   * 同步翻页/游标判定 —— 回归「休眠后追平缺口被 10 页上限静默截断,
+   * 游标照旧前移导致缺口只能手动全量补回」的故障 (sync-fix 规范 §1 A~E)。
+   */
+  describe('SyncPagingTest', () => {
+    it('incremental_shares_full_1000_page_budget', 0, () => {
+      // 增量预算 10 页 (1000 条) 会在休眠后缺口较大时被静默截断, 必须与全量同值;
+      // 自然停止点是 since 边界/游标耗尽, 页数上限只防病态
+      expect(SyncPaging.maxPagesFor('incremental')).assertEqual(1000)
+      expect(SyncPaging.maxPagesFor('full')).assertEqual(1000)
+      // 自动全量校准周期 (天)
+      expect(SyncPaging.AUTO_FULL_SYNC_DAYS).assertEqual(7)
+    })
+
+    it('since_known_stops_only_at_since_boundary', 0, () => {
+      const since = 1000000
+      // 本页最早记录早于/恰好等于 since -> 窗口已连续拉全, 可以停
+      expect(SyncPaging.reachedSince(900000, since)).assertTrue()
+      expect(SyncPaging.reachedSince(since, since)).assertTrue()
+      // 本页最早记录仍晚于 since -> 中间还有缺口, 即使 inserted==0 也必须继续翻
+      expect(SyncPaging.reachedSince(since + 1, since)).assertFalse()
+      // 空页/时间解析失败不能当追平; since 未知时不适用该规则
+      expect(SyncPaging.reachedSince(null, since)).assertFalse()
+      expect(SyncPaging.reachedSince(500, null)).assertFalse()
+    })
+
+    it('truncated_only_when_budget_ended_without_natural_stop', 0, () => {
+      // 预算耗尽且游标未耗尽/未达 since 边界/未撞窗口边界 -> 截断 (必须 partial)
+      expect(SyncPaging.isTruncated(1000, 1000, false, false, false)).assertTrue()
+      expect(SyncPaging.isTruncated(1000, 1000, true, false, false)).assertFalse() // 游标耗尽
+      expect(SyncPaging.isTruncated(1000, 1000, false, true, false)).assertFalse() // 窗口边界
+      expect(SyncPaging.isTruncated(1000, 1000, false, false, true)).assertFalse() // since 边界
+      expect(SyncPaging.isTruncated(12, 1000, false, false, false)).assertFalse() // 未到预算
+    })
+
+    it('cursor_advances_only_on_ok', 0, () => {
+      // partial/error 收尾不推进 newest_record_at, 否则下一轮 since 越过缺口
+      expect(SyncPaging.advancesCursor('ok')).assertTrue()
+      expect(SyncPaging.advancesCursor('partial')).assertFalse()
+      expect(SyncPaging.advancesCursor('error')).assertFalse()
+    })
+
+    it('full_sync_due_for_missing_fresh_stale_and_bad_value', 0, () => {
+      const now = Date.parse('2026-11-17T12:00:00.000Z')
+      // 键缺失/空串/坏值 -> 需要全量校准
+      expect(SyncPaging.fullSyncDueAt(null, now, 7)).assertTrue()
+      expect(SyncPaging.fullSyncDueAt('', now, 7)).assertTrue()
+      expect(SyncPaging.fullSyncDueAt('not-a-date', now, 7)).assertTrue()
+      // 7 天内全量成功过 -> 不需要
+      expect(SyncPaging.fullSyncDueAt(new Date(now - 6 * DAY_MS).toISOString(), now, 7)).assertFalse()
+      expect(SyncPaging.fullSyncDueAt(new Date(now - 1 * DAY_MS).toISOString(), now, 7)).assertFalse()
+      // 恰好 7 天按规范不算「早于」; 超过 7 天 -> 需要
+      expect(SyncPaging.fullSyncDueAt(new Date(now - 7 * DAY_MS).toISOString(), now, 7)).assertFalse()
+      expect(SyncPaging.fullSyncDueAt(new Date(now - 7 * DAY_MS - 1).toISOString(), now, 7)).assertTrue()
+      expect(SyncPaging.fullSyncDueAt(new Date(now - 8 * DAY_MS).toISOString(), now, 7)).assertTrue()
+      // 时钟偏快 (记录时间在未来) 不算过期, 避免每轮都误跑全量
+      expect(SyncPaging.fullSyncDueAt(new Date(now + DAY_MS).toISOString(), now, 7)).assertFalse()
+    })
+
+    it('since_start_uses_one_hour_overlap', 0, () => {
+      const newest = '2026-11-17T10:00:00.000Z'
+      const stamp = Date.parse(newest)
+      expect(SyncPaging.sinceMsFromNewest(newest)).assertEqual(stamp - 3600 * 1000)
+      // 游标缺失/坏值 -> null, 回退「类全量」两批空停
+      expect(SyncPaging.sinceMsFromNewest(null) === null).assertTrue()
+      expect(SyncPaging.sinceMsFromNewest('bad') === null).assertTrue()
+      // 不足 1 小时 -> 起点非正, 同样回退
+      expect(SyncPaging.sinceMsFromNewest(new Date(10 * 60 * 1000).toISOString()) === null).assertTrue()
+    })
+
+    it('oldest_iso_and_full_window_boundary', 0, () => {
+      expect(SyncPaging.oldestIso([]) === null).assertTrue()
+      // 空串忽略, 取字典序最早 (ISO 串可直接比较)
+      expect(SyncPaging.oldestIso(['2026-11-17T10:00:00.000Z', '', '2026-11-16T10:00:00.000Z']))
+        .assertEqual('2026-11-16T10:00:00.000Z')
+      const now = Date.parse('2026-11-17T12:00:00.000Z')
+      expect(SyncPaging.beforeWindowBoundary('2026-11-10T00:00:00.000Z', now, 7)).assertTrue()
+      expect(SyncPaging.beforeWindowBoundary('2026-11-11T00:00:00.000Z', now, 7)).assertFalse()
+      expect(SyncPaging.beforeWindowBoundary('2026-11-10T00:00:00.000Z', now, null)).assertFalse()
+      expect(SyncPaging.beforeWindowBoundary(null, now, 7)).assertFalse()
     })
   })
 }

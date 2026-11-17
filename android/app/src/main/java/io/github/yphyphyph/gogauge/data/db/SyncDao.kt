@@ -288,6 +288,9 @@ abstract class SyncDao {
             data.remove("period_start:$accountId")
             data.remove("period_end:$accountId")
             data.remove("monthly_reset:$accountId")
+            // 自动全量校准标记同删: id 复用 (MAX(id)+1) 后新账号不能继承旧账号的
+            // "刚全量过" 状态, 否则 7 天内不会自动全量校准 (sync-fix 规范 §1 E)
+            data.remove("last_full_sync_at:$accountId")
             val active = (data["active_account_id"] as? JsonPrimitive)?.content?.toIntOrNull()
             if (active == accountId) {
                 if (nextId != null) {
@@ -319,6 +322,11 @@ abstract class SyncDao {
         val aid = requireActiveId()  // 事务外: 依赖 PayloadLock 写回活跃位
         if (aid == 0) return
         clearAccountData(aid)
+        // 登出: 本地数据/游标已清空, 自动全量校准标记一并失效 —— 重新登录后
+        // 首次增量轮次应重新跑 full 校准 (sync-fix 设计规范 §1 E)
+        persistPayload { data ->
+            data.remove("last_full_sync_at:$aid")
+        }
     }
 
     @Transaction
@@ -344,6 +352,9 @@ abstract class SyncDao {
             data.remove("period_start:$aid")
             data.remove("period_end:$aid")
             data.remove("monthly_reset:$aid")
+            // 重新登录 = 游标/本地数据重置: 自动全量校准标记同清, 下次增量轮次
+            // 会对该账号先跑一次 full 校准 (sync-fix 设计规范 §1 E)
+            data.remove("last_full_sync_at:$aid")
         }
     }
 
@@ -358,6 +369,9 @@ abstract class SyncDao {
             data.remove("period_start:$aid")
             data.remove("period_end:$aid")
             data.remove("monthly_reset:$aid")
+            // 重新登录 = 游标/本地数据重置: 自动全量校准标记同清, 下次增量轮次
+            // 会对该账号先跑一次 full 校准 (sync-fix 设计规范 §1 E)
+            data.remove("last_full_sync_at:$aid")
         }
     }
 
@@ -418,14 +432,45 @@ abstract class SyncDao {
     )
     abstract suspend fun setSyncTotals(accountId: Int, total: Int, oldest: String?, newest: String?)
 
-    /** Persist sync result and refresh totals — mirrors db.update_sync_state + _refresh_sync_totals (按账号). */
+    /**
+     * totals 刷新但**保留旧 newest 游标** (sync-fix 设计规范 §1 D):
+     * total/oldest 照常刷新, newest 只在旧值为 NULL 时写入本次算出的值
+     * (保证新账号第一轮也能拿到游标), 否则保持旧值不变。
+     *
+     * partial/error 收尾必须用这条: 本轮没拉全时游标若前移, 下一轮 since 会直接
+     * 越过未拉的区域, 缺口从此只能手动全量同步补回 (本次 bug 的根因)。
+     */
+    @Query(
+        "UPDATE usage_sync_state SET total_records = :total, oldest_record_at = :oldest," +
+            " newest_record_at = COALESCE(newest_record_at, :newest) WHERE account_id = :accountId"
+    )
+    abstract suspend fun setSyncTotalsKeepNewest(accountId: Int, total: Int, oldest: String?, newest: String?)
+
+    /**
+     * Persist sync result and refresh totals — mirrors db.update_sync_state +
+     * _refresh_sync_totals (按账号)。
+     *
+     * @param advanceNewest true (ok 收尾) 时 newest_record_at 前移到本轮 MAX(created_at);
+     *   false (partial/error 收尾) 时保留旧游标, 仅旧值为 NULL 时补写
+     *   (见 [setSyncTotalsKeepNewest])。
+     */
     @Transaction
-    open suspend fun updateSyncStateAndTotals(accountId: Int, status: String, error: String?, inserted: Int) {
+    open suspend fun updateSyncStateAndTotals(
+        accountId: Int,
+        status: String,
+        error: String?,
+        inserted: Int,
+        advanceNewest: Boolean = true,
+    ) {
         val now = Instant.now().toString()
         ensureStateRow(accountId)
         bumpSyncState(accountId, status, error, inserted, now)
         val b = recordBoundsRaw(accountId)
-        setSyncTotals(accountId, b.count, b.oldest, b.newest)
+        if (advanceNewest) {
+            setSyncTotals(accountId, b.count, b.oldest, b.newest)
+        } else {
+            setSyncTotalsKeepNewest(accountId, b.count, b.oldest, b.newest)
+        }
     }
 
     suspend fun getSyncState(): SyncState = getSyncStateFor(getActiveAccountId())

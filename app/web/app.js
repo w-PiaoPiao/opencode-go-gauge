@@ -1499,8 +1499,9 @@ async function startSync(mode, opts = {}) {
   try {
     await api("/api/sync?mode=" + mode, { method: "POST" });
   } catch (e) {
-    // 409 = 已有同步在跑 (服务端单飞), 提示后继续轮询; 其它错误 (未登录/本地服务异常) 也提示
-    toast(e.message || t("syncFailed"), "err");
+    // 409 = 已有同步在跑 (服务端单飞). 自动全量校准可能持续数分钟, 自动同步定时器
+    // 每轮都会撞上这扇门 —— 此时不该弹"同步失败", 静默继续轮询即可.
+    if (e && e.status !== 409) toast(e.message || t("syncFailed"), "err");
   }
   pollUntilIdle();
 }
@@ -1511,6 +1512,9 @@ function pollUntilIdle() {
     try {
       const st = await api("/api/state");
       failures = 0;
+      // 同步中也要把 progress 写回 state.data: 自动同步定时器据此判断"已有同步在跑",
+      // 否则长轮次 (全量校准可达数分钟) 每 5 分钟就会被它再打一次 POST (409).
+      if (state.data) state.data.progress = st.progress;
       renderSyncBanner(st.progress);
       renderSettingsSyncProgress(st.progress);
       if (!st.progress.running) {
