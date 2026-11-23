@@ -166,3 +166,27 @@ job 级日志用 `gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs`（run 
    GitHub 取消（cancelled ≠ 测试失败）。因此：release 的 arm64 构建固定 `macos-15`，
    ci 的 macOS 测试拆成独立 job 且只在 PR / 手动触发时执行，push 门禁由
    ubuntu + windows + Android JVM 单测承担。
+
+8. **macOS arm64 runner 容量不足会让整个 release 卡死**（2026-11-23 v2.2.2e 实测）。
+   `macos-15` 的 arm64 job 连续 3 次排队 15–20 分钟仍拿不到 runner，被 GitHub 判
+   cancelled（job 无任何步骤日志，提示 "The job was not acquired by Runner of type
+   hosted even after multiple attempts"）；`publish` 因 `needs` 未满足被跳过，而
+   Windows / x86_64 两个 job 其实都已构建成功。处理方式：
+
+   - 优先等 arm64 拿到 runner 后 **Re-run failed jobs**（同一个 run 里已成功的平台
+     产物会被复用，不会重跑 Windows / x86_64，也不用重新排队）；
+   - 若长时间拿不到，用 `.github/workflows/release-recover.yml`（Actions →
+     `release-recover` → Run workflow，填 tag 与失败 run id）先用已构建好的
+     Windows / x86_64 产物创建 release，再本机构建 arm64 补传并重算 `SHA256SUMS.txt`：
+
+     ```bash
+     python scripts/build.py --platform macos          # 本机须为 Apple Silicon
+     ditto -c -k --keepParent dist/GoGauge.app GoGauge-v<版本>-macos-arm64.zip
+     gh release upload v<版本> GoGauge-v<版本>-macos-arm64.zip -R w-PiaoPiao/opencode-go-gauge
+     # 再上传含 arm64 的 SHA256SUMS.txt（--clobber）
+     ```
+
+   > 本机依赖版本必须与 `requirements-macos.lock.txt` 一致，否则补传的 arm64 包与
+   > CI 产物行为不一致。另：无代理环境下本机 `gh run download` 取 artifacts 极慢
+   > （Azure Blob 下行约 20 KB/s），让 GitHub runner 内部下载再把产物上传到
+   > release 才是可行路径。
