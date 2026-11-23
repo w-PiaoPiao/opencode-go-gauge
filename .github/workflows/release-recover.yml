@@ -1,0 +1,73 @@
+# 发布补发 workflow: 统一 release 的 macOS arm64 构建 job 因 GitHub 托管 runner 容量
+# 不足被取消（"The job was not acquired by Runner ... even after multiple attempts"）
+# 时，publish job 会被跳过、release 发不出来。本 workflow 用**已构建成功**的
+# Windows / macOS x86_64 产物创建 release，arm64 资产由维护者本地构建后
+# `gh release upload` 补传并重算 SHA256SUMS。
+#
+# 典型流程（见 docs/release.md「发布链路的已知陷阱」）:
+#   1. 失败的 release run 里 Windows / x86_64 job 已 success，只有 arm64 被取消；
+#   2. Actions → release-recover → Run workflow，填 tag 与该 run id；
+#   3. 本地构建 arm64 后上传，更新 SHA256SUMS。
+#
+# 注意: 本 workflow 只读取 source_run 的 artifacts（同仓库），不会重新构建桌面端。
+name: release-recover
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要补发的 release tag（必须与桌面 __version__ 一致，如 v2.2.2e）"
+        required: true
+      source_run:
+        description: "已构建出 Windows / macOS x86_64 产物的 release run id"
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Verify tag matches versions
+        run: python3 scripts/check_versions.py --tag "${{ inputs.tag }}" --platform all
+
+      - name: Download built artifacts from source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh run download "${{ inputs.source_run }}" -n GoGauge-windows-exe -D artifacts/windows
+          gh run download "${{ inputs.source_run }}" -n GoGauge-macos-x86_64 -D artifacts/macos-x86_64
+          ls -lhR artifacts
+
+      - name: Create or update release with available desktop assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          mkdir -p dist
+          mv artifacts/windows/GoGauge.exe "dist/GoGauge-v${VER}-windows.exe"
+          mv artifacts/macos-x86_64/GoGauge-x86_64.zip "dist/GoGauge-v${VER}-macos-x86_64.zip"
+          ( cd dist && sha256sum * > SHA256SUMS.txt )
+          ls -lh dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "GoGauge $TAG" --generate-notes
+          fi
+
+      - name: Print checksums (arm64 由维护者本地补传后需合并)
+        run: cat dist/SHA256SUMS.txt
