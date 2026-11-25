@@ -34,3 +34,7 @@ htmlcov/
 # 系统
 Thumbs.db
 .DS_Store
+android/debug.keystore
+# AI 协作记忆/内部评审不入库
+.workbuddy/
+docs/code-review-*.md
